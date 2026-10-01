@@ -384,5 +384,87 @@ def test_missing_file_raises(tmp_path):
 		BigWig(tmp_path / 'absent.bw')
 
 
+def test_big_endian_machine_raises(dense_bw, monkeypatch):
+	monkeypatch.setattr(figwig.bigwig.sys, 'byteorder', 'big')
+	with pytest.raises(ValueError, match='only on little-endian machines'):
+		BigWig(dense_bw[0])
+
+
+def _two_chrom_bigwig(tmp_path):
+	"""A raw bigWig with one bedGraph block on each of two chromosomes.
+
+	Returns its path, and the offsets of its chromosome tree and data index.
+	The chromosome tree's root, a leaf, starts 32 bytes after the tree, and
+	the data index's root, also a leaf, 48 bytes after the index.
+	"""
+
+	path = tmp_path / 'two.bw'
+	write_raw_bigwig(path, {'chr1': 1000, 'chr2': 1000}, [
+		_bedgraph('chr1', 100, [(0, 10, 1.0)]),
+		_bedgraph('chr2', 100, [(0, 10, 2.0)])])
+
+	with open(path, 'rb') as handle:
+		chrom_tree, _, data_index = struct.unpack('<QQQ', handle.read(64)[8:32])
+	return path, chrom_tree, data_index
+
+
+def _patch(path, offset, fmt, *values):
+	with open(path, 'r+b') as handle:
+		handle.seek(offset)
+		handle.write(struct.pack(fmt, *values))
+
+
+@pytest.mark.parametrize('field, match', [
+	('offset', 'chromosome tree cannot be read'),
+	('magic', 'chromosome tree cannot be read'),
+	('value_size', 'chromosome tree cannot be read'),
+	('cycle', 'chromosome tree has a cycle'),
+])
+def test_bad_chromosome_tree_raises(tmp_path, field, match):
+	path, chrom_tree, _ = _two_chrom_bigwig(tmp_path)
+	if field == 'offset':
+		_patch(path, 8, '<Q', path.stat().st_size + 100)
+	elif field == 'magic':
+		_patch(path, chrom_tree, '<I', 0)
+	elif field == 'value_size':
+		_patch(path, chrom_tree + 12, '<I', 4)
+	else:
+		# The root becomes a non-leaf node whose one child is itself. The key
+		# size is 4, so the child's offset follows a 4-byte key.
+		_patch(path, chrom_tree + 32, '<BBH', 0, 0, 1)
+		_patch(path, chrom_tree + 40, '<Q', chrom_tree + 32)
+
+	with pytest.raises(ValueError, match=match):
+		BigWig(path)
+
+
+@pytest.mark.parametrize('field, match', [
+	('offset', 'data index of .* cannot be read: unpack'),
+	('magic', r'data index of .* cannot be read\.$'),
+	('cycle', 'data index of .* cannot be read: it has a cycle'),
+	('count', 'data index of .* cannot be read: the file ends inside it'),
+	('two_chroms', 'a data block spans two chromosomes'),
+])
+def test_bad_data_index_raises(tmp_path, field, match):
+	path, _, data_index = _two_chrom_bigwig(tmp_path)
+	root = data_index + 48
+	if field == 'offset':
+		_patch(path, 24, '<Q', path.stat().st_size + 100)
+	elif field == 'magic':
+		_patch(path, data_index, '<I', 0)
+	elif field == 'cycle':
+		# A non-leaf entry is 16 bytes of range, then its child's offset.
+		_patch(path, root, '<BBH', 0, 0, 1)
+		_patch(path, root + 4 + 16, '<Q', root)
+	elif field == 'count':
+		_patch(path, root + 2, '<H', 65535)
+	else:
+		_patch(path, root + 4 + 8, '<I', 1)
+
+	bw = BigWig(path)
+	with pytest.raises(ValueError, match=match):
+		bw.read('chr1', [0], 10)
+
+
 def test_version():
 	assert re.fullmatch(r'\d+\.\d+\.\d+', figwig.__version__)
