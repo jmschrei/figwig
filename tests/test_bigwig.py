@@ -383,8 +383,63 @@ def test_unsorted_index_raises(tmp_path):
 	write_raw_bigwig(path, {'chr1': 10_000}, [_bedgraph('chr1', 5000, [(0, 5, 1.0)]),
 		_bedgraph('chr1', 100, [(0, 5, 2.0)])])
 
-	with pytest.raises(ValueError, match='unsorted or overlap'):
+	with pytest.raises(ValueError, match='its data blocks are unsorted'):
 		BigWig(path).read('chr1', [0], 10)
+
+
+def _fixedstep_block(chrom_id, start, values, end):
+	"""A compressed block of one fixedStep section, with step and span 1,
+	whose section header says it ends at `end`."""
+
+	header = struct.pack('<IIIIIBBH', chrom_id, start, end, 1, 1, 3, 0,
+		len(values))
+	return zlib.compress(header + struct.pack('<{}f'.format(len(values)),
+		*values))
+
+
+def test_overlapping_index_entries(tmp_path):
+	"""pyBigWig writes some fixedStep blocks with an index entry that ends 6
+	bases past the block's last interval, so neighbouring entries can overlap
+	even though no two intervals do. Such files were refused as having
+	overlapping data blocks.
+	"""
+
+	rng = numpy.random.default_rng(8)
+	sections, start = [], 100
+	for _ in range(20):
+		n = int(rng.integers(20, 60))
+		values = rng.normal(size=n).astype(numpy.float32).tolist()
+		sections.append(('chr1', start, start + n + 6, _fixedstep_block(0,
+			start, values, start + n + 6)))
+		start += n + int(rng.integers(1, 5))
+
+	path = str(tmp_path / 'overlap.bw')
+	write_raw_bigwig(path, {'chr1': 5000}, sections)
+
+	starts = numpy.arange(0, start + 10, 7)
+	X = BigWig(path).read('chr1', starts, 50)
+	assert_identical(X, reference(path, 'chr1', starts, 50))
+	assert (X != 0).mean() > 0.5
+
+
+def test_intervals_overlapping_across_blocks_raise(tmp_path):
+	"""Intervals in two blocks that overlap give a base two values, as two
+	overlapping intervals in one block do, so a window over both raises."""
+
+	path = str(tmp_path / 'across.bw')
+	write_raw_bigwig(path, {'chr1': 10_000}, [
+		_bedgraph('chr1', 100, [(0, 10, 1.0)]),
+		_bedgraph('chr1', 1000, [(0, 20, 2.0)]),
+		_bedgraph('chr1', 1015, [(0, 10, 3.0)]),
+		_bedgraph('chr1', 3000, [(0, 10, 4.0)])])
+
+	bw = BigWig(path)
+	X = bw.read('chr1', [95, 1005, 2995], 10)
+	numpy.testing.assert_array_equal(X[:, 5:], [[1.0] * 5, [2.0] * 5, [4.0] * 5])
+
+	with pytest.raises(ValueError, match='1 windows overlap data blocks that '
+			'figwig cannot read.*chr1:1010-1020'):
+		bw.read('chr1', [95, 1010, 2995], 10)
 
 
 @pytest.mark.parametrize('header, match', [

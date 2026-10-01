@@ -70,13 +70,13 @@ class BigWig:
 
 		- a file that is not a little-endian bigWig, such as a bigBed or a
 		  big-endian bigWig;
-		- a data index whose entries are unsorted, overlap, or span two
-		  chromosomes;
+		- a data index whose entries are unsorted or span two chromosomes;
 		- a window on a chromosome the file does not have, or one that starts
 		  before 0 or ends past 2**32 - 1;
 		- a window overlapping a data block that cannot be decompressed, that
 		  holds a section of another type, or whose intervals are unsorted,
-		  overlap each other, or lie outside the block's index entry.
+		  overlap each other or those of a neighbouring block, or lie outside
+		  the block's index entry.
 		  Overlapping intervals give a base two values, and readers disagree
 		  on which to report: pybigtools sums them.
 
@@ -177,9 +177,14 @@ class BigWig:
 
 		Each entry of the R-tree's leaves gives a block's range, from
 		(chromosome, start) to (chromosome, end), and its offset and size in
-		the file. The entries must be sorted, non-overlapping and each on one
-		chromosome, so that the blocks overlapping a window can be found by
-		binary search.
+		the file. Each entry must be on one chromosome, and both the starts
+		and the ends of the entries must be sorted, so that the blocks
+		overlapping a window can be found by binary search.
+
+		Neighbouring entries may overlap. pyBigWig writes some fixedStep
+		blocks whose entry ends a few bases past the block's last interval,
+		into the next block's range, though no two intervals overlap.
+		`_read_windows` checks the intervals themselves.
 		"""
 
 		error = "The data index of {} cannot be read".format(self.path)
@@ -222,8 +227,9 @@ class BigWig:
 
 		if (leaves['end_chrom'] != leaves['start_chrom']).any():
 			raise ValueError(error + ": a data block spans two chromosomes.")
-		if (ends < starts).any() or (starts[1:] < ends[:-1]).any():
-			raise ValueError(error + ": its data blocks are unsorted or overlap.")
+		if (ends < starts).any() or (starts[1:] < starts[:-1]).any() or \
+				(ends[1:] < ends[:-1]).any():
+			raise ValueError(error + ": its data blocks are unsorted.")
 
 		return {'starts': starts, 'ends': ends, 'chroms': chroms,
 			'bases': numpy.stack([leaves['start'], leaves['end']], axis=1).astype(
@@ -343,8 +349,9 @@ class BigWig:
 
 		order = numpy.lexsort((starts, ids))
 
-		# The blocks [lo, hi) overlap a window. The index entries are sorted
-		# and do not overlap, so both their starts and their ends are sorted.
+		# The blocks [lo, hi) overlap a window: those that end after it starts
+		# and start before it ends. The starts and the ends of the index
+		# entries are each sorted, so both bounds are binary searches.
 		keys = (ids[order] << 32) | starts[order]
 		lo = numpy.searchsorted(index['ends'], keys, side='right')
 		hi = numpy.searchsorted(index['starts'], keys + width, side='left')

@@ -122,13 +122,19 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 	inside the entry's range [base_start, base_end). Overlapping items have
 	no single value per base, and readers disagree on them: pybigtools sums
 	them.
+
+	Returns whether the block passes, the start of its first item and the
+	end of its last, which `_read_windows` uses to check that items in
+	neighbouring blocks do not overlap either. A block without items gives
+	the largest int64 as its first start and `base_start` as its last end.
 	"""
 
 	offset = begin
 	previous_end = base_start
+	first_start = numpy.iinfo(numpy.int64).max
 	while offset < end:
 		if offset + 6 > end or words[offset] != chrom:
-			return False
+			return False, first_start, previous_end
 
 		section_start = numpy.int64(words[offset + 1])
 		step = numpy.int64(words[offset + 3])
@@ -143,12 +149,12 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 		elif kind == 3:
 			size = 1
 		else:
-			return False
+			return False, first_start, previous_end
 
 		item = offset + 6
 		next_offset = item + count * size
 		if next_offset > end:
-			return False
+			return False, first_start, previous_end
 
 		for i in range(count):
 			if kind == 1:
@@ -162,16 +168,17 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 				item_end = item_start + span
 
 			if item_start < previous_end or item_end < item_start:
-				return False
+				return False, first_start, previous_end
 
+			first_start = min(first_start, item_start)
 			previous_end = item_end
 
 		if previous_end > base_end:
-			return False
+			return False, first_start, previous_end
 
 		offset = next_offset
 
-	return True
+	return True, first_start, previous_end
 
 
 @numba.njit(nogil=True, cache=True)
@@ -187,28 +194,37 @@ def _read_windows(words, blocks, windows, out, signal, failed):
 
 	Each base of a window is given the value of the item that covers it, 0
 	when no item does and NaN past the end of the chromosome. Items with a
-	NaN value are skipped, so their bases are 0. A window with a block that
-	fails `_check_block` is not written and is marked in `failed`.
+	NaN value are skipped, so their bases are 0. A window is not written,
+	and is marked in `failed`, when one of its blocks fails `_check_block`
+	or has an item that overlaps an item of an earlier block. A window's
+	blocks are consecutive in the index, so comparing each block's first
+	item with the furthest end of the blocks before it finds every overlap.
 	"""
 
 	values = words.view(numpy.float32)
 	width = out.shape[2]
 	nan = numpy.float32(numpy.nan)
 
-	good = numpy.zeros(blocks.shape[0], dtype=numpy.bool_)
-	for b in range(blocks.shape[0]):
+	n_blocks = blocks.shape[0]
+	good = numpy.zeros(n_blocks, dtype=numpy.bool_)
+	first = numpy.zeros(n_blocks, dtype=numpy.int64)
+	last = numpy.zeros(n_blocks, dtype=numpy.int64)
+	for b in range(n_blocks):
 		if blocks[b, 5] != 0:
-			good[b] = _check_block(words, blocks[b, 0], blocks[b, 1],
-				blocks[b, 2], blocks[b, 3], blocks[b, 4])
+			good[b], first[b], last[b] = _check_block(words, blocks[b, 0],
+				blocks[b, 1], blocks[b, 2], blocks[b, 3], blocks[b, 4])
 
 	for j in range(windows.shape[0]):
 		lo, hi = windows[j, 0], windows[j, 1]
 		start, row = windows[j, 2], windows[j, 4]
 
 		usable = True
+		reach = numpy.iinfo(numpy.int64).min
 		for b in range(lo, hi):
-			if not good[b]:
+			if not good[b] or first[b] < reach:
 				usable = False
+
+			reach = max(reach, last[b])
 
 		if not usable:
 			failed[j] = True

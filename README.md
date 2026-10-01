@@ -80,14 +80,14 @@ compressed or not, at base-pair resolution. Everything else raises a
 
 - a file that is not a little-endian bigWig, such as a bigBed or a big-endian
   bigWig;
-- a data index whose entries are unsorted, overlap, or span two chromosomes;
+- a data index whose entries are unsorted or span two chromosomes;
 - a window on a chromosome the file does not have, or one that starts before 0
   or ends past 2**32 - 1;
 - a window overlapping a data block that cannot be decompressed, holds a
   section of another type, or has intervals that are unsorted, overlap each
-  other, or lie outside the block's index entry. Overlapping intervals give a
-  base two values, and readers disagree on which to report: pybigtools sums
-  them.
+  other or those of a neighbouring block, or lie outside the block's index
+  entry. Overlapping intervals give a base two values, and readers disagree
+  on which to report: pybigtools sums them.
 
 A program that has to read such files can catch the error and fall back to
 another reader. figwig does not read bigWigs over HTTP, return binned
