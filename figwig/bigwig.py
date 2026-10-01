@@ -70,6 +70,8 @@ class BigWig:
 
 		- a file that is not a little-endian bigWig, such as a bigBed or a
 		  big-endian bigWig;
+		- a chromosome tree or data index that is corrupt, or cut short by a
+		  truncated file;
 		- a data index whose entries are unsorted or span two chromosomes;
 		- a window on a chromosome the file does not have, or one that starts
 		  before 0 or ends past 2**32 - 1;
@@ -134,34 +136,52 @@ class BigWig:
 	def __repr__(self):
 		return "BigWig('{}', {} chromosomes)".format(self.path, len(self.chroms))
 
-	@staticmethod
-	def _read_chrom_tree(handle, offset):
-		"""The chromosome B+ tree, as {name: (chromosome id, length)}."""
+	def _read_chrom_tree(self, handle, offset):
+		"""The chromosome B+ tree, as {name: (chromosome id, length)}.
+
+		Every node is checked against the length of the file before it is
+		read, so that a corrupt count or key size cannot ask for more bytes
+		than the file holds.
+		"""
+
+		error = "The chromosome tree of {} cannot be read".format(self.path)
+		file_size = os.fstat(handle.fileno()).st_size
+		if offset + 32 > file_size:
+			raise ValueError(error + ".")
 
 		handle.seek(offset)
 		data = handle.read(32)
-		if len(data) < 32:
-			raise ValueError("The chromosome tree cannot be read.")
 
 		magic, _, key_size, value_size, _, _ = struct.unpack('<IIIIQQ', data)
 		if magic != _CHROM_TREE_MAGIC or value_size != 8:
-			raise ValueError("The chromosome tree cannot be read.")
+			raise ValueError(error + ".")
 
 		chroms, nodes, seen = {}, [offset + 32], set()
 		while nodes:
 			node = nodes.pop()
 			if node in seen:
-				raise ValueError("The chromosome tree has a cycle.")
+				raise ValueError(error + ": it has a cycle.")
 
 			seen.add(node)
+			if node + 4 > file_size:
+				raise ValueError(error + ": the file ends inside it.")
+
 			handle.seek(node)
 			is_leaf, _, count = struct.unpack('<BBH', handle.read(4))
+			if node + 4 + count * (key_size + 8) > file_size:
+				raise ValueError(error + ": the file ends inside it.")
+
 			data = handle.read(count * (key_size + 8))
 			children = []
 			for k in range(count):
 				item = data[k * (key_size + 8): (k + 1) * (key_size + 8)]
 				if is_leaf:
-					name = item[:key_size].rstrip(b'\0').decode()
+					try:
+						name = item[:key_size].rstrip(b'\0').decode()
+					except UnicodeDecodeError:
+						raise ValueError(error + ": a chromosome name is not "
+							"UTF-8.") from None
+
 					chroms[name] = struct.unpack('<II', item[key_size:])
 				else:
 					children.append(struct.unpack('<Q', item[key_size:])[0])
@@ -191,6 +211,7 @@ class BigWig:
 		try:
 			with open(self.path, 'rb') as handle:
 				fd = handle.fileno()
+				file_size = os.fstat(fd).st_size
 				magic = struct.unpack('<I', os.pread(fd, 4, self._data_index))[0]
 				if magic != _INDEX_MAGIC:
 					raise ValueError(error + ".")
@@ -220,6 +241,15 @@ class BigWig:
 
 		leaves = numpy.concatenate(leaves) if leaves else numpy.empty(0,
 			dtype=_LEAF_TYPE)
+
+		# Checked before the uint64 offsets and sizes become int64, where 2**63
+		# and more would turn negative.
+		size = numpy.uint64(file_size)
+		if ((leaves['size'] > size) | (leaves['offset'] > size -
+				numpy.minimum(leaves['size'], size))).any():
+			raise ValueError(error + ": a data block lies past the end of the "
+				"file, which may be truncated.")
+
 		chroms = leaves['start_chrom'].astype(numpy.int64)
 		starts = (chroms << 32) | leaves['start'].astype(numpy.int64)
 		ends = (leaves['end_chrom'].astype(numpy.int64) << 32) | \

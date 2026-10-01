@@ -80,6 +80,8 @@ compressed or not, at base-pair resolution. Everything else raises a
 
 - a file that is not a little-endian bigWig, such as a bigBed or a big-endian
   bigWig;
+- a chromosome tree or data index that is corrupt, or cut short by a
+  truncated file;
 - a data index whose entries are unsorted or span two chromosomes;
 - a window on a chromosome the file does not have, or one that starts before 0
   or ends past 2**32 - 1;

@@ -378,6 +378,70 @@ def test_corrupt_block_raises(tmp_path):
 		BigWig(path).read('chr1', [95], 20)
 
 
+def test_corrupt_files_raise_only_value_errors(tmp_path):
+	"""Bytes of three small bigWigs overwritten at random, a few at a time,
+	three times in four inside the header, the chromosome tree or the data
+	index. bigWig has no checksums, so a corrupt value can read without
+	error, but nothing other than a ValueError may escape.
+	"""
+
+	chroms = {'chr1': 20_000, 'chr2': 9_000}
+	sections = []
+	for name, length in chroms.items():
+		for s in range(100, length - 2000, 1500):
+			sections.append(_bedgraph(name, s, [(10 * i, 10 * i + 5, float(i))
+				for i in range(50)]))
+			sections.append((name, 2, 0, 3, [(s + 600 + 7 * i, float(i)) for i
+				in range(40)]))
+			sections.append((name, 3, 4, 2, (s + 1000, [float(i) for i in
+				range(60)])))
+
+	files = []
+	for compress in [True, False]:
+		path = tmp_path / 'raw_{}.bw'.format(compress)
+		write_raw_bigwig(path, chroms, sections, compress=compress)
+		files.append(path.read_bytes())
+
+	path = tmp_path / 'pybigtools.bw'
+	write_bigwig(path, chroms, [(name, s, s + 3, float(s)) for name in chroms
+		for s in range(0, chroms[name] - 5, 7)])
+	files.append(path.read_bytes())
+
+	rng = numpy.random.default_rng(9)
+	names = ['chr1'] * 40 + ['chr2'] * 20
+	starts = list(range(0, 20_000, 500)) + list(range(0, 9_000, 450))
+	path = tmp_path / 'corrupt.bw'
+	outcomes = {'read': 0, 'ValueError': 0}
+	for trial in range(600):
+		data = bytearray(files[trial % 3])
+		chrom_tree, _, data_index = struct.unpack('<QQQ', data[8:32])
+		region = int(rng.choice([0, chrom_tree, data_index, -1]))
+		for _ in range(int(rng.integers(1, 4))):
+			if region == -1:
+				position = int(rng.integers(0, len(data) - 8))
+			else:
+				position = min(region + int(rng.integers(0, 80)), len(data) - 8)
+
+			if rng.random() < 0.5:
+				data[position] = int(rng.integers(256))
+			else:
+				value = int(rng.choice([0, 1, 2 ** 31, 2 ** 32 - 1, 2 ** 63]))
+				data[position:position + 8] = value.to_bytes(8, 'little')
+
+		path.write_bytes(bytes(data))
+		try:
+			bw = BigWig(path)
+			present = [name in bw.chroms for name in names]
+			if any(present):
+				bw.read([n for n, p in zip(names, present) if p], [s for s, p in
+					zip(starts, present) if p], 500, n_jobs=1)
+			outcomes['read'] += 1
+		except ValueError:
+			outcomes['ValueError'] += 1
+
+	assert outcomes['read'] > 50 and outcomes['ValueError'] > 50
+
+
 def test_unsorted_index_raises(tmp_path):
 	path = str(tmp_path / 'index.bw')
 	write_raw_bigwig(path, {'chr1': 10_000}, [_bedgraph('chr1', 5000, [(0, 5, 1.0)]),
@@ -491,10 +555,10 @@ def _patch(path, offset, fmt, *values):
 
 
 @pytest.mark.parametrize('field, match', [
-	('offset', 'chromosome tree cannot be read'),
-	('magic', 'chromosome tree cannot be read'),
-	('value_size', 'chromosome tree cannot be read'),
-	('cycle', 'chromosome tree has a cycle'),
+	('offset', r'chromosome tree of .* cannot be read\.$'),
+	('magic', r'chromosome tree of .* cannot be read\.$'),
+	('value_size', r'chromosome tree of .* cannot be read\.$'),
+	('cycle', 'chromosome tree of .* cannot be read: it has a cycle'),
 ])
 def test_bad_chromosome_tree_raises(tmp_path, field, match):
 	path, chrom_tree, _ = _two_chrom_bigwig(tmp_path)
@@ -540,6 +604,47 @@ def test_bad_data_index_raises(tmp_path, field, match):
 	bw = BigWig(path)
 	with pytest.raises(ValueError, match=match):
 		bw.read('chr1', [0], 10)
+
+
+@pytest.mark.parametrize('field, value', [
+	('size', 2 ** 40),
+	('size', 2 ** 63 + 5),
+	('offset', 2 ** 40),
+	('offset', 2 ** 64 - 1),
+])
+def test_data_index_past_end_of_file_raises(tmp_path, field, value):
+	"""A block size or offset in the data index that points past the end of
+	the file was read as given: a huge size was allocated, raising
+	MemoryError, and an offset of 2**63 or more became negative and raised
+	OSError."""
+
+	path, _, data_index = _two_chrom_bigwig(tmp_path)
+	entry = data_index + 48 + 4
+	_patch(path, entry + (24 if field == 'size' else 16), '<Q', value)
+
+	bw = BigWig(path)
+	with pytest.raises(ValueError, match='data index of .* cannot be read: a '
+			'data block lies past the end of the file'):
+		bw.read('chr1', [95], 10)
+
+
+@pytest.mark.parametrize('field, value', [
+	('key_size', 2 ** 31),
+	('count', 65535),
+])
+def test_chromosome_tree_past_end_of_file_raises(tmp_path, field, value):
+	"""A chromosome tree node longer than the file was read as given: a huge
+	key size was allocated, and a node cut short raised struct.error."""
+
+	path, chrom_tree, _ = _two_chrom_bigwig(tmp_path)
+	if field == 'key_size':
+		_patch(path, chrom_tree + 8, '<I', value)
+	else:
+		_patch(path, chrom_tree + 34, '<H', value)
+
+	with pytest.raises(ValueError, match='chromosome tree of .* cannot be '
+			'read: the file ends inside it'):
+		BigWig(path)
 
 
 def test_version():
