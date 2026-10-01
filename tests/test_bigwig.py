@@ -172,8 +172,38 @@ def test_n_jobs_does_not_change_output(sparse_bw, batching):
 	bw = BigWig(path)
 
 	X = bw.read(names, starts, 500, n_jobs=1)
-	for n_jobs in [2, 3, 8, 16]:
+	for n_jobs in [2, 3, 8, 16, -1]:
 		assert_identical(bw.read(names, starts, 500, n_jobs=n_jobs), X)
+
+
+def test_n_jobs_every_cpu(dense_bw, monkeypatch):
+	"""n_jobs=-1 is every CPU the process may use."""
+
+	sizes = []
+	pool = figwig.bigwig.ThreadPoolExecutor
+
+	def recorder(max_workers):
+		sizes.append(max_workers)
+		return pool(max_workers)
+
+	monkeypatch.setattr(figwig.bigwig, 'ThreadPoolExecutor', recorder)
+	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
+	monkeypatch.setattr(figwig.bigwig, '_cpu_count', lambda: 3)
+	BigWig(dense_bw[0]).read('chr1', numpy.arange(0, 240_000, 1000), 100,
+		n_jobs=-1)
+	assert sizes == [3]
+
+
+def test_cpu_count(monkeypatch):
+	"""The CPUs in the process's affinity mask where the platform has one,
+	as Linux does, and every CPU where it does not, as on macOS and
+	Windows."""
+
+	if hasattr(os, 'sched_getaffinity'):
+		assert figwig.bigwig._cpu_count() == len(os.sched_getaffinity(0))
+		monkeypatch.delattr(os, 'sched_getaffinity')
+
+	assert figwig.bigwig._cpu_count() == os.cpu_count()
 
 
 def test_order_and_repeats(dense_bw, batching):
@@ -248,9 +278,10 @@ def test_width_must_be_an_integer(dense_bw, width):
 		BigWig(dense_bw[0]).read('chr1', [0], width)
 
 
-@pytest.mark.parametrize('n_jobs', [0, -1])
+@pytest.mark.parametrize('n_jobs', [0, -2])
 def test_n_jobs_must_be_positive(dense_bw, n_jobs):
-	with pytest.raises(ValueError, match='n_jobs must be at least 1'):
+	with pytest.raises(ValueError, match=r'n_jobs must be at least 1, or -1 '
+			r'for every CPU\.'):
 		BigWig(dense_bw[0]).read('chr1', [0], 10, n_jobs=n_jobs)
 
 

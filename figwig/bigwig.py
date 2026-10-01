@@ -332,7 +332,8 @@ class BigWig:
 
 		n_jobs: int, optional
 			The largest number of threads to decompress and decode data blocks
-			on. Must be at least 1. Default is 8.
+			on, or -1 for as many as there are CPUs that this process may run
+			on. Default is 8.
 
 		missing: float, optional
 			The value of a base that no interval covers, or that an interval
@@ -350,11 +351,7 @@ class BigWig:
 			end of the chromosome.
 		"""
 
-		if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, numpy.integer)):
-			raise TypeError("n_jobs must be an integer.")
-		if n_jobs < 1:
-			raise ValueError("n_jobs must be at least 1.")
-
+		n_jobs = _check_n_jobs(n_jobs)
 		missing = _check_missing(missing)
 		windows = _Windows(chroms, starts, width)
 		n, width = windows.n, windows.width
@@ -374,7 +371,7 @@ class BigWig:
 		windows.check_range()
 		self._warn_absent(windows, missing, stacklevel=2)
 		_run([_Read(self, windows, out.reshape(n, 1, width), 0, missing)],
-			int(n_jobs))
+			n_jobs)
 		return out
 
 	def _warn_absent(self, windows, missing, stacklevel):
@@ -470,6 +467,28 @@ class BigWig:
 				dtype=numpy.uint8)])
 
 		return words.view(numpy.uint32), blocks
+
+
+def _cpu_count():
+	"""The number of CPUs this process may run on."""
+
+	if hasattr(os, 'sched_getaffinity'):
+		return len(os.sched_getaffinity(0))
+
+	return os.cpu_count() or 1
+
+
+def _check_n_jobs(n_jobs):
+	"""The `n_jobs` argument as a number of threads."""
+
+	if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, numpy.integer)):
+		raise TypeError("n_jobs must be an integer.")
+	if n_jobs == -1:
+		return _cpu_count()
+	if n_jobs < 1:
+		raise ValueError("n_jobs must be at least 1, or -1 for every CPU.")
+
+	return int(n_jobs)
 
 
 def _check_missing(missing):
@@ -702,7 +721,8 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 		None.
 
 	n_jobs: int, optional
-		The largest number of threads to use. Default is 8.
+		The largest number of threads to use, or -1 for one per CPU. Default
+		is 8.
 
 	missing: float, optional
 		The value of a base that no interval covers, and of every base of a
