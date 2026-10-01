@@ -2,7 +2,9 @@
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
 import re
+import copy
 import zlib
+import pickle
 import struct
 import pathlib
 import threading
@@ -32,6 +34,10 @@ def reference(path, chroms, starts, width):
 		bw.values(name, int(start), int(start) + width, arr=scratch)
 		out[j] = scratch
 	return out
+
+
+def pickle_round_trip(obj):
+	return pickle.loads(pickle.dumps(obj))
 
 
 def assert_identical(a, b):
@@ -301,8 +307,30 @@ def test_multi_level_chromosome_tree(tmp_path):
 
 
 ###
-# Threads and the zlib fallback
+# Threads, processes and the zlib fallback
 ###
+
+@pytest.mark.parametrize('duplicate', [pickle_round_trip, copy.deepcopy],
+	ids=['pickle', 'deepcopy'])
+def test_pickle(dense_bw, duplicate):
+	"""A PyTorch DataLoader pickles its dataset into each worker under the
+	spawn and forkserver start methods, and BigWig held a lock that cannot
+	be pickled. Copies are taken before and after the index is read."""
+
+	path, chroms = dense_bw
+	names, starts = random_windows(numpy.random.default_rng(10), chroms, 500,
+		100)
+	bw = BigWig(path)
+	before = duplicate(bw)
+	X = bw.read(names, starts, 100)
+	after = duplicate(bw)
+	assert before._index is None and after._index is not None
+
+	for other in [before, after]:
+		assert other.path == bw.path and other.chroms == bw.chroms
+		assert_identical(other.read(names, starts, 100, n_jobs=3), X)
+		assert other._index_lock is not bw._index_lock
+
 
 def test_concurrent_reads_on_one_object(deep_bw, batching):
 	path, chroms = deep_bw

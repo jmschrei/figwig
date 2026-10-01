@@ -83,7 +83,8 @@ class BigWig:
 		  on which to report: pybigtools sums them.
 
 	A `BigWig` holds no open file between reads, and one object can be read
-	from several Python threads at once.
+	from several Python threads at once. It can be pickled, so it can be
+	part of a PyTorch Dataset read by DataLoader workers.
 
 
 	Parameters
@@ -135,6 +136,18 @@ class BigWig:
 
 	def __repr__(self):
 		return "BigWig('{}', {} chromosomes)".format(self.path, len(self.chroms))
+
+	def __getstate__(self):
+		# The lock cannot be pickled, and a copy needs its own. The index, if
+		# it has been read, goes with the copy, so that a DataLoader worker
+		# that receives one does not read it again.
+		state = self.__dict__.copy()
+		del state['_index_lock']
+		return state
+
+	def __setstate__(self, state):
+		self.__dict__.update(state)
+		self._index_lock = threading.Lock()
 
 	def _read_chrom_tree(self, handle, offset):
 		"""The chromosome B+ tree, as {name: (chromosome id, length)}.
