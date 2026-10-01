@@ -316,8 +316,8 @@ class BigWig:
 			The length of every window, in bases. Must be at least 1.
 
 		out: numpy.ndarray, shape=(n, width), dtype=float32, or None, optional
-			A C-contiguous array to write the values into, which is returned.
-			If None, a new array is returned. Default is None.
+			A writeable, C-contiguous array to write the values into, which is
+			returned. If None, a new array is returned. Default is None.
 
 		n_jobs: int, optional
 			The largest number of threads to decompress and decode data blocks
@@ -364,10 +364,13 @@ class BigWig:
 
 		if out is None:
 			out = numpy.empty((n, width), dtype=numpy.float32)
+		elif not isinstance(out, numpy.ndarray):
+			raise TypeError("out must be a numpy array, not {}.".format(
+				type(out).__name__))
 		elif out.shape != (n, width) or out.dtype != numpy.float32 or \
-				not out.flags['C_CONTIGUOUS']:
-			raise ValueError("out must be a C-contiguous float32 array of shape "
-				"({}, {}).".format(n, width))
+				not out.flags['C_CONTIGUOUS'] or not out.flags['WRITEABLE']:
+			raise ValueError("out must be a writeable, C-contiguous float32 "
+				"array of shape ({}, {}).".format(n, width))
 
 		if n == 0:
 			return out
@@ -553,7 +556,8 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 		The length of every window, in bases.
 
 	out: numpy.ndarray, shape=(n, width), dtype=float32, or None, optional
-		A C-contiguous array to write the values into. Default is None.
+		A writeable, C-contiguous array to write the values into. Default is
+		None.
 
 	n_jobs: int, optional
 		The largest number of threads to use. Default is 8.

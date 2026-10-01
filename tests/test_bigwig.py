@@ -207,11 +207,17 @@ def test_out(dense_bw):
 	assert result is out
 	assert_identical(out, bw.read('chr1', [0, 100], 30))
 
+	# A read-only array raised numba's TypingError, and a list AttributeError.
+	read_only = numpy.empty((2, 30), dtype=numpy.float32)
+	read_only.flags.writeable = False
 	for bad in [numpy.empty((3, 30), dtype=numpy.float32),
 			numpy.empty((2, 30), dtype=numpy.float64),
-			numpy.empty((30, 2), dtype=numpy.float32).T]:
-		with pytest.raises(ValueError, match='out must be'):
+			numpy.empty((30, 2), dtype=numpy.float32).T, read_only]:
+		with pytest.raises(ValueError, match='out must be a writeable'):
 			bw.read('chr1', [0, 100], 30, out=bad)
+
+	with pytest.raises(TypeError, match='out must be a numpy array, not list'):
+		bw.read('chr1', [0, 100], 30, out=[[0.0] * 30] * 2)
 
 
 @pytest.mark.parametrize('chroms', [[], 'chr1'])
