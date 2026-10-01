@@ -334,42 +334,13 @@ class BigWig:
 			chromosome.
 		"""
 
-		if isinstance(width, bool) or not isinstance(width, (int, numpy.integer)):
-			raise TypeError("width must be an integer.")
-		if width < 1:
-			raise ValueError("width must be at least 1.")
 		if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, numpy.integer)):
 			raise TypeError("n_jobs must be an integer.")
 		if n_jobs < 1:
 			raise ValueError("n_jobs must be at least 1.")
 
-		width, n_jobs = int(width), int(n_jobs)
-		starts = numpy.asarray(starts)
-		if starts.ndim != 1:
-			raise ValueError("starts must be one-dimensional.")
-		if starts.dtype.kind not in 'iu' and len(starts) > 0:
-			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
-
-		# Windows must end at or before 2**32 - 1. This is checked on the
-		# starts as given, comparing each with 2**32 - 1 - width rather than
-		# adding width to it, so that neither a uint64 of 2**63 or more nor
-		# an int64 close to it overflows into a value that passes.
-		n, limit = len(starts), 2**32 - 1 - width
-		bad = numpy.flatnonzero((starts < 0) | (starts > limit)) if limit >= 0 \
-			else numpy.arange(n)
-		given, starts = starts, starts.astype(numpy.int64)
-
-		if isinstance(chroms, str):
-			names, codes = [chroms], numpy.zeros(n, dtype=numpy.int64)
-		else:
-			chroms = numpy.asarray(chroms, dtype=str)
-			if chroms.shape != (n,):
-				raise ValueError("chroms must have one name per start, or be a "
-					"single name.")
-
-			names, codes = numpy.unique(chroms, return_inverse=True)
-			names = names.tolist()
-
+		windows = _Windows(chroms, starts, width)
+		n, width = windows.n, windows.width
 		if out is None:
 			out = numpy.empty((n, width), dtype=numpy.float32)
 		elif not isinstance(out, numpy.ndarray):
@@ -383,91 +354,13 @@ class BigWig:
 		if n == 0:
 			return out
 
-		missing = [name for name in names if name not in self._chroms]
+		missing = [name for name in windows.names if name not in self._chroms]
 		if missing:
 			raise ValueError("Chromosomes not in {}: {}.".format(self.path,
 				", ".join(sorted(missing))))
 
-		if len(bad) > 0:
-			j = bad[0]
-			raise ValueError("{} windows start before 0 or end past 2**32 - 1, "
-				"such as {}:{}-{}.".format(len(bad), names[codes[j]], given[j],
-				int(given[j]) + width))
-
-		index = self._get_index()
-		ids = numpy.array([self._chroms[name][0] for name in names],
-			dtype=numpy.int64)[codes]
-		sizes = numpy.array([self._chroms[name][1] for name in names],
-			dtype=numpy.int64)[codes]
-
-		order = numpy.lexsort((starts, ids))
-
-		# The blocks [lo, hi) overlap a window: those that end after it starts
-		# and start before it ends. The starts and the ends of the index
-		# entries are each sorted, so both bounds are binary searches.
-		keys = (ids[order] << 32) | starts[order]
-		lo = numpy.searchsorted(index['ends'], keys, side='right')
-		hi = numpy.searchsorted(index['starts'], keys + width, side='left')
-		hi = numpy.maximum(lo, hi)
-
-		# The blocks any window needs, and each window's blocks as positions
-		# in that list. Windows are split into batches by their first block.
-		n_blocks = len(index['starts'])
-		cover = numpy.cumsum(numpy.bincount(lo, minlength=n_blocks + 1) -
-			numpy.bincount(hi, minlength=n_blocks + 1))
-		needed = numpy.flatnonzero(cover[:n_blocks] > 0)
-		lo, hi = numpy.searchsorted(needed, lo), numpy.searchsorted(needed, hi)
-
-		windows = numpy.stack([lo, hi, starts[order], sizes[order], order], axis=1)
-		failed = numpy.zeros(n, dtype=numpy.bool_)
-		out3 = out.reshape(n, 1, width)
-
-		batch = lo // _BATCH_BLOCKS
-		bounds = numpy.append(numpy.flatnonzero(numpy.diff(batch, prepend=-1)),
-			n).tolist()
-
-		def read_batch(k):
-			w0, w1 = bounds[k], bounds[k + 1]
-			b0, b1 = int(windows[w0, 0]), int(windows[w0:w1, 1].max())
-			words, blocks = self._read_blocks(fd, needed[b0:b1], index,
-				uncompress)
-			local = windows[w0:w1].copy()
-			local[:, :2] -= b0
-			_read_windows(words, blocks, local, out3, 0, failed[w0:w1])
-
-		# The first batch is read on this thread when the decoder or the
-		# inflater has not been compiled yet, so that each is compiled once and
-		# before any thread starts. With NUMBA_DISABLE_JIT=1 the kernels are
-		# plain functions, which have no signatures and need no compiling.
-		# pread takes no file position, so the threads share one fd.
-		uncompress = _zlib_uncompress() if self._buffer_size > 0 else None
-		n_batches = len(bounds) - 1
-		compiled = getattr(_read_windows, 'signatures', True) and (uncompress is
-			None or getattr(_inflate_blocks, 'signatures', True))
-		first = int(n_batches > 0 and not compiled)
-		fd = os.open(self.path, os.O_RDONLY)
-		try:
-			if first:
-				read_batch(0)
-
-			if n_jobs == 1 or n_batches - first <= 1:
-				for k in range(first, n_batches):
-					read_batch(k)
-			else:
-				with ThreadPoolExecutor(min(n_jobs, n_batches - first)) as pool:
-					list(pool.map(read_batch, range(first, n_batches)))
-		finally:
-			os.close(fd)
-
-		if failed.any():
-			j = order[numpy.flatnonzero(failed)[0]]
-			raise ValueError("{} windows overlap data blocks that figwig cannot "
-				"read: a block that cannot be decompressed, holds a section that "
-				"is not bedGraph, varStep or fixedStep, or holds intervals that "
-				"are unsorted, overlap, or lie outside its index entry. The first "
-				"is {}:{}-{}.".format(int(failed.sum()), names[codes[j]],
-				starts[j], starts[j] + width))
-
+		windows.check_range()
+		_run([_Read(self, windows, out.reshape(n, 1, width), 0)], int(n_jobs))
 		return out
 
 	def _read_blocks(self, fd, leaves, index, uncompress=None):
@@ -538,6 +431,189 @@ class BigWig:
 				dtype=numpy.uint8)])
 
 		return words.view(numpy.uint32), blocks
+
+
+class _Windows:
+	"""The windows of a read, with their arguments checked.
+
+	`names` are the chromosome names the windows are on, `codes` each
+	window's position in `names`, and `starts` each window's start as an
+	int64. Windows that start before 0 or end past 2**32 - 1 are found here
+	and raised on by `check_range`, which comes after the check that every
+	chromosome is in the file.
+	"""
+
+	def __init__(self, chroms, starts, width):
+		if isinstance(width, bool) or not isinstance(width, (int, numpy.integer)):
+			raise TypeError("width must be an integer.")
+		if width < 1:
+			raise ValueError("width must be at least 1.")
+
+		starts = numpy.asarray(starts)
+		if starts.ndim != 1:
+			raise ValueError("starts must be one-dimensional.")
+		if starts.dtype.kind not in 'iu' and len(starts) > 0:
+			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
+
+		# Windows must end at or before 2**32 - 1. This is checked on the
+		# starts as given, comparing each with 2**32 - 1 - width rather than
+		# adding width to it, so that neither a uint64 of 2**63 or more nor
+		# an int64 close to it overflows into a value that passes.
+		n, width, limit = len(starts), int(width), 2**32 - 1 - int(width)
+		self._bad = numpy.flatnonzero((starts < 0) | (starts > limit)) if \
+			limit >= 0 else numpy.arange(n)
+		self._given = starts
+
+		if isinstance(chroms, str):
+			names, codes = [chroms], numpy.zeros(n, dtype=numpy.int64)
+		else:
+			chroms = numpy.asarray(chroms, dtype=str)
+			if chroms.shape != (n,):
+				raise ValueError("chroms must have one name per start, or be a "
+					"single name.")
+
+			names, codes = numpy.unique(chroms, return_inverse=True)
+			names = names.tolist()
+
+		self.n, self.width = n, width
+		self.names, self.codes = names, codes
+		self.starts = starts.astype(numpy.int64)
+
+	def describe(self, j):
+		"""Window j as chrom:start-end."""
+
+		start = int(self._given[j])
+		return "{}:{}-{}".format(self.names[self.codes[j]], start, start +
+			self.width)
+
+	def check_range(self):
+		if len(self._bad) > 0:
+			raise ValueError("{} windows start before 0 or end past 2**32 - 1, "
+				"such as {}.".format(len(self._bad), self.describe(self._bad[0])))
+
+
+class _Read:
+	"""One file's share of a read: its windows, sorted into batches.
+
+	The windows are sorted by position and matched to the data blocks of the
+	file that they overlap, and split into batches by their first block.
+	`run(k)` reads batch k into channel `signal` of the windows' rows of
+	`out`, of shape (n, channels, width), from the file opened by `open`.
+	`finish` raises if any window could not be read.
+	"""
+
+	def __init__(self, bigwig, windows, out, signal):
+		self.bigwig, self.windows = bigwig, windows
+		self.out, self.signal = out, signal
+
+		index = bigwig._get_index()
+		names, codes, n = windows.names, windows.codes, windows.n
+		ids = numpy.array([bigwig._chroms[name][0] for name in names],
+			dtype=numpy.int64)[codes]
+		sizes = numpy.array([bigwig._chroms[name][1] for name in names],
+			dtype=numpy.int64)[codes]
+
+		starts = windows.starts
+		order = numpy.lexsort((starts, ids))
+
+		# The blocks [lo, hi) overlap a window: those that end after it starts
+		# and start before it ends. The starts and the ends of the index
+		# entries are each sorted, so both bounds are binary searches.
+		keys = (ids[order] << 32) | starts[order]
+		lo = numpy.searchsorted(index['ends'], keys, side='right')
+		hi = numpy.searchsorted(index['starts'], keys + windows.width,
+			side='left')
+		hi = numpy.maximum(lo, hi)
+
+		# The blocks any window needs, and each window's blocks as positions
+		# in that list. Windows are split into batches by their first block.
+		n_blocks = len(index['starts'])
+		cover = numpy.cumsum(numpy.bincount(lo, minlength=n_blocks + 1) -
+			numpy.bincount(hi, minlength=n_blocks + 1))
+		needed = numpy.flatnonzero(cover[:n_blocks] > 0)
+		lo, hi = numpy.searchsorted(needed, lo), numpy.searchsorted(needed, hi)
+
+		batch = lo // _BATCH_BLOCKS
+		self.index, self.needed, self.order = index, needed, order
+		self.rows = numpy.stack([lo, hi, starts[order], sizes[order], order],
+			axis=1)
+		self.bounds = numpy.append(numpy.flatnonzero(numpy.diff(batch,
+			prepend=-1)), n).tolist()
+		self.n_batches = len(self.bounds) - 1
+		self.failed = numpy.zeros(n, dtype=numpy.bool_)
+		self.uncompress = _zlib_uncompress() if bigwig._buffer_size > 0 else \
+			None
+		self.fd = None
+
+	def open(self):
+		# pread takes no file position, so every batch shares one fd.
+		self.fd = os.open(self.bigwig.path, os.O_RDONLY)
+
+	def close(self):
+		if self.fd is not None:
+			os.close(self.fd)
+			self.fd = None
+
+	def run(self, k):
+		w0, w1 = self.bounds[k], self.bounds[k + 1]
+		b0, b1 = int(self.rows[w0, 0]), int(self.rows[w0:w1, 1].max())
+		words, blocks = self.bigwig._read_blocks(self.fd, self.needed[b0:b1],
+			self.index, self.uncompress)
+		local = self.rows[w0:w1].copy()
+		local[:, :2] -= b0
+		_read_windows(words, blocks, local, self.out, self.signal,
+			self.failed[w0:w1])
+
+	def finish(self):
+		if self.failed.any():
+			j = self.order[numpy.flatnonzero(self.failed)[0]]
+			raise ValueError("{} windows overlap data blocks that figwig cannot "
+				"read: a block that cannot be decompressed, holds a section that "
+				"is not bedGraph, varStep or fixedStep, or holds intervals that "
+				"are unsorted, overlap, or lie outside its index entry. The first "
+				"is {}.".format(int(self.failed.sum()), self.windows.describe(j)))
+
+
+def _run(reads, n_jobs):
+	"""Run every batch of every read, on up to `n_jobs` threads.
+
+	A batch is read on this thread first when the decoder, or the inflater
+	that a compressed file needs, has not been compiled yet, so that each is
+	compiled once and before any thread starts. With NUMBA_DISABLE_JIT=1 the
+	kernels are plain functions, which have no signatures and need no
+	compiling.
+	"""
+
+	tasks = [(read, k) for read in reads for k in range(read.n_batches)]
+	first = []
+	if tasks and not getattr(_read_windows, 'signatures', True):
+		first.append(tasks[0])
+
+	compressed = [task for task in tasks if task[0].uncompress is not None]
+	if compressed and not getattr(_inflate_blocks, 'signatures', True) and \
+			compressed[0] not in first:
+		first.append(compressed[0])
+
+	rest = [task for task in tasks if task not in first]
+	try:
+		for read in reads:
+			read.open()
+
+		for read, k in first:
+			read.run(k)
+
+		if n_jobs == 1 or len(rest) <= 1:
+			for read, k in rest:
+				read.run(k)
+		else:
+			with ThreadPoolExecutor(min(n_jobs, len(rest))) as pool:
+				list(pool.map(lambda task: task[0].run(task[1]), rest))
+	finally:
+		for read in reads:
+			read.close()
+
+	for read in reads:
+		read.finish()
 
 
 def read_windows(path: str | os.PathLike, chroms: str | list[str] |
