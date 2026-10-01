@@ -15,6 +15,7 @@ from itertools import pairwise
 import numpy
 
 from ._kernels import _inflate_blocks
+from ._kernels import _pread
 from ._kernels import _pread_into
 from ._kernels import _read_windows
 from ._kernels import _zlib_uncompress
@@ -225,7 +226,7 @@ class BigWig:
 			with open(self.path, 'rb') as handle:
 				fd = handle.fileno()
 				file_size = os.fstat(fd).st_size
-				magic = struct.unpack('<I', os.pread(fd, 4, self._data_index))[0]
+				magic = struct.unpack('<I', _pread(fd, 4, self._data_index))[0]
 				if magic != _INDEX_MAGIC:
 					raise ValueError(error + ".")
 
@@ -236,10 +237,10 @@ class BigWig:
 						raise ValueError(error + ": it has a cycle.")
 
 					seen.add(offset)
-					is_leaf, _, count = struct.unpack('<BBH', os.pread(fd, 4,
+					is_leaf, _, count = struct.unpack('<BBH', _pread(fd, 4,
 						offset))
 					size = 32 if is_leaf else 24
-					data = os.pread(fd, count * size, offset + 4)
+					data = _pread(fd, count * size, offset + 4)
 					if len(data) != count * size:
 						raise ValueError(error + ": the file ends inside it.")
 
@@ -470,8 +471,8 @@ class BigWig:
 		and last word, its index entry's chromosome, start and end, and 1 if
 		it was read or 0 if it could not be.
 
-		The compressed blocks are read with one pread per run of adjacent
-		blocks, into one array. `uncompress`, the result of
+		The compressed blocks are read with one positional read per run of
+		adjacent blocks, into one array. `uncompress`, the result of
 		`_zlib_uncompress()`, inflates them without the GIL. The blocks it
 		leaves, and every block when it is None or the file is not
 		compressed, are inflated with zlib.decompress, with the same result.

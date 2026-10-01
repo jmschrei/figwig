@@ -347,6 +347,31 @@ def test_pickle(dense_bw, duplicate):
 		assert other._index_lock is not bw._index_lock
 
 
+@pytest.mark.parametrize('function', ['preadv', 'pread'])
+def test_short_reads(deep_bw, monkeypatch, function):
+	"""POSIX lets a read return fewer bytes than asked for, and Linux returns
+	at most about 2 GiB from one. A short read marked the blocks it did not
+	reach as unreadable, and the windows over them raised. Here every read
+	returns at most 1,000 bytes, through preadv or through the pread that
+	is used where preadv does not exist."""
+
+	path, chroms = deep_bw
+	names, starts = random_windows(numpy.random.default_rng(12), chroms, 300,
+		20_000)
+	X = BigWig(path).read(names, starts, 20_000)
+
+	preadv, pread = os.preadv, os.pread
+	if function == 'preadv':
+		monkeypatch.setattr(os, 'preadv', lambda fd, buffers, offset: preadv(
+			fd, [buffers[0][:1000]], offset))
+	else:
+		monkeypatch.delattr(os, 'preadv')
+		monkeypatch.setattr(os, 'pread', lambda fd, n, offset: pread(fd,
+			min(n, 1000), offset))
+
+	assert_identical(BigWig(path).read(names, starts, 20_000, n_jobs=3), X)
+
+
 def test_numba_disable_jit(dense_bw, tmp_path):
 	"""With NUMBA_DISABLE_JIT=1 the kernels are plain Python functions,
 	without the `signatures` attribute that read checked, and every read

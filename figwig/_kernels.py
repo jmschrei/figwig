@@ -100,14 +100,35 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 
 
 def _pread_into(fd, buffer, offset):
-	"""Read into the uint8 array `buffer` from `offset`; return the bytes read."""
+	"""Read into the uint8 array `buffer` from `offset`; return the bytes read.
 
-	if hasattr(os, 'preadv'):
-		return os.preadv(fd, [buffer], offset)
+	A read may return fewer bytes than asked for, and Linux returns at most
+	about 2 GiB from one, so this reads until `buffer` is full or the file
+	ends.
+	"""
 
-	data = os.pread(fd, len(buffer), offset)
-	buffer[:len(data)] = numpy.frombuffer(data, dtype=numpy.uint8)
-	return len(data)
+	total = 0
+	while total < len(buffer):
+		if hasattr(os, 'preadv'):
+			n = os.preadv(fd, [buffer[total:]], offset + total)
+		else:
+			data = os.pread(fd, len(buffer) - total, offset + total)
+			n = len(data)
+			buffer[total:total + n] = numpy.frombuffer(data, dtype=numpy.uint8)
+
+		if n == 0:
+			break
+
+		total += n
+
+	return total
+
+
+def _pread(fd, n, offset):
+	"""Up to `n` bytes from `offset`, fewer only where the file ends."""
+
+	buffer = numpy.empty(n, dtype=numpy.uint8)
+	return buffer[:_pread_into(fd, buffer, offset)].tobytes()
 
 
 @numba.njit(nogil=True, cache=True)
