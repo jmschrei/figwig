@@ -279,6 +279,27 @@ def test_pathlike_and_attributes(dense_bw):
 	assert repr(bw) == "BigWig('{}', 3 chromosomes)".format(path)
 
 
+def test_multi_level_chromosome_tree(tmp_path):
+	"""A chromosome tree with a root over three leaves, as UCSC writes one for
+	a genome with more than 256 chromosomes. Its leaves were read in reverse,
+	so `chroms` came out in the wrong order.
+	"""
+
+	chroms = {'chr{:02d}'.format(i): 1000 + i for i in range(40)}
+	sections = [_bedgraph(name, 100, [(0, 10, float(i))]) for i, name in
+		enumerate(chroms)]
+	path = str(tmp_path / 'tree.bw')
+	write_raw_bigwig(path, chroms, sections, chrom_block_size=16)
+
+	bw = BigWig(path)
+	assert list(bw.chroms.items()) == list(chroms.items())
+	assert list(bw.chroms) == list(pybigtools.open(path).chroms())
+
+	names, starts = list(chroms), [95] * len(chroms)
+	assert_identical(bw.read(names, starts, 20), reference(path, names, starts,
+		20))
+
+
 ###
 # Threads and the zlib fallback
 ###

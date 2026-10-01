@@ -157,13 +157,18 @@ class BigWig:
 			handle.seek(node)
 			is_leaf, _, count = struct.unpack('<BBH', handle.read(4))
 			data = handle.read(count * (key_size + 8))
+			children = []
 			for k in range(count):
 				item = data[k * (key_size + 8): (k + 1) * (key_size + 8)]
 				if is_leaf:
 					name = item[:key_size].rstrip(b'\0').decode()
 					chroms[name] = struct.unpack('<II', item[key_size:])
 				else:
-					nodes.append(struct.unpack('<Q', item[key_size:])[0])
+					children.append(struct.unpack('<Q', item[key_size:])[0])
+
+			# Children go on the stack last first, so that the leaves, and the
+			# chromosomes in them, are read in the tree's order.
+			nodes.extend(children[::-1])
 
 		return chroms
 
