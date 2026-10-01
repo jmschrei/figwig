@@ -8,10 +8,14 @@
 
 Each fixture returns (path, chroms), where chroms maps each name to its
 length.
+
+`batching` runs a test at the default batch size and at very small ones.
 """
 
 import numpy
 import pytest
+
+import figwig.bigwig
 
 from .writers import write_bigwig
 
@@ -25,6 +29,23 @@ def _step_entries(rng, chroms, gap_p, max_len, values):
 			entries.append((name, position, end, float(values())))
 			position = end + int(rng.geometric(gap_p)) - 1
 	return entries
+
+
+@pytest.fixture(params=[(256, 2 ** 20), (3, 2 ** 20), (1, 64)],
+	ids=['default_batches', 'small_batches', 'tiny_batches'])
+def batching(request, monkeypatch):
+	"""Split each read into batches of this many blocks, with this buffer.
+
+	`dense_bw` and `sparse_bw` hold fewer than 256 blocks, so at the default
+	batch size a read of them is one batch on one thread. The small sizes are
+	what reach the thread pool and the batch boundaries, and a 64-byte buffer
+	sends every compressed block to the zlib.decompress fallback.
+	"""
+
+	batch_blocks, max_block_bytes = request.param
+	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', batch_blocks)
+	monkeypatch.setattr(figwig.bigwig, '_MAX_BLOCK_BYTES', max_block_bytes)
+	return request.param
 
 
 @pytest.fixture(scope='session')

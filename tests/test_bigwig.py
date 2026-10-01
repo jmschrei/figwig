@@ -1,6 +1,7 @@
 # test_bigwig.py
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
+import re
 import zlib
 import struct
 import pathlib
@@ -58,7 +59,7 @@ def random_windows(rng, chroms, n, width):
 
 @pytest.mark.parametrize('fixture', ['dense_bw', 'sparse_bw', 'deep_bw'])
 @pytest.mark.parametrize('width', [1, 7, 1000])
-def test_read_matches_pybigtools(request, fixture, width):
+def test_read_matches_pybigtools(request, fixture, width, batching):
 	path, chroms = request.getfixturevalue(fixture)
 	rng = numpy.random.default_rng(width)
 	names, starts = random_windows(rng, chroms, 3000, width)
@@ -67,7 +68,7 @@ def test_read_matches_pybigtools(request, fixture, width):
 	assert_identical(X, reference(path, list(names), starts, width))
 
 
-def test_read_matches_pybigtools_at_chromosome_edges(dense_bw):
+def test_read_matches_pybigtools_at_chromosome_edges(dense_bw, batching):
 	path, chroms = dense_bw
 	names, starts = [], []
 	for name, length in chroms.items():
@@ -116,7 +117,7 @@ def test_special_values(tmp_path):
 
 @pytest.mark.parametrize('kind', [1, 2, 3])
 @pytest.mark.parametrize('compress', [True, False])
-def test_section_types(tmp_path, kind, compress):
+def test_section_types(tmp_path, kind, compress, batching):
 	rng = numpy.random.default_rng(kind)
 	chroms = {'chr1': 50_000, 'chr2': 20_000}
 	sections = []
@@ -154,7 +155,7 @@ def test_section_types(tmp_path, kind, compress):
 # Arguments
 ###
 
-def test_n_jobs_does_not_change_output(sparse_bw):
+def test_n_jobs_does_not_change_output(sparse_bw, batching):
 	path, chroms = sparse_bw
 	names, starts = random_windows(numpy.random.default_rng(3), chroms, 5000, 500)
 	bw = BigWig(path)
@@ -164,7 +165,7 @@ def test_n_jobs_does_not_change_output(sparse_bw):
 		assert_identical(bw.read(names, starts, 500, n_jobs=n_jobs), X)
 
 
-def test_order_and_repeats(dense_bw):
+def test_order_and_repeats(dense_bw, batching):
 	path, chroms = dense_bw
 	rng = numpy.random.default_rng(4)
 	names, starts = random_windows(rng, chroms, 1000, 200)
@@ -282,7 +283,7 @@ def test_pathlike_and_attributes(dense_bw):
 # Threads and the zlib fallback
 ###
 
-def test_concurrent_reads_on_one_object(deep_bw):
+def test_concurrent_reads_on_one_object(deep_bw, batching):
 	path, chroms = deep_bw
 	bw = BigWig(path)
 	rng = numpy.random.default_rng(6)
@@ -383,5 +384,5 @@ def test_missing_file_raises(tmp_path):
 		BigWig(tmp_path / 'absent.bw')
 
 
-def test_version(dense_bw):
-	assert figwig.__version__ == '0.1.0'
+def test_version():
+	assert re.fullmatch(r'\d+\.\d+\.\d+', figwig.__version__)
