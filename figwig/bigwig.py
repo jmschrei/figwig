@@ -7,6 +7,7 @@ import os
 import sys
 import zlib
 import struct
+import warnings
 import threading
 
 from concurrent.futures import ThreadPoolExecutor
@@ -60,10 +61,18 @@ class BigWig:
 	without the GIL, so the threads run in parallel.
 
 	Each base gets the value of the interval that covers it. A base that no
-	interval covers is 0, and a base past the end of its chromosome is NaN.
-	An interval whose value is NaN is treated as covering nothing, so its
-	bases are 0. These are the values pybigtools' `values(chrom, start, end)`
-	gives with its defaults, cast to float32.
+	interval covers gets `missing`, 0 unless given, and a base past the end of
+	its chromosome is NaN. An interval whose value is NaN is treated as
+	covering nothing, so its bases get `missing` too. These are the values
+	pybigtools' `values(chrom, start, end, missing=missing)` gives, cast to
+	float32. pyBigWig's `values()` gives NaN where no interval covers a base,
+	which `missing=numpy.nan` matches.
+
+	A writer leaves out a chromosome that has no data, so a sample without
+	reads on chrY, say, has no chrY in its file. A window on a chromosome the
+	file does not have is `missing` throughout, and a warning names the
+	chromosomes, so that a naming mismatch (1 against chr1) does not go
+	unnoticed.
 
 	bigWigs with bedGraph, varStep and fixedStep sections are read, whether
 	compressed or not. Anything else raises a ValueError rather than being
@@ -74,14 +83,13 @@ class BigWig:
 		- a chromosome tree or data index that is corrupt, or cut short by a
 		  truncated file;
 		- a data index whose entries are unsorted or span two chromosomes;
-		- a window on a chromosome the file does not have, or one that starts
-		  before 0 or ends past 2**32 - 1;
+		- a window that starts before 0 or ends past 2**32 - 1;
 		- a window overlapping a data block that cannot be decompressed, that
 		  holds a section of another type, or whose intervals are unsorted,
 		  overlap each other or those of a neighbouring block, or lie outside
-		  the block's index entry.
-		  Overlapping intervals give a base two values, and readers disagree
-		  on which to report: pybigtools sums them.
+		  the block's index entry. Overlapping intervals give a base two
+		  values, and readers disagree on which to report: pybigtools sums
+		  them.
 
 	A `BigWig` holds no open file between reads, and one object can be read
 	from several Python threads at once. It can be pickled, so it can be
@@ -290,7 +298,7 @@ class BigWig:
 
 	def read(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, width: int, out: numpy.ndarray | None = None,
-		n_jobs: int = 8) -> numpy.ndarray:
+		n_jobs: int = 8, missing: float = 0.0) -> numpy.ndarray:
 		"""Read the per-base values of many windows of one width.
 
 		Window j covers [starts[j], starts[j] + width) on chroms[j], and its
@@ -305,8 +313,9 @@ class BigWig:
 		Parameters
 		----------
 		chroms: str, list of str, or numpy.ndarray of str
-			The chromosome of each window, or one name for every window.
-			Every name must be one of `self.chroms`.
+			The chromosome of each window, or one name for every window. A
+			window on a chromosome that is not one of `self.chroms` is
+			`missing` throughout, with a warning.
 
 		starts: list of int or numpy.ndarray of int, shape=(n,)
 			The start of each window, inclusive and base-0. Every window must
@@ -325,13 +334,20 @@ class BigWig:
 			The largest number of threads to decompress and decode data blocks
 			on. Must be at least 1. Default is 8.
 
+		missing: float, optional
+			The value of a base that no interval covers, or that an interval
+			whose value is NaN covers, and of every base of a window on a
+			chromosome the file does not have. It is cast to float32. Pass
+			numpy.nan to tell these bases apart from a measured 0, as
+			pyBigWig's `values()` does. Default is 0.0.
+
 
 		Returns
 		-------
 		out: numpy.ndarray, shape=(n, width), dtype=float32
 			The value of every base of every window: the value of the interval
-			covering it, 0 where no interval does, and NaN past the end of the
-			chromosome.
+			covering it, `missing` where no interval does, and NaN past the
+			end of the chromosome.
 		"""
 
 		if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, numpy.integer)):
@@ -339,6 +355,7 @@ class BigWig:
 		if n_jobs < 1:
 			raise ValueError("n_jobs must be at least 1.")
 
+		missing = _check_missing(missing)
 		windows = _Windows(chroms, starts, width)
 		n, width = windows.n, windows.width
 		if out is None:
@@ -354,14 +371,36 @@ class BigWig:
 		if n == 0:
 			return out
 
-		missing = [name for name in windows.names if name not in self._chroms]
-		if missing:
-			raise ValueError("Chromosomes not in {}: {}.".format(self.path,
-				", ".join(sorted(missing))))
-
 		windows.check_range()
-		_run([_Read(self, windows, out.reshape(n, 1, width), 0)], int(n_jobs))
+		self._warn_absent(windows, missing, stacklevel=2)
+		_run([_Read(self, windows, out.reshape(n, 1, width), 0, missing)],
+			int(n_jobs))
 		return out
+
+	def _warn_absent(self, windows, missing, stacklevel):
+		"""Warn about windows on chromosomes the file does not have.
+
+		A writer leaves out a chromosome that has no data, so a sample without
+		reads on chrY, say, has no chrY. A misspelt or differently named
+		chromosome (1 against chr1) is absent too, so the warning lists some
+		of the file's own names. `stacklevel` counts from the caller of this
+		method.
+		"""
+
+		absent = [k for k, name in enumerate(windows.names) if name not in
+			self._chroms]
+		if len(absent) == 0:
+			return
+
+		n = int(numpy.isin(windows.codes, absent).sum())
+		shown = ", ".join(windows.names[k] for k in absent[:10])
+		if len(absent) > 10:
+			shown += ", and {} more".format(len(absent) - 10)
+
+		warnings.warn("{} windows are on chromosomes not in {}, and are {} "
+			"throughout: {}. Its chromosomes include {}.".format(n, self.path,
+			float(missing), shown, ", ".join(list(self.chroms)[:3])),
+			stacklevel=stacklevel + 1)
 
 	def _read_blocks(self, fd, leaves, index, uncompress=None):
 		"""Read and decompress data blocks into one array of 32-bit words.
@@ -433,6 +472,17 @@ class BigWig:
 		return words.view(numpy.uint32), blocks
 
 
+def _check_missing(missing):
+	"""The `missing` argument as a float32."""
+
+	if isinstance(missing, bool) or not isinstance(missing, (int, float,
+			numpy.integer, numpy.floating)):
+		raise TypeError("missing must be a number, not {}.".format(
+			type(missing).__name__))
+
+	return numpy.float32(missing)
+
+
 class _Windows:
 	"""The windows of a read, with their arguments checked.
 
@@ -500,21 +550,27 @@ class _Read:
 	`run(k)` reads batch k into channel `signal` of the windows' rows of
 	`out`, of shape (n, channels, width), from the file opened by `open`.
 	`finish` raises if any window could not be read.
+
+	Windows on a chromosome the file does not have are filled with `missing`
+	here and left out of the batches. Without the chromosome's length there
+	is no end past which their bases would be NaN.
 	"""
 
-	def __init__(self, bigwig, windows, out, signal):
+	def __init__(self, bigwig, windows, out, signal, missing):
 		self.bigwig, self.windows = bigwig, windows
-		self.out, self.signal = out, signal
+		self.out, self.signal, self.missing = out, signal, missing
 
 		index = bigwig._get_index()
-		names, codes, n = windows.names, windows.codes, windows.n
-		ids = numpy.array([bigwig._chroms[name][0] for name in names],
-			dtype=numpy.int64)[codes]
-		sizes = numpy.array([bigwig._chroms[name][1] for name in names],
+		names, codes, starts = windows.names, windows.codes, windows.starts
+		chroms = [bigwig._chroms.get(name, (-1, 0)) for name in names]
+		ids = numpy.array([chrom[0] for chrom in chroms], dtype=numpy.int64)[codes]
+		sizes = numpy.array([chrom[1] for chrom in chroms],
 			dtype=numpy.int64)[codes]
 
-		starts = windows.starts
-		order = numpy.lexsort((starts, ids))
+		present = numpy.flatnonzero(ids >= 0)
+		out[ids < 0, signal] = missing
+		order = present[numpy.lexsort((starts[present], ids[present]))]
+		n = len(order)
 
 		# The blocks [lo, hi) overlap a window: those that end after it starts
 		# and start before it ends. The starts and the ends of the index
@@ -562,7 +618,7 @@ class _Read:
 		local = self.rows[w0:w1].copy()
 		local[:, :2] -= b0
 		_read_windows(words, blocks, local, self.out, self.signal,
-			self.failed[w0:w1])
+			self.failed[w0:w1], self.missing)
 
 	def finish(self):
 		if self.failed.any():
@@ -618,7 +674,8 @@ def _run(reads, n_jobs):
 
 def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 	numpy.ndarray, starts: list[int] | numpy.ndarray, width: int,
-	out: numpy.ndarray | None = None, n_jobs: int = 8) -> numpy.ndarray:
+	out: numpy.ndarray | None = None, n_jobs: int = 8,
+	missing: float = 0.0) -> numpy.ndarray:
 	"""Read the per-base values of many windows of one width from a bigWig.
 
 	This opens the file and reads its data index on every call. To read the
@@ -647,6 +704,10 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 	n_jobs: int, optional
 		The largest number of threads to use. Default is 8.
 
+	missing: float, optional
+		The value of a base that no interval covers, and of every base of a
+		window on a chromosome the file does not have. Default is 0.0.
+
 
 	Returns
 	-------
@@ -654,4 +715,5 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 		The value of every base of every window, as `BigWig.read` gives it.
 	"""
 
-	return BigWig(path).read(chroms, starts, width, out=out, n_jobs=n_jobs)
+	return BigWig(path).read(chroms, starts, width, out=out, n_jobs=n_jobs,
+		missing=missing)

@@ -63,12 +63,17 @@ reading one file many times, as a data loader does, pays for the index once.
 than allocate a new one each batch. For a single read there is
 `read_windows(path, chroms, starts, width)`.
 
-The values are those pybigtools' `values(chrom, start, end)` gives with its
-defaults, cast to float32:
+The values are those pybigtools' `values(chrom, start, end, missing=missing)`
+gives, cast to float32:
 - each base gets the value of the interval covering it;
-- a base no interval covers is 0;
+- a base no interval covers is `missing`, 0 unless given;
 - a base past the end of its chromosome is NaN;
 - an interval whose value is NaN is treated as covering nothing.
+
+A window on a chromosome the file does not have, which writers leave out when
+it has no data, is `missing` throughout, and a warning names the chromosomes.
+pyBigWig's `values()` gives NaN where no interval covers a base, which
+`missing=numpy.nan` matches.
 
 To use the result in torch, `torch.from_numpy(y)` wraps it without a copy.
 
@@ -83,8 +88,7 @@ compressed or not, at base-pair resolution. Everything else raises a
 - a chromosome tree or data index that is corrupt, or cut short by a
   truncated file;
 - a data index whose entries are unsorted or span two chromosomes;
-- a window on a chromosome the file does not have, or one that starts before 0
-  or ends past 2**32 - 1;
+- a window that starts before 0 or ends past 2**32 - 1;
 - a window overlapping a data block that cannot be decompressed, holds a
   section of another type, or has intervals that are unsorted, overlap each
   other or those of a neighbouring block, or lie outside the block's index

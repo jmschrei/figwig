@@ -203,7 +203,7 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 
 
 @numba.njit(nogil=True, cache=True)
-def _read_windows(words, blocks, windows, out, signal, failed):
+def _read_windows(words, blocks, windows, out, signal, failed, missing):
 	"""Write the per-base values of bigWig windows into rows of `out`.
 
 	`words` holds decompressed data blocks, one after another, as 32-bit
@@ -211,15 +211,17 @@ def _read_windows(words, blocks, windows, out, signal, failed):
 	chromosome, start and end of its index entry, and whether it was
 	decompressed. Row j of `windows` describes window j: the blocks [lo, hi)
 	that overlap it, its start, the length of its chromosome and the row of
-	`out` it is written to. The width of every window is out.shape[2].
+	`out` it is written to, in channel `signal`. The width of every window
+	is out.shape[2].
 
-	Each base of a window is given the value of the item that covers it, 0
-	when no item does and NaN past the end of the chromosome. Items with a
-	NaN value are skipped, so their bases are 0. A window is not written,
-	and is marked in `failed`, when one of its blocks fails `_check_block`
-	or has an item that overlaps an item of an earlier block. A window's
-	blocks are consecutive in the index, so comparing each block's first
-	item with the furthest end of the blocks before it finds every overlap.
+	Each base of a window is given the value of the item that covers it,
+	`missing`, a float32, when no item does, and NaN past the end of the
+	chromosome. Items with a NaN value are skipped, so their bases are
+	`missing`. A window is not written, and is marked in `failed`, when one
+	of its blocks fails `_check_block` or has an item that overlaps an item
+	of an earlier block. A window's blocks are consecutive in the index, so
+	comparing each block's first item with the furthest end of the blocks
+	before it finds every overlap.
 	"""
 
 	values = words.view(numpy.float32)
@@ -253,7 +255,7 @@ def _read_windows(words, blocks, windows, out, signal, failed):
 
 		end = min(start + width, max(start, windows[j, 3]))
 		for p in range(end - start):
-			out[row, signal, p] = 0
+			out[row, signal, p] = missing
 		for p in range(end - start, width):
 			out[row, signal, p] = nan
 

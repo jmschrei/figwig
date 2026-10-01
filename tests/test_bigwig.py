@@ -9,6 +9,7 @@ import zlib
 import pickle
 import struct
 import pathlib
+import warnings
 import threading
 import subprocess
 
@@ -26,7 +27,7 @@ from .writers import write_bigwig
 from .writers import write_raw_bigwig
 
 
-def reference(path, chroms, starts, width):
+def reference(path, chroms, starts, width, missing=0.0):
 	"""pybigtools 0.2.5's values() for each window, cast to float32."""
 
 	bw = pybigtools.open(path)
@@ -34,7 +35,8 @@ def reference(path, chroms, starts, width):
 	scratch = numpy.empty(width, dtype=numpy.float64)
 	names = [chroms] * len(starts) if isinstance(chroms, str) else chroms
 	for j, (name, start) in enumerate(zip(names, starts)):
-		bw.values(name, int(start), int(start) + width, arr=scratch)
+		bw.values(name, int(start), int(start) + width, missing=float(missing),
+			arr=scratch)
 		out[j] = scratch
 	return out
 
@@ -273,9 +275,75 @@ def test_one_chrom_per_start(dense_bw):
 		BigWig(dense_bw[0]).read(['chr1', 'chr2'], [0, 10, 20], 10)
 
 
-def test_missing_chromosome_raises(dense_bw):
-	with pytest.raises(ValueError, match='Chromosomes not in .*: chr7, chrZ'):
-		BigWig(dense_bw[0]).read(['chr1', 'chrZ', 'chr7'], [0, 0, 0], 10)
+@pytest.mark.parametrize('missing', [0.0, -1.0, numpy.nan, 3,
+	numpy.float32(2.5)], ids=['zero', 'negative', 'nan', 'int', 'float32'])
+@pytest.mark.parametrize('fixture', ['dense_bw', 'sparse_bw'])
+def test_missing(request, fixture, missing):
+	path, chroms = request.getfixturevalue(fixture)
+	names, starts = random_windows(numpy.random.default_rng(13), chroms, 1000,
+		200)
+	X = BigWig(path).read(names, starts, 200, missing=missing)
+	assert_identical(X, reference(path, list(names), starts, 200, missing))
+
+
+@pytest.mark.parametrize('missing', [0.0, -1.0, numpy.nan])
+def test_missing_nan_interval(tmp_path, missing):
+	"""An interval whose value is NaN covers nothing, so its bases are
+	`missing`."""
+
+	path = str(tmp_path / 'nan.bw')
+	write_raw_bigwig(path, {'chr1': 1000}, [_bedgraph('chr1', 100, [
+		(0, 5, numpy.nan), (5, 10, 2.0)])])
+
+	X = BigWig(path).read('chr1', [98], 14, missing=missing)
+	expected = [missing] * 7 + [2.0] * 5 + [missing] * 2
+	assert_identical(X, numpy.array([expected], dtype=numpy.float32))
+	assert_identical(X, reference(path, 'chr1', [98], 14, missing))
+
+
+@pytest.mark.parametrize('missing', [0.0, numpy.nan])
+def test_absent_chromosome_is_missing(dense_bw, missing):
+	"""A writer leaves out a chromosome without data. Windows on one raised;
+	they are now `missing` throughout, even far past where a chromosome
+	would end, and a warning names the chromosome."""
+
+	path, _ = dense_bw
+	bw = BigWig(path)
+	with pytest.warns(UserWarning, match=r'^3 windows are on chromosomes not in '
+			r'.*, and are (0\.0|nan) throughout: chr7, chrZ\. Its chromosomes '
+			r'include chr1, chr2, chrM\.$') as record:
+		X = bw.read(['chr1', 'chrZ', 'chr7', 'chrZ', 'chr2'], [0, 0, 5, 2**31,
+			100], 10, missing=missing)
+
+	assert len(record) == 1 and record[0].filename == __file__
+	assert_identical(X[[0, 4]], bw.read(['chr1', 'chr2'], [0, 100], 10,
+		missing=missing))
+	assert_identical(X[1:4], numpy.full((3, 10), missing, dtype=numpy.float32))
+
+
+def test_absent_chromosome_names(dense_bw):
+	"""Another naming scheme (1 against chr1) leaves every window missing; the
+	warning shows the file's own names, and lists at most ten absent."""
+
+	names = [str(i) for i in range(1, 13)]
+	with pytest.warns(UserWarning, match=r'^12 windows .*: 1, 10, 11, 12, 2, 3, '
+			r'4, 5, 6, 7, and 2 more\. Its chromosomes include chr1, chr2'):
+		X = BigWig(dense_bw[0]).read(names, [0] * 12, 5)
+
+	assert (X == 0).all()
+
+
+def test_range_is_checked_before_absent_chromosomes(dense_bw):
+	with warnings.catch_warnings():
+		warnings.simplefilter('error')
+		with pytest.raises(ValueError, match='start before 0'):
+			BigWig(dense_bw[0]).read(['chrZ', 'chr1'], [0, -1], 10)
+
+
+@pytest.mark.parametrize('missing', ['0', None, True, [0.0]])
+def test_missing_must_be_a_number(dense_bw, missing):
+	with pytest.raises(TypeError, match='missing must be a number'):
+		BigWig(dense_bw[0]).read('chr1', [0], 10, missing=missing)
 
 
 @pytest.mark.parametrize('start, dtype', [
