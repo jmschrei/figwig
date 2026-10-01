@@ -485,6 +485,38 @@ def test_corrupt_block_raises(tmp_path):
 		BigWig(path).read('chr1', [95], 20)
 
 
+@pytest.mark.parametrize('raw', [b'', b'abcde'], ids=['empty', 'partial_word'])
+def test_block_not_whole_words_raises(tmp_path, raw, batching):
+	"""A block must inflate to a whole number of 32-bit words, through
+	uncompress() or, with the tiny batches' 64-byte buffer, through
+	zlib.decompress."""
+
+	path = str(tmp_path / 'words.bw')
+	write_raw_bigwig(path, {'chr1': 1000}, [_bedgraph('chr1', 10, [(0, 5, 1.0)]),
+		('chr1', 100, 110, zlib.compress(raw))])
+
+	bw = BigWig(path)
+	numpy.testing.assert_array_equal(bw.read('chr1', [10], 5)[0], 1.0)
+	with pytest.raises(ValueError, match='figwig cannot read.*chr1:95-115'):
+		bw.read('chr1', [10, 95], 20)
+
+
+def test_file_truncated_after_its_index_was_read(tmp_path):
+	"""A file cut short after the index was read, as when it is rewritten
+	under a reader, leaves blocks that cannot be read in full."""
+
+	path, _, data_index = _two_chrom_bigwig(tmp_path)
+	bw = BigWig(path)
+	bw.read('chr1', [95], 10)
+
+	with open(path, 'r+b') as handle:
+		handle.truncate(data_index - 4)
+
+	numpy.testing.assert_array_equal(bw.read('chr1', [95], 10)[0, 5:], 1.0)
+	with pytest.raises(ValueError, match='figwig cannot read.*chr2:95-105'):
+		bw.read('chr2', [95], 10)
+
+
 def test_corrupt_files_raise_only_value_errors(tmp_path):
 	"""Bytes of three small bigWigs overwritten at random, a few at a time,
 	three times in four inside the header, the chromosome tree or the data
