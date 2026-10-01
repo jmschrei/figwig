@@ -351,28 +351,7 @@ class BigWig:
 			end of the chromosome.
 		"""
 
-		n_jobs = _check_n_jobs(n_jobs)
-		missing = _check_missing(missing)
-		windows = _Windows(chroms, starts, width)
-		n, width = windows.n, windows.width
-		if out is None:
-			out = numpy.empty((n, width), dtype=numpy.float32)
-		elif not isinstance(out, numpy.ndarray):
-			raise TypeError("out must be a numpy array, not {}.".format(
-				type(out).__name__))
-		elif out.shape != (n, width) or out.dtype != numpy.float32 or \
-				not out.flags['C_CONTIGUOUS'] or not out.flags['WRITEABLE']:
-			raise ValueError("out must be a writeable, C-contiguous float32 "
-				"array of shape ({}, {}).".format(n, width))
-
-		if n == 0:
-			return out
-
-		windows.check_range()
-		self._warn_absent(windows, missing, stacklevel=2)
-		_run([_Read(self, windows, out.reshape(n, 1, width), 0, missing)],
-			n_jobs)
-		return out
+		return _read([self], True, chroms, starts, width, out, n_jobs, missing)
 
 	def _warn_absent(self, windows, missing, stacklevel):
 		"""Warn about windows on chromosomes the file does not have.
@@ -643,10 +622,50 @@ class _Read:
 		if self.failed.any():
 			j = self.order[numpy.flatnonzero(self.failed)[0]]
 			raise ValueError("{} windows overlap data blocks that figwig cannot "
-				"read: a block that cannot be decompressed, holds a section that "
-				"is not bedGraph, varStep or fixedStep, or holds intervals that "
-				"are unsorted, overlap, or lie outside its index entry. The first "
-				"is {}.".format(int(self.failed.sum()), self.windows.describe(j)))
+				"read in {}: a block that cannot be decompressed, holds a section "
+				"that is not bedGraph, varStep or fixedStep, or holds intervals "
+				"that are unsorted, overlap, or lie outside its index entry. The "
+				"first is {}.".format(int(self.failed.sum()), self.bigwig.path,
+				self.windows.describe(j)))
+
+
+def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
+	"""Read windows from one or more open bigWigs into one array.
+
+	With `single`, `bigwigs` holds one BigWig and the output has shape
+	(n, width); otherwise it has shape (n, len(bigwigs), width), and channel
+	i holds the values from bigwigs[i]. Every file's batches run on one
+	pool of threads. This is called by `BigWig.read` and `read_windows`, and
+	the warnings it raises name the line that called them.
+	"""
+
+	n_jobs = _check_n_jobs(n_jobs)
+	missing = _check_missing(missing)
+	windows = _Windows(chroms, starts, width)
+	n, width = windows.n, windows.width
+
+	shape = (n, width) if single else (n, len(bigwigs), width)
+	if out is None:
+		out = numpy.empty(shape, dtype=numpy.float32)
+	elif not isinstance(out, numpy.ndarray):
+		raise TypeError("out must be a numpy array, not {}.".format(
+			type(out).__name__))
+	elif out.shape != shape or out.dtype != numpy.float32 or \
+			not out.flags['C_CONTIGUOUS'] or not out.flags['WRITEABLE']:
+		raise ValueError("out must be a writeable, C-contiguous float32 array "
+			"of shape {}.".format(shape))
+
+	if n == 0:
+		return out
+
+	windows.check_range()
+	for bigwig in bigwigs:
+		bigwig._warn_absent(windows, missing, stacklevel=3)
+
+	out3 = out.reshape(n, 1, width) if single else out
+	_run([_Read(bigwig, windows, out3, i, missing) for i, bigwig in
+		enumerate(bigwigs)], n_jobs)
+	return out
 
 
 def _run(reads, n_jobs):
@@ -691,21 +710,35 @@ def _run(reads, n_jobs):
 		read.finish()
 
 
-def read_windows(path: str | os.PathLike, chroms: str | list[str] |
-	numpy.ndarray, starts: list[int] | numpy.ndarray, width: int,
-	out: numpy.ndarray | None = None, n_jobs: int = 8,
+def read_windows(bigwigs: str | os.PathLike | BigWig | list | tuple,
+	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
+	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
 	missing: float = 0.0) -> numpy.ndarray:
-	"""Read the per-base values of many windows of one width from a bigWig.
+	"""Read the per-base values of many windows of one width from bigWigs.
 
-	This opens the file and reads its data index on every call. To read the
-	same file more than once, open it with `BigWig` and call `read`, which
-	keeps the index.
+	Given one bigWig, this reads the windows as `BigWig.read` does, into an
+	array of shape (n, width). Given a list of them, such as the plus and
+	minus strands of a stranded assay or one track per task of a model, it
+	reads every file into one array of shape (n, len(bigwigs), width), in
+	which channel i holds the values from bigwigs[i]. That is the
+	(batch, channels, length) layout that sequence models take, and reading
+	into it directly costs neither a stack of one array per file nor the
+	memory for both. The batches of every file run on one pool of up to
+	`n_jobs` threads.
+
+	A path is opened, and its data index read, on every call. To read the
+	same files more than once, as a data loader does, open them with
+	`BigWig` and pass those, which keep their indexes.
+
+	Each file is read as `BigWig.read` describes: a window on a chromosome
+	that one file does not have is `missing` throughout in that file's
+	channel, with a warning, and the files need not share chromosomes.
 
 
 	Parameters
 	----------
-	path: str or os.PathLike
-		The path to a bigWig file.
+	bigwigs: str, os.PathLike, BigWig, or list or tuple of these
+		One bigWig, or several, as paths or as open `BigWig` objects.
 
 	chroms: str, list of str, or numpy.ndarray of str
 		The chromosome of each window, or one name for every window.
@@ -716,9 +749,10 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 	width: int
 		The length of every window, in bases.
 
-	out: numpy.ndarray, shape=(n, width), dtype=float32, or None, optional
-		A writeable, C-contiguous array to write the values into. Default is
-		None.
+	out: numpy.ndarray, dtype=float32, or None, optional
+		A writeable, C-contiguous array to write the values into, of shape
+		(n, width) for one bigWig and (n, len(bigwigs), width) for a list.
+		Default is None.
 
 	n_jobs: int, optional
 		The largest number of threads to use, or -1 for one per CPU. Default
@@ -726,14 +760,25 @@ def read_windows(path: str | os.PathLike, chroms: str | list[str] |
 
 	missing: float, optional
 		The value of a base that no interval covers, and of every base of a
-		window on a chromosome the file does not have. Default is 0.0.
+		window on a chromosome a file does not have. Default is 0.0.
 
 
 	Returns
 	-------
-	out: numpy.ndarray, shape=(n, width), dtype=float32
+	out: numpy.ndarray, dtype=float32, shape=(n, width) or (n, len(bigwigs), width)
 		The value of every base of every window, as `BigWig.read` gives it.
 	"""
 
-	return BigWig(path).read(chroms, starts, width, out=out, n_jobs=n_jobs,
-		missing=missing)
+	single = not isinstance(bigwigs, (list, tuple))
+	files = [bigwigs] if single else list(bigwigs)
+	if len(files) == 0:
+		raise ValueError("bigwigs must hold at least one bigWig.")
+
+	for bigwig in files:
+		if not isinstance(bigwig, (str, os.PathLike, BigWig)):
+			raise TypeError("bigwigs must be a path, a BigWig, or a list or tuple "
+				"of them, not {}.".format(type(bigwig).__name__))
+
+	files = [bigwig if isinstance(bigwig, BigWig) else BigWig(bigwig) for
+		bigwig in files]
+	return _read(files, single, chroms, starts, width, out, n_jobs, missing)
