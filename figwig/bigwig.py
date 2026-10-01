@@ -401,7 +401,7 @@ class BigWig:
 
 		# Blocks in a run are adjacent in the file, so each run is read to
 		# the positions its blocks have when they are packed end to end. A
-		# block that a short read does not reach in full is not read.
+		# block that the file ends inside is not read.
 		ends = numpy.cumsum(sizes)
 		starts = ends - sizes
 		data = numpy.empty(int(sizes.sum()), dtype=numpy.uint8)
