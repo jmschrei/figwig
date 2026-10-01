@@ -278,10 +278,26 @@ def test_missing_chromosome_raises(dense_bw):
 		BigWig(dense_bw[0]).read(['chr1', 'chrZ', 'chr7'], [0, 0, 0], 10)
 
 
-@pytest.mark.parametrize('start', [-1, 2**32 - 10])
-def test_out_of_range_window_raises(dense_bw, start):
-	with pytest.raises(ValueError, match='start before 0 or end past'):
-		BigWig(dense_bw[0]).read('chr1', [0, start], 10)
+@pytest.mark.parametrize('start, dtype', [
+	(-1, numpy.int64),
+	(2**32 - 10, numpy.int64),
+	(2**63 - 5, numpy.int64),
+	(2**63 + 5, numpy.uint64),
+])
+def test_out_of_range_window_raises(dense_bw, start, dtype):
+	"""A start within `width` of 2**63 overflowed when the window's end was
+	computed, passed the check and read garbage, and a uint64 start of 2**63
+	or more was reported as negative."""
+
+	starts = numpy.array([0, start], dtype=dtype)
+	with pytest.raises(ValueError, match=r'1 windows start before 0 or end '
+			r'past 2\*\*32 - 1, such as chr1:{}-{}\.'.format(start, start + 10)):
+		BigWig(dense_bw[0]).read('chr1', starts, 10)
+
+
+def test_window_ending_at_the_largest_position(dense_bw):
+	X = BigWig(dense_bw[0]).read('chr1', [2**32 - 11], 10)
+	assert numpy.isnan(X).all()
 
 
 def test_read_windows(sparse_bw):

@@ -310,8 +310,9 @@ class BigWig:
 
 		starts: list of int or numpy.ndarray of int, shape=(n,)
 			The start of each window, inclusive and base-0. Every window must
-			start at 0 or later and end before 2**32 - 1. A window may run
-			past the end of its chromosome, and the bases past it are NaN.
+			start at 0 or later, and its end, start + width, must be at most
+			2**32 - 1. A window may run past the end of its chromosome, and
+			the bases past it are NaN.
 
 		width: int
 			The length of every window, in bases. Must be at least 1.
@@ -349,8 +350,14 @@ class BigWig:
 		if starts.dtype.kind not in 'iu' and len(starts) > 0:
 			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
 
-		n = len(starts)
-		starts = starts.astype(numpy.int64)
+		# Windows must end at or before 2**32 - 1. This is checked on the
+		# starts as given, comparing each with 2**32 - 1 - width rather than
+		# adding width to it, so that neither a uint64 of 2**63 or more nor
+		# an int64 close to it overflows into a value that passes.
+		n, limit = len(starts), 2**32 - 1 - width
+		bad = numpy.flatnonzero((starts < 0) | (starts > limit)) if limit >= 0 \
+			else numpy.arange(n)
+		given, starts = starts, starts.astype(numpy.int64)
 
 		if isinstance(chroms, str):
 			names, codes = [chroms], numpy.zeros(n, dtype=numpy.int64)
@@ -381,12 +388,11 @@ class BigWig:
 			raise ValueError("Chromosomes not in {}: {}.".format(self.path,
 				", ".join(sorted(missing))))
 
-		bad = numpy.flatnonzero((starts < 0) | (starts + width >= 2**32))
 		if len(bad) > 0:
 			j = bad[0]
 			raise ValueError("{} windows start before 0 or end past 2**32 - 1, "
-				"such as {}:{}-{}.".format(len(bad), names[codes[j]], starts[j],
-				starts[j] + width))
+				"such as {}:{}-{}.".format(len(bad), names[codes[j]], given[j],
+				int(given[j]) + width))
 
 		index = self._get_index()
 		ids = numpy.array([self._chroms[name][0] for name in names],
