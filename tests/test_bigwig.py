@@ -1,13 +1,16 @@
 # test_bigwig.py
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
+import os
 import re
+import sys
 import copy
 import zlib
 import pickle
 import struct
 import pathlib
 import threading
+import subprocess
 
 import numpy
 import pytest
@@ -342,6 +345,29 @@ def test_pickle(dense_bw, duplicate):
 		assert other.path == bw.path and other.chroms == bw.chroms
 		assert_identical(other.read(names, starts, 100, n_jobs=3), X)
 		assert other._index_lock is not bw._index_lock
+
+
+def test_numba_disable_jit(dense_bw, tmp_path):
+	"""With NUMBA_DISABLE_JIT=1 the kernels are plain Python functions,
+	without the `signatures` attribute that read checked, and every read
+	raised AttributeError. NUMBA_DISABLE_JIT is read when numba is first
+	imported, so this runs in a new process."""
+
+	path, chroms = dense_bw
+	names, starts = random_windows(numpy.random.default_rng(11), chroms, 20, 300)
+	numpy.savez(tmp_path / 'windows.npz', names=names, starts=starts)
+
+	code = ("import numpy, figwig; w = numpy.load({!r}); numpy.save({!r}, "
+		"figwig.BigWig({!r}).read(w['names'], w['starts'], 300, n_jobs=2))")
+	code = code.format(str(tmp_path / 'windows.npz'), str(tmp_path / 'X.npy'),
+		path)
+	env = dict(os.environ, NUMBA_DISABLE_JIT='1')
+	result = subprocess.run([sys.executable, '-c', code], env=env,
+		capture_output=True, text=True)
+	assert result.returncode == 0, result.stderr
+
+	assert_identical(numpy.load(tmp_path / 'X.npy'), BigWig(path).read(names,
+		starts, 300))
 
 
 def test_concurrent_reads_on_one_object(deep_bw, batching):

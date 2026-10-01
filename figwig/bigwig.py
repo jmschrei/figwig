@@ -430,12 +430,14 @@ class BigWig:
 
 		# The first batch is read on this thread when the decoder or the
 		# inflater has not been compiled yet, so that each is compiled once and
-		# before any thread starts. pread takes no file position, so the
-		# threads share one fd.
+		# before any thread starts. With NUMBA_DISABLE_JIT=1 the kernels are
+		# plain functions, which have no signatures and need no compiling.
+		# pread takes no file position, so the threads share one fd.
 		uncompress = _zlib_uncompress() if self._buffer_size > 0 else None
 		n_batches = len(bounds) - 1
-		first = int(n_batches > 0 and not (_read_windows.signatures and
-			(uncompress is None or _inflate_blocks.signatures)))
+		compiled = getattr(_read_windows, 'signatures', True) and (uncompress is
+			None or getattr(_inflate_blocks, 'signatures', True))
+		first = int(n_batches > 0 and not compiled)
 		fd = os.open(self.path, os.O_RDONLY)
 		try:
 			if first:
