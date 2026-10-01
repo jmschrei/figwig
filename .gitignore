@@ -1,0 +1,35 @@
+# Never distributed -- personal agent instructions and working notes
+CLAUDE.md
+claude_comments/
+
+*.swp
+*.swo
+*~
+
+*.py[cod]
+__pycache__/
+.cache
+.pytest_cache
+.ruff_cache
+.coverage
+.ipynb_checkpoints/
+.venv/
+
+# Setup and build
+docs/_build/
+docs/_*
+*.egg-info/
+dist/
+build/
+MANIFEST
+
+# OS-generated files
+.DS_Store
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Model checkpoints and large artifacts
+*.torch
+*.log

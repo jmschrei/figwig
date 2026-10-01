@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "figwig"
+dynamic = ["version"]
+description = "A fast, multithreaded reader of many bigWig windows at once, into numpy."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Jacob Schreiber", email = "jmschreiber91@gmail.com" }]
+keywords = [
+    "genomics",
+    "bigwig",
+    "bioinformatics",
+    "machine-learning",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+
+dependencies = [
+    "numpy>=1.23",
+    "numba>=0.58",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pybigtools>=0.2,<0.3",
+    "ruff>=0.4",
+    "build>=1.0",
+    "twine>=4.0",
+]
+docs = [
+    "sphinx>=7.0",
+    "sphinx-rtd-theme>=2.0",
+    "nbsphinx>=0.9",
+    "jupyter>=1.0",
+    "nbconvert>=7.0",
+]
+
+[project.urls]
+Homepage      = "https://github.com/jmschrei/figwig"
+Repository    = "https://github.com/jmschrei/figwig"
+Issues        = "https://github.com/jmschrei/figwig/issues"
+Documentation = "https://figwig.readthedocs.io"
+
+[tool.hatch.version]
+path = "figwig/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["figwig"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "figwig",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+exclude = [
+    "tests",
+    "docs",
+    "claude_comments",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not cmd'"
+markers = [
+    "cmd: tests that invoke command-line entry points",
+]
