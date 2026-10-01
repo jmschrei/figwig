@@ -1,5 +1,6 @@
-# Installs dependencies and runs the unit tests with uv across a matrix of
-# Python versions.
+# Runs the unit tests with uv on Linux, macOS and Windows across the supported
+# Python versions, once more with the oldest numpy and numba that
+# pyproject.toml allows, and checks ruff and the documentation build.
 
 name: Python package
 
@@ -10,27 +11,63 @@ on:
     branches: ["main"]
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  test:
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - {os: macos-latest, python-version: "3.10"}
+          - {os: macos-latest, python-version: "3.13"}
+          - {os: windows-latest, python-version: "3.10"}
+          - {os: windows-latest, python-version: "3.13"}
+
+    env:
+      # pybigtools 0.2.5, the reference reader, has no wheel for Python 3.14,
+      # and its pyo3 builds for 3.14 only through the stable ABI.
+      PYO3_USE_ABI3_FORWARD_COMPATIBILITY: "1"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v3
+      - name: Set up uv and Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v10.2.0
         with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --extra dev --python ${{ matrix.python-version }}
+        run: uv sync --extra dev
 
       - name: Test with pytest
-        run: uv run --python ${{ matrix.python-version }} pytest
+        run: uv run pytest
+
+  lowest-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv and Python 3.10
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.10"
+
+      - name: Test with the lowest direct dependencies
+        run: uv run --isolated --resolution lowest-direct --extra dev pytest
+
+  lint-and-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up uv and Python 3.13
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Lint with ruff
+        run: uv run --extra dev ruff check figwig tests
+
+      - name: Build the documentation
+        run: uv run --extra docs python -m sphinx -b html docs docs/_build -q -W --keep-going
