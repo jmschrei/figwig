@@ -369,13 +369,16 @@ class BigWig:
 			return
 
 		n = int(numpy.isin(windows.codes, absent).sum())
-		shown = ", ".join(windows.names[k] for k in absent[:10])
+		# Names are quoted, so that an empty name or one with stray spaces can
+		# be told from the name it resembles.
+		shown = ", ".join(repr(windows.names[k]) for k in absent[:10])
 		if len(absent) > 10:
 			shown += ", and {} more".format(len(absent) - 10)
 
 		warnings.warn("{} windows are on chromosomes not in {}, and are {} "
 			"throughout: {}. Its chromosomes include {}.".format(n, self.path,
-			float(missing), shown, ", ".join(list(self.chroms)[:3])),
+			float(missing), shown, ", ".join(repr(name) for name in
+			list(self.chroms)[:3])),
 			stacklevel=stacklevel + 1)
 
 	def _read_blocks(self, fd, leaves, index, uncompress=None):

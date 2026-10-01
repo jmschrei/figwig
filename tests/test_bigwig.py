@@ -343,8 +343,8 @@ def test_absent_chromosome_is_missing(dense_bw, missing):
 	path, _ = dense_bw
 	bw = BigWig(path)
 	with pytest.warns(UserWarning, match=r'^3 windows are on chromosomes not in '
-			r'.*, and are (0\.0|nan) throughout: chr7, chrZ\. Its chromosomes '
-			r'include chr1, chr2, chrM\.$') as record:
+			r".*, and are (0\.0|nan) throughout: 'chr7', 'chrZ'\. Its chromosomes "
+			r"include 'chr1', 'chr2', 'chrM'\.$") as record:
 		X = bw.read(['chr1', 'chrZ', 'chr7', 'chrZ', 'chr2'], [0, 0, 5, 2**31,
 			100], 10, missing=missing)
 
@@ -359,11 +359,20 @@ def test_absent_chromosome_names(dense_bw):
 	warning shows the file's own names, and lists at most ten absent."""
 
 	names = [str(i) for i in range(1, 13)]
-	with pytest.warns(UserWarning, match=r'^12 windows .*: 1, 10, 11, 12, 2, 3, '
-			r'4, 5, 6, 7, and 2 more\. Its chromosomes include chr1, chr2'):
+	with pytest.warns(UserWarning, match=r"^12 windows .*: '1', '10', '11', "
+			r"'12', '2', '3', '4', '5', '6', '7', and 2 more\. Its chromosomes "
+			r"include 'chr1', 'chr2'"):
 		X = BigWig(dense_bw[0]).read(names, [0] * 12, 5)
 
 	assert (X == 0).all()
+
+
+def test_absent_chromosome_names_are_quoted(dense_bw):
+	"""An empty or padded name, as from slicing a string or reading a BED
+	file with stray spaces, showed as nothing or as the name it resembles."""
+
+	with pytest.warns(UserWarning, match=r"throughout: '', 'chr1 '\."):
+		BigWig(dense_bw[0]).read(['', 'chr1 '], [0, 0], 5)
 
 
 def test_range_is_checked_before_absent_chromosomes(dense_bw):
