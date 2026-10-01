@@ -9,6 +9,7 @@ import zlib
 import pickle
 import shutil
 import struct
+import types
 import pathlib
 import warnings
 import threading
@@ -610,29 +611,96 @@ def test_pickle(dense_bw, duplicate):
 		assert other._index_lock is not bw._index_lock
 
 
-@pytest.mark.parametrize('function', ['preadv', 'pread'])
+@pytest.mark.parametrize('function', ['preadv', 'pread', 'read'])
 def test_short_reads(deep_bw, monkeypatch, function):
 	"""POSIX lets a read return fewer bytes than asked for, and Linux returns
 	at most about 2 GiB from one. A short read marked the blocks it did not
 	reach as unreadable, and the windows over them raised. Here every read
-	returns at most 1,000 bytes, through preadv or through the pread that
-	is used where preadv does not exist."""
+	returns at most 1,000 bytes, through preadv, through the pread used
+	where there is no preadv, or through the seek and read used where there
+	is neither, as on Windows. That last one shares a file position between
+	threads, so the read runs in small batches on several threads."""
+
+	if function != 'read' and not hasattr(os, function):
+		pytest.skip('os.{} does not exist here.'.format(function))
 
 	path, chroms = deep_bw
 	names, starts = random_windows(numpy.random.default_rng(12), chroms, 300,
 		20_000)
 	X = BigWig(path).read(names, starts, 20_000)
 
-	preadv, pread = os.preadv, os.pread
 	if function == 'preadv':
+		preadv = os.preadv
 		monkeypatch.setattr(os, 'preadv', lambda fd, buffers, offset: preadv(
 			fd, [buffers[0][:1000]], offset))
-	else:
-		monkeypatch.delattr(os, 'preadv')
+	elif function == 'pread':
+		pread = os.pread
+		monkeypatch.delattr(os, 'preadv', raising=False)
 		monkeypatch.setattr(os, 'pread', lambda fd, n, offset: pread(fd,
 			min(n, 1000), offset))
+	else:
+		read = os.read
+		monkeypatch.delattr(os, 'preadv', raising=False)
+		monkeypatch.delattr(os, 'pread', raising=False)
+		monkeypatch.setattr(os, 'read', lambda fd, n: read(fd, min(n, 1000)))
+		monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 2)
 
-	assert_identical(BigWig(path).read(names, starts, 20_000, n_jobs=3), X)
+	assert_identical(BigWig(path).read(names, starts, 20_000, n_jobs=6), X)
+
+
+@pytest.mark.parametrize('failing, expected', [
+	(set(), 'libz.so.1'),
+	({'libz.so.1': AttributeError}, 'libz.1.dylib'),
+	({'libz.so.1', 'libz.1.dylib', 'libz.dylib'}, 'zlib1.dll'),
+	({'libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll', 'zlib.dll'},
+		'found:z'),
+	({'libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll', 'zlib.dll',
+		'found:z'}, 'found:zlib'),
+	({'libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll', 'zlib.dll',
+		'found:z', 'found:zlib'}, None),
+], ids=['linux', 'macos', 'windows', 'find_z', 'find_zlib', 'none'])
+def test_zlib_loader(monkeypatch, failing, expected):
+	"""zlib's library is looked for under its Linux, macOS and Windows names,
+	then through ctypes.util.find_library. A library that cannot be loaded,
+	or that has no uncompress (AttributeError), is passed over, and without
+	one the loader gives None, so that blocks are inflated by
+	zlib.decompress."""
+
+	import ctypes
+	import ctypes.util
+
+	class Library:
+		def __init__(self, name):
+			if name in failing:
+				raise (failing[name] if isinstance(failing, dict) else OSError)(
+					name)
+
+			self.uncompress = types.SimpleNamespace(name=name)
+
+	monkeypatch.setattr(ctypes, 'CDLL', Library)
+	monkeypatch.setattr(ctypes.util, 'find_library', lambda name: 'found:' +
+		name)
+	loaded = figwig._kernels._load_zlib_uncompress()
+
+	if expected is None:
+		assert loaded is None
+	else:
+		function, ulong = loaded
+		assert function.name == expected
+		assert function.restype is ctypes.c_int
+		assert ulong == numpy.dtype(ctypes.c_ulong)
+
+
+def test_zlib_loader_without_find_library(monkeypatch):
+	import ctypes
+	import ctypes.util
+
+	def library(name):
+		raise OSError(name)
+
+	monkeypatch.setattr(ctypes, 'CDLL', library)
+	monkeypatch.setattr(ctypes.util, 'find_library', lambda name: None)
+	assert figwig._kernels._load_zlib_uncompress() is None
 
 
 def test_numba_disable_jit(dense_bw, tmp_path):

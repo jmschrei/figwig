@@ -10,6 +10,7 @@ holds the GIL between blocks.
 """
 
 import os
+import threading
 
 import numba
 import numpy
@@ -18,14 +19,25 @@ import numpy
 # zlib's uncompress() through ctypes, loaded on the first read.
 _ZLIB_UNCOMPRESS = []
 
+# The names zlib's shared library goes by on Linux, macOS and Windows, tried
+# in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
+_ZLIB_NAMES = ('libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll',
+	'zlib.dll')
+
+# Where there is no pread, as on Windows, a read seeks the shared file
+# descriptor and then reads from it, and this lock keeps another thread from
+# moving the file position in between.
+_SEEK_LOCK = threading.Lock()
+
 
 def _zlib_uncompress():
 	"""zlib's uncompress() as a ctypes function, or None if it cannot be loaded.
 
 	`_inflate_blocks` calls it without the GIL. The zlib module links the
-	same library on Linux, where it is already loaded under this name.
-	Without it, every block is inflated by `zlib.decompress`, with the same
-	result.
+	same library on Linux, where it is already loaded under this name. A
+	Python whose zlib is built into the interpreter, as on Windows, may have
+	no zlib library to load. Without it, every block is inflated by
+	`zlib.decompress`, with the same result.
 	"""
 
 	if len(_ZLIB_UNCOMPRESS) == 0:
@@ -43,10 +55,10 @@ def _load_zlib_uncompress():
 	except ImportError:
 		return None
 
-	for name in ('libz.so.1', 'libz.dylib', 'zlib1.dll', 'z'):
+	for name in _ZLIB_NAMES + ('z', 'zlib'):
 		try:
-			if name == 'z':
-				name = ctypes.util.find_library('z')
+			if name in ('z', 'zlib'):
+				name = ctypes.util.find_library(name)
 				if name is None:
 					continue
 
@@ -72,8 +84,9 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 	bytes or to bytes that are not whole 32-bit words gets blocks[k, 5] = 0,
 	as it would from zlib.decompress. A block that uncompress() cannot
 	inflate into the rest of `buffer` gets 2, and is left to zlib.decompress.
-	`length` is a one-element array of C unsigned longs. Returns the number
-	of bytes of `buffer` that were used.
+	`length` is a one-element array of C unsigned longs, which are 32 bits on
+	Windows, so the room offered for a block is at most 2**32 - 1 bytes.
+	Returns the number of bytes of `buffer` that were used.
 	"""
 
 	position = 0
@@ -81,7 +94,7 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 		if blocks[k, 5] != 1:
 			continue
 
-		length[0] = buffer.shape[0] - position
+		length[0] = min(buffer.shape[0] - position, 2 ** 32 - 1)
 		source = data[starts[k]:starts[k] + sizes[k]]
 		status = uncompress(buffer[position:].ctypes, length.ctypes,
 			source.ctypes, sizes[k])
@@ -104,7 +117,9 @@ def _pread_into(fd, buffer, offset):
 
 	A read may return fewer bytes than asked for, and Linux returns at most
 	about 2 GiB from one, so this reads until `buffer` is full or the file
-	ends.
+	ends. preadv reads straight into `buffer`, pread into a copy, and where
+	neither exists, as on Windows, the file is seeked and read under
+	`_SEEK_LOCK`, since its position is shared by every thread.
 	"""
 
 	total = 0
@@ -112,7 +127,13 @@ def _pread_into(fd, buffer, offset):
 		if hasattr(os, 'preadv'):
 			n = os.preadv(fd, [buffer[total:]], offset + total)
 		else:
-			data = os.pread(fd, len(buffer) - total, offset + total)
+			if hasattr(os, 'pread'):
+				data = os.pread(fd, len(buffer) - total, offset + total)
+			else:
+				with _SEEK_LOCK:
+					os.lseek(fd, offset + total, os.SEEK_SET)
+					data = os.read(fd, len(buffer) - total)
+
 			n = len(data)
 			buffer[total:total + n] = numpy.frombuffer(data, dtype=numpy.uint8)
 

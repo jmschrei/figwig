@@ -600,8 +600,11 @@ class _Read:
 		self.fd = None
 
 	def open(self):
-		# pread takes no file position, so every batch shares one fd.
-		self.fd = os.open(self.bigwig.path, os.O_RDONLY)
+		# Every batch shares one fd, read without moving its position where
+		# there is pread. Windows opens a file in text mode unless asked for
+		# binary, and has O_BINARY to ask; elsewhere it does not exist.
+		self.fd = os.open(self.bigwig.path, os.O_RDONLY | getattr(os,
+			'O_BINARY', 0))
 
 	def close(self):
 		if self.fd is not None:
