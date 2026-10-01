@@ -345,7 +345,7 @@ class BigWig:
 		starts = numpy.asarray(starts)
 		if starts.ndim != 1:
 			raise ValueError("starts must be one-dimensional.")
-		if starts.dtype.kind not in 'iu':
+		if starts.dtype.kind not in 'iu' and len(starts) > 0:
 			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
 
 		n = len(starts)

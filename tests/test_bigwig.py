@@ -214,8 +214,14 @@ def test_out(dense_bw):
 			bw.read('chr1', [0, 100], 30, out=bad)
 
 
-def test_no_windows(dense_bw):
-	X = BigWig(dense_bw[0]).read([], numpy.empty(0, dtype=numpy.int64), 10)
+@pytest.mark.parametrize('chroms', [[], 'chr1'])
+@pytest.mark.parametrize('starts', [numpy.empty(0, dtype=numpy.int64), [], ()],
+	ids=['array', 'list', 'tuple'])
+def test_no_windows(dense_bw, chroms, starts):
+	"""An empty list of starts is float64 to numpy, and was refused as not
+	being integers."""
+
+	X = BigWig(dense_bw[0]).read(chroms, starts, 10)
 	assert X.shape == (0, 10) and X.dtype == numpy.float32
 
 
