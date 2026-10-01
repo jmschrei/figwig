@@ -55,10 +55,10 @@ class BigWig:
 	given in does not matter. It finds the data blocks overlapping each window
 	in the index, and works through those blocks in batches of 256. Each
 	batch is read from the file, decompressed and decoded straight into the
-	windows' rows of the output. A block that several windows share, because
-	they overlap or repeat, is decompressed once. Batches run on up to
-	`n_jobs` threads. zlib's own `uncompress()` and the numba decoder both run
-	without the GIL, so the threads run in parallel.
+	windows' rows of the output. A block that several windows of one batch
+	share, because they overlap or repeat, is decompressed once. Batches run
+	on up to `n_jobs` threads. zlib's own `uncompress()` and the numba decoder
+	both run without the GIL, so the threads run in parallel.
 
 	Each base gets the value of the interval that covers it. A base that no
 	interval covers gets `missing`, 0 unless given, and a base past the end of
