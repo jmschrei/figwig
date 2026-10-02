@@ -51,9 +51,25 @@ def _load_zlib_uncompress():
 
 	try:
 		import ctypes
-		import ctypes.util
 	except ImportError:
 		return None
+
+	function = _zlib_function('uncompress')
+	if function is None:
+		return None
+
+	function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+		ctypes.c_ulong]
+	function.restype = ctypes.c_int
+	return function, numpy.dtype(ctypes.c_ulong)
+
+
+def _zlib_function(symbol):
+	"""The function `symbol` from zlib's shared library, through ctypes, from
+	the first of its names that loads and has it, or None."""
+
+	import ctypes
+	import ctypes.util
 
 	for name in _ZLIB_NAMES + ('z', 'zlib'):
 		try:
@@ -62,14 +78,9 @@ def _load_zlib_uncompress():
 				if name is None:
 					continue
 
-			function = ctypes.CDLL(name).uncompress
+			return getattr(ctypes.CDLL(name), symbol)
 		except (OSError, AttributeError):
 			continue
-
-		function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-			ctypes.c_ulong]
-		function.restype = ctypes.c_int
-		return function, numpy.dtype(ctypes.c_ulong)
 
 	return None
 
