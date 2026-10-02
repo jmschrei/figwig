@@ -27,6 +27,14 @@ if sys.platform != 'win32':
 needs_pybigwig = pytest.mark.skipif(sys.platform == 'win32',
 	reason='pyBigWig does not build on Windows')
 
+# On Windows, neither zlib's library nor libdeflate's functions, from the
+# deflate package's extension module, can be loaded with ctypes, so blocks
+# are compressed by Python's zlib module and engine='libdeflate' raises. The
+# tests of those libraries, and of files written with libdeflate, run
+# everywhere else. The pytest header says which libraries loaded.
+needs_c_libraries = pytest.mark.skipif(sys.platform == 'win32',
+	reason="zlib's library and libdeflate's functions do not load on Windows")
+
 
 def blocks_of(sizes, random_state=0):
 	"""Blocks of these lengths, as (data, bounds): random bytes with few
@@ -49,6 +57,7 @@ def split_streams(out, sizes):
 ##
 
 
+@needs_c_libraries
 @pytest.mark.parametrize('level', [1, 6, 9])
 def test_deflate_blocks_zlib(level):
 	"""Each block is compressed by compress2() into the stream zlib.compress
@@ -69,6 +78,7 @@ def test_deflate_blocks_zlib(level):
 		level) for block in blocks]
 
 
+@needs_c_libraries
 @pytest.mark.parametrize('level', [1, 6, 12])
 def test_deflate_blocks_libdeflate(level):
 	blocks, data, bounds = blocks_of([0, 1, 24, 32768, 32760])
@@ -90,6 +100,7 @@ def test_deflate_blocks_libdeflate(level):
 	assert [zlib.decompress(stream.tobytes()) for stream in streams] == blocks
 
 
+@needs_c_libraries
 def test_deflate_blocks_report_the_block_that_does_not_fit():
 	"""When what is left of `out` cannot hold a block's stream, both kernels
 	stop and return that block, here the fourth, after the first three have
@@ -113,6 +124,7 @@ def test_deflate_blocks_report_the_block_that_does_not_fit():
 		free(compressor)
 
 
+@needs_c_libraries
 def test_zlib_compress_loader(monkeypatch):
 	"""compress2() is looked for in the same library, the same way, as
 	uncompress(), and without it the loader gives None."""
@@ -373,8 +385,14 @@ def test_mixed_sections_match_pybigwig_but_for_empty_blocks(tmp_path):
 	assert all(struct.unpack_from('<H', raw, 22)[0] == 0 for _, raw in empty)
 	assert a['blocks'] == [block for block in b['blocks'] if len(block[1]) > 24]
 	assert len(a['blocks']) == a['n_blocks'] == 4
-	assert a['summary'] == b['summary']
 	assert a['chrom_tree'] == b['chrom_tree']
+
+	# libBigWig adds span * pow(value, 2) to the sum of squares, which the
+	# macOS build of pyBigWig computes with a fused multiply-add, rounding
+	# once where figwig and the Linux build round twice.
+	assert a['summary'][:32] == b['summary'][:32]
+	assert struct.unpack('<d', a['summary'][32:]) == pytest.approx(
+		struct.unpack('<d', b['summary'][32:]), rel=1e-12)
 
 
 @needs_pybigwig
@@ -574,7 +592,8 @@ def assert_bits(a, b):
 	numpy.testing.assert_array_equal(a.view('<u4')[~nan_a], b.view('<u4')[~nan_b])
 
 
-@pytest.mark.parametrize('engine', ['zlib', 'libdeflate', 'isal'])
+@pytest.mark.parametrize('engine', ['zlib', pytest.param('libdeflate',
+	marks=needs_c_libraries), 'isal'])
 def test_round_trip(tmp_path, engine):
 	"""Values written in each of the three ways, with each engine, read back
 	bit for bit with figwig and with pybigtools, zoom levels included."""
@@ -639,12 +658,14 @@ def test_dense_negative_zero(tmp_path):
 
 
 def test_engine_auto(tmp_path, monkeypatch):
-	"""'auto' is libdeflate when the deflate package's library is there, and
-	zlib otherwise. Asking for libdeflate where its functions do not load
-	says whether the package is missing or only its functions."""
+	"""'auto' is libdeflate when libdeflate's functions load from the deflate
+	package, which they do not on Windows, and zlib otherwise. Asking for
+	libdeflate where they do not load says whether the package is missing
+	or only its functions."""
 
 	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
-		assert writer.engine == 'libdeflate'
+		assert writer.engine == ('zlib' if sys.platform == 'win32' else
+			'libdeflate')
 
 	monkeypatch.setattr(figwig.writer, '_libdeflate', lambda: None)
 	with figwig.BigWigWriter(tmp_path / 'b.bw', CHROMS) as writer:
@@ -664,7 +685,8 @@ def test_engine_isal_needs_isal(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('engine, level', [('zlib', 6), ('zlib', 1),
-	('libdeflate', 6), ('libdeflate', 12)])
+	pytest.param('libdeflate', 6, marks=needs_c_libraries),
+	pytest.param('libdeflate', 12, marks=needs_c_libraries)])
 def test_same_bytes_whatever_threads_and_batches(tmp_path, monkeypatch, engine,
 	level):
 	"""zlib and libdeflate files are the same byte for byte whatever the
@@ -702,6 +724,8 @@ def test_same_bytes_without_pread(tmp_path, monkeypatch, writer_batching,
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
+@pytest.mark.skipif(not (hasattr(os, 'preadv') or hasattr(os, 'pread')),
+	reason='without pread every zoom level is held to the end')
 def test_finest_zoom_level_written_during_pass(tmp_path, monkeypatch):
 	"""The finest zoom level's blocks are written as they are compressed,
 	before the levels are finished; on one thread, each is compressed as
@@ -768,6 +792,7 @@ def test_zoom_read_ahead_is_bounded(tmp_path, monkeypatch):
 	assert most[0] == 3
 
 
+@needs_c_libraries
 def test_levels_change_bytes_not_values(tmp_path):
 	calls = calls_of('intervals')
 	for name, engine, level in [('a', 'zlib', 1), ('b', 'zlib', 9), ('c',
@@ -1006,7 +1031,8 @@ def test_bad_chroms(tmp_path, chroms, error, match):
 	({'level': 6.0}, TypeError, 'level must be an integer'),
 	({'engine': 'zlib', 'level': 10}, ValueError, 'from 0 to 9'),
 	({'engine': 'zlib', 'level': -1}, ValueError, 'from 0 to 9'),
-	({'engine': 'libdeflate', 'level': 13}, ValueError, 'from 0 to 12'),
+	pytest.param({'engine': 'libdeflate', 'level': 13}, ValueError,
+		'from 0 to 12', marks=needs_c_libraries),
 	({'engine': 'isal', 'level': 4}, ValueError, 'from 0 to 3'),
 	({'n_jobs': 0}, ValueError, 'n_jobs must be at least 1'),
 	({'n_jobs': 2.0}, TypeError, 'n_jobs must be an integer'),
