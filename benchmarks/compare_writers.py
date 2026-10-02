@@ -20,8 +20,9 @@ A bigWig whose intervals are all one base long is written as single bases
 	  tuples. It always writes zoom levels, so it is only run with them.
 
 Each configuration of library, engine, threads, zoom levels and bigWig runs
-in its own process, which loads the cached values and then times one write,
-opening the file and closing it included. Every repetition runs every
+in its own process, which loads the cached values, imports the library and
+warms up on a write of the first 1,000 values of each chromosome, then times
+one write, opening the file and closing it included. Every repetition runs every
 configuration once, in an order rotated from the last repetition's, and the
 table gives the median and range over repetitions, the size of the file and
 the process's peak resident memory. Threads are pinned through OMP, MKL,
@@ -154,6 +155,11 @@ def time_one(args):
 		args.bigwig))
 	path = os.path.join(args.scratch, 'out-{}-{}-{}-{}.bw'.format(args.lib,
 		args.engine, args.threads, args.zooms))
+
+	warm = {chrom: tuple(x[:1000] for x in arrays) for chrom, arrays in
+		entries.items()}
+	WRITERS[args.lib](path, chroms, warm, single, args.engine, args.threads,
+		args.zooms)
 
 	start = time.perf_counter()
 	WRITERS[args.lib](path, chroms, entries, single, args.engine, args.threads,
