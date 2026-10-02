@@ -357,7 +357,8 @@ is more, then 4 times larger at each level, up to the longest chromosome, for
 at most `zooms` levels, 10 by default.
 
 Blocks are compressed with zlib, or with libdeflate when the `deflate`
-package is installed and `engine` is `'auto'`, its default. Both write zlib
+package is installed and `engine` is `'auto'`, its default, except on
+Windows, where libdeflate's functions cannot be loaded. Both write zlib
 streams that any bigWig reader can read, and both write the same file
 whatever `n_jobs` is. libdeflate is faster: on the data blocks of the counts
 track below, at level 6 on one thread, it compressed 142 MB/s to zlib's
@@ -397,11 +398,15 @@ second. One `BigWig` can be read from several threads at once, and holds no
 open file between reads.
 
 figwig needs a little-endian machine, which every common one is, and Python
-3.10 to 3.14. It has been run on Linux. It has code paths for macOS and for
-Windows, where Python has no `os.pread`, and the CI workflow runs the tests on
-both, but neither has been run yet. Where zlib's shared library cannot be
-found, blocks are decompressed by Python's zlib module instead, with the same
-values.
+3.10 to 3.14. Its tests run on Linux under each of those versions, and on
+macOS and Windows under 3.10 and 3.13. On Windows, Python has no `os.pread`,
+so blocks are read by seeking the file under a lock. Where zlib's library
+cannot be loaded, as on Windows, blocks are decompressed and compressed by
+Python's zlib module instead, with the same values. libdeflate's functions
+cannot be loaded from the `deflate` package on Windows either, so there
+`engine='auto'` is zlib and `engine='libdeflate'` raises a `ValueError`.
+pyBigWig, which the writer's tests compare files with byte for byte, does not
+build on Windows, so those comparisons run on Linux and macOS.
 
 ## Speed
 
