@@ -369,8 +369,11 @@ their values are.
 Values are laid out in batches of about a million items, which are compressed
 on up to `n_jobs` threads while the calling thread lays out the next batch.
 The zoom levels are built when the writer is closed, from the data blocks read
-back from the file, and their blocks are kept compressed in memory until they
-are written.
+back from the file. The finest level's blocks are written as they are
+compressed. The other levels' are kept compressed in memory until every level
+is built, since whether a level is written depends on how many records it
+has, and so are the finest level's where Python has no `os.pread`, as on
+Windows.
 
 ## Threads, memory and the first call
 

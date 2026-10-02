@@ -1,6 +1,7 @@
 # test_writer.py
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
+import os
 import sys
 import struct
 import pathlib
@@ -656,6 +657,47 @@ def test_same_bytes_whatever_threads_and_batches(tmp_path, monkeypatch, engine,
 		outputs.add(path.read_bytes())
 
 	assert len(outputs) == 1
+
+
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_same_bytes_without_pread(tmp_path, monkeypatch, writer_batching,
+	n_jobs):
+	"""Where there is neither preadv nor pread, as on Windows, blocks are read
+	back for the zoom levels by seeking, so every zoom level is held to the
+	end rather than the finest written as it is compressed. The file is the
+	same."""
+
+	calls = calls_of('intervals', random_state=3)
+	write_figwig(tmp_path / 'a.bw', CHROMS, calls, n_jobs=n_jobs)
+	monkeypatch.delattr(os, 'preadv', raising=False)
+	monkeypatch.delattr(os, 'pread', raising=False)
+	write_figwig(tmp_path / 'b.bw', CHROMS, calls, n_jobs=n_jobs)
+
+	assert len(parse(tmp_path / 'a.bw')['levels']) > 1
+	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
+
+
+def test_finest_zoom_level_written_during_pass(tmp_path, monkeypatch):
+	"""The finest zoom level's blocks are written as they are compressed,
+	before the levels are finished; on one thread, each is compressed as
+	soon as its records are, so all are written by then."""
+
+	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', 1)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', 1)
+	seen = []
+	finish = figwig.writer._ZoomLevel.finish
+
+	def recorded(self):
+		seen.append((self.size, self.n_written, len(self.blocks)))
+		return finish(self)
+
+	monkeypatch.setattr(figwig.writer._ZoomLevel, 'finish', recorded)
+	write_figwig(tmp_path / 'a.bw', CHROMS, calls_of('bases'), n_jobs=1)
+
+	size, n_written, n_blocks = seen[0]
+	assert size == min(size for size, _, _ in seen)
+	assert n_written == n_blocks > 1
+	assert all(n_written == 0 for _, n_written, _ in seen[1:])
 
 
 def test_levels_change_bytes_not_values(tmp_path):

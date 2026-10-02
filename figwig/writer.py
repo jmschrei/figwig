@@ -912,6 +912,14 @@ class BigWigWriter:
 			return [self._task(_read_items, fd, blocks[x:y], lengths[x:y]) for x,
 				y in zip(cuts[:-1], cuts[1:])]
 
+		# The finest level is always kept, so it is written as its blocks are
+		# compressed rather than held to the end, where reading back leaves the
+		# file's position alone.
+		streamed = None
+		if hasattr(os, 'preadv') or hasattr(os, 'pread'):
+			streamed = zooms[0]
+			self._start_zoom_level(streamed)
+
 		# Each chunk is read while the one before it is summarized, and the zoom
 		# blocks the summaries complete are compressed on the pool meanwhile.
 		# A level summarizes its chunks one after another, since its open record
@@ -926,6 +934,9 @@ class BigWigWriter:
 			for zoom, summary in zip(zooms, summaries):
 				self._compress_zoom(zoom, *summary.result())
 
+			if streamed is not None:
+				self._write_zoom_blocks(streamed, False)
+
 		for zoom in zooms:
 			self._compress_zoom(zoom, *zoom.finish())
 
@@ -939,19 +950,44 @@ class BigWigWriter:
 				continue
 
 			fewest = zoom.n_records
-			streams = [block for part in zoom.blocks for block in part.result()]
-			data_offset = self._file.tell()
-			self._file.write(numpy.uint32(len(streams)).tobytes())
-			index = numpy.empty(len(streams), dtype=_LEAF_ITEM)
-			for i, (stream, entry) in enumerate(streams):
-				index[i] = entry + (self._file.tell(), len(stream))
-				self._file.write(stream)
+			if zoom is not streamed:
+				self._start_zoom_level(zoom)
 
+			self._write_zoom_blocks(zoom, True)
 			index_offset = self._file.tell()
+			self._file.seek(zoom.data_offset)
+			self._file.write(numpy.uint32(len(zoom.entries)).tobytes())
+			self._file.seek(index_offset)
+
+			index = numpy.array(zoom.entries, dtype=_LEAF_ITEM)
 			self._file.write(_index(index, index_offset, _BUF_SIZE // 32))
-			written.append((zoom.size, 0, data_offset, index_offset))
+			written.append((zoom.size, 0, zoom.data_offset, index_offset))
 
 		return written
+
+	def _start_zoom_level(self, zoom):
+		"""Write a zoom level's block count, to be filled in once its blocks
+		are written, at the end of the file."""
+
+		zoom.data_offset = self._file.tell()
+		self._file.write(numpy.uint32(0).tobytes())
+
+	def _write_zoom_blocks(self, zoom, wait):
+		"""Write a zoom level's compressed blocks in order, and their index
+		entries, waiting for those not yet compressed or, unless `wait`,
+		stopping at the first of them."""
+
+		while zoom.n_written < len(zoom.blocks):
+			part = zoom.blocks[zoom.n_written]
+			if not wait and not part.done():
+				break
+
+			for stream, entry in part.result():
+				zoom.entries.append(entry + (self._file.tell(), len(stream)))
+				self._file.write(stream)
+
+			zoom.blocks[zoom.n_written] = None
+			zoom.n_written += 1
 
 	def _task(self, function, *args):
 		"""Run function(*args) on the pool, or here when there is none."""
@@ -979,6 +1015,9 @@ class _Done:
 
 	def result(self):
 		return self.value
+
+	def done(self):
+		return True
 
 
 def _layout(runs):
@@ -1106,7 +1145,8 @@ class _ZoomLevel:
 
 	`add` and `finish` give back the records of the zoom blocks they complete,
 	to be compressed elsewhere; `blocks` collects the futures of their
-	compressed streams, in order.
+	compressed streams, in order, and the first `n_written` have been written
+	to the file at `data_offset`, with `entries` their index entries.
 	"""
 
 	def __init__(self, size):
@@ -1121,6 +1161,9 @@ class _ZoomLevel:
 			dtype=numpy.float32)
 		self.blocks = []
 		self.n_records = 0
+		self.n_written = 0
+		self.entries = []
+		self.data_offset = None
 
 	def add(self, parts):
 		"""Summarize the items of `parts`, each (chromosome ids, starts, ends,
