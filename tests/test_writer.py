@@ -143,10 +143,11 @@ def test_libdeflate_loader_without_deflate(monkeypatch):
 		patch.setitem(sys.modules, 'deflate._deflate', None)
 		assert figwig._kernels._load_libdeflate() is None
 
-	# A shared library that loads but has none of libdeflate's functions.
-	import _ctypes
+	# A shared library that loads but has none of libdeflate's functions: one
+	# of numpy's extension modules, which is a file in every Python, where
+	# _ctypes is built into some interpreters.
 	monkeypatch.setattr(deflate, '_deflate', types.SimpleNamespace(
-		__file__=_ctypes.__file__))
+		__file__=numpy.random.mtrand.__file__))
 	assert figwig._kernels._load_libdeflate() is None
 
 
