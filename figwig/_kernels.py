@@ -19,6 +19,13 @@ import numpy
 # zlib's uncompress() through ctypes, loaded on the first read.
 _ZLIB_UNCOMPRESS = []
 
+# zlib's compress2() through ctypes, loaded on the first write.
+_ZLIB_COMPRESS = []
+
+# libdeflate's compressor functions through ctypes, from the `deflate`
+# package, loaded on the first write that uses them.
+_LIBDEFLATE = []
+
 # The names zlib's shared library goes by on Linux, macOS and Windows, tried
 # in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
 _ZLIB_NAMES = ('libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll',
@@ -51,9 +58,25 @@ def _load_zlib_uncompress():
 
 	try:
 		import ctypes
-		import ctypes.util
 	except ImportError:
 		return None
+
+	function = _zlib_function('uncompress')
+	if function is None:
+		return None
+
+	function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+		ctypes.c_ulong]
+	function.restype = ctypes.c_int
+	return function, numpy.dtype(ctypes.c_ulong)
+
+
+def _zlib_function(symbol):
+	"""The function `symbol` from zlib's shared library, through ctypes, from
+	the first of its names that loads and has it, or None."""
+
+	import ctypes
+	import ctypes.util
 
 	for name in _ZLIB_NAMES + ('z', 'zlib'):
 		try:
@@ -62,16 +85,86 @@ def _load_zlib_uncompress():
 				if name is None:
 					continue
 
-			function = ctypes.CDLL(name).uncompress
+			return getattr(ctypes.CDLL(name), symbol)
 		except (OSError, AttributeError):
 			continue
 
-		function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-			ctypes.c_ulong]
-		function.restype = ctypes.c_int
-		return function, numpy.dtype(ctypes.c_ulong)
-
 	return None
+
+
+def _zlib_compress():
+	"""zlib's compress2() as a ctypes function, or None if it cannot be loaded.
+
+	`_deflate_blocks_zlib` calls it without the GIL. Where it cannot be
+	loaded, blocks are compressed by `zlib.compress`, with the same bytes,
+	since both are zlib.
+	"""
+
+	if len(_ZLIB_COMPRESS) == 0:
+		_ZLIB_COMPRESS.append(_load_zlib_compress())
+
+	return _ZLIB_COMPRESS[0]
+
+
+def _load_zlib_compress():
+	"""(compress2, the dtype of a C unsigned long), or None."""
+
+	try:
+		import ctypes
+	except ImportError:
+		return None
+
+	function = _zlib_function('compress2')
+	if function is None:
+		return None
+
+	function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+		ctypes.c_ulong, ctypes.c_int]
+	function.restype = ctypes.c_int
+	return function, numpy.dtype(ctypes.c_ulong)
+
+
+def _libdeflate():
+	"""libdeflate's (alloc_compressor, zlib_compress, free_compressor) as
+	ctypes functions, or None if the `deflate` package is not installed or
+	its library does not export them.
+
+	The `deflate` package links libdeflate into its extension module, and
+	exports libdeflate's functions from it. `_deflate_blocks_libdeflate`
+	calls `zlib_compress` without the GIL. A compressor is passed to it as an
+	integer, which is why its first argument is a size_t rather than a
+	pointer.
+	"""
+
+	if len(_LIBDEFLATE) == 0:
+		_LIBDEFLATE.append(_load_libdeflate())
+
+	return _LIBDEFLATE[0]
+
+
+def _load_libdeflate():
+	try:
+		import ctypes
+		import deflate._deflate
+	except ImportError:
+		return None
+
+	try:
+		library = ctypes.CDLL(deflate._deflate.__file__)
+		alloc = library.libdeflate_alloc_compressor
+		compress = library.libdeflate_zlib_compress
+		free = library.libdeflate_free_compressor
+	except (OSError, AttributeError):
+		return None
+
+	alloc.argtypes = [ctypes.c_int]
+	alloc.restype = ctypes.c_size_t
+	compress.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+		ctypes.c_void_p, ctypes.c_size_t]
+	compress.restype = ctypes.c_size_t
+	free.argtypes = [ctypes.c_size_t]
+	free.restype = None
+	return alloc, compress, free
 
 
 @numba.njit(nogil=True, cache=True)
@@ -110,6 +203,243 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 			position += n
 
 	return position
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_blocks_zlib(compress2, level, data, bounds, out, sizes, length):
+	"""Compress blocks one after another into `out` with zlib's compress2(),
+	without the GIL.
+
+	Block k is data[bounds[k]:bounds[k + 1]]. Each block's zlib stream is
+	written straight after the one before it, so the streams of a run of
+	blocks end up back to back in `out` and can be written to the file as
+	they are; sizes[k] is the length of block k's. compress2() is offered all
+	of `out` that is left, which is enough as long as `out` holds a bound on
+	every block's stream. `length` is a one-element array of C unsigned
+	longs, which are 32 bits on Windows. Returns -1, or the first block that
+	compress2() failed on.
+	"""
+
+	position = 0
+	for k in range(sizes.shape[0]):
+		length[0] = min(out.shape[0] - position, 2 ** 32 - 1)
+		source = data[bounds[k]:bounds[k + 1]]
+		status = compress2(out[position:].ctypes, length.ctypes, source.ctypes,
+			bounds[k + 1] - bounds[k], level)
+		if status != 0:
+			return k
+
+		sizes[k] = length[0]
+		position += sizes[k]
+
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_blocks_libdeflate(compress, compressor, data, bounds, out, sizes):
+	"""Compress blocks one after another into `out` with libdeflate's
+	zlib_compress(), without the GIL.
+
+	The layout of `data`, `bounds`, `out` and `sizes` is that of
+	`_deflate_blocks_zlib`. `compressor` is a libdeflate compressor, which
+	holds the compression level and can be used by one thread at a time.
+	Returns -1, or the first block that did not fit in what was left of
+	`out`.
+	"""
+
+	position = 0
+	for k in range(sizes.shape[0]):
+		source = data[bounds[k]:bounds[k + 1]]
+		n = compress(compressor, source.ctypes, bounds[k + 1] - bounds[k],
+			out[position:].ctypes, out.shape[0] - position)
+		if n == 0:
+			return k
+
+		sizes[k] = n
+		position += n
+
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
+def _update_summary(spans, values, counts, stats):
+	"""Fold items, in file order, into a bigWig's total summary.
+
+	Item i covers spans[i] bases with the float32 values[i]. `counts` holds
+	the bases covered and the number of items, `stats` the minimum, maximum,
+	sum and sum of squares, as float64. The sums are added the way libBigWig
+	(pyBigWig's writer) adds them, so that they agree with pyBigWig's to the
+	last bit: the product of a span and a value is rounded to float32 before
+	it is added to the sum, and the sum of squares adds span * value**2 in
+	float64. The minimum and maximum are those of the values. libBigWig
+	compares a value with its maximum only when it is not a new minimum, and
+	starts its maximum at the smallest positive double, so its maximum misses
+	a first value that is the largest, and stays at that double when no
+	value is positive.
+	"""
+
+	for i in range(values.shape[0]):
+		value = values[i]
+		span = spans[i]
+		as_double = numpy.float64(value)
+
+		if as_double < stats[0]:
+			stats[0] = as_double
+		if as_double > stats[1]:
+			stats[1] = as_double
+
+		counts[0] += span
+		counts[1] += 1
+		stats[2] += numpy.float64(numpy.float32(span) * value)
+		stats[3] += numpy.float64(span) * (as_double * as_double)
+
+
+@numba.njit(nogil=True, cache=True)
+def _decode_items(words, bounds, tids, starts, ends, values):
+	"""The items of decompressed data blocks, in file order.
+
+	Block b is the 32-bit words words[bounds[b]:bounds[b + 1]], one or more
+	sections of a bigWig written by BigWigWriter. Item i is written to
+	tids[i], starts[i], ends[i] and values[i]. Returns the number of items.
+	"""
+
+	floats = words.view(numpy.float32)
+	n = 0
+	for b in range(bounds.shape[0] - 1):
+		offset = bounds[b]
+		while offset < bounds[b + 1]:
+			tid = numpy.int64(words[offset])
+			section_start = numpy.int64(words[offset + 1])
+			step = numpy.int64(words[offset + 3])
+			span = numpy.int64(words[offset + 4])
+			kind = words[offset + 5] & 0xFF
+			count = numpy.int64(words[offset + 5] >> 16)
+			item = offset + 6
+
+			for i in range(count):
+				if kind == 1:
+					start = numpy.int64(words[item + 3 * i])
+					end = numpy.int64(words[item + 3 * i + 1])
+					value = floats[item + 3 * i + 2]
+				elif kind == 2:
+					start = numpy.int64(words[item + 2 * i])
+					end = start + span
+					value = floats[item + 2 * i + 1]
+				else:
+					start = section_start + i * step
+					end = start + span
+					value = floats[item + i]
+
+				tids[n] = tid
+				starts[n] = start
+				ends[n] = end
+				values[n] = value
+				n += 1
+
+			offset = item + count * (3 if kind == 1 else 2 if kind == 2 else 1)
+
+	return n
+
+
+@numba.njit(nogil=True, cache=True)
+def _zoom_records(size, tids, starts, ends, values, progress, open_ints,
+	open_floats, out_ints, out_floats):
+	"""Summarize items into the records of one zoom level, as libBigWig bins
+	them.
+
+	A record summarizes the bases from its start to at most `size` bases
+	later. Items are taken in file order. The part of an item that falls
+	within the open record's `size` bases, on its chromosome, is added to it;
+	anything else starts a new record at the first base not yet summarized.
+	A zoom block holds 1023 records, and once the open record is the 1023rd
+	of its block, the next part of an item starts a new record, in a new
+	block, even where it could have been added. That is how libBigWig
+	(pyBigWig's writer) lays zoom levels out. Unlike libBigWig, every record's
+	sum and sum of squares are kept, including those of the last record of
+	a block, which libBigWig leaves at 0.
+
+	The open record carries over between calls, in `open_ints`: whether there
+	is one, its place in its block, chromosome, start, end and number of
+	bases; and in `open_floats`: its minimum, maximum, sum and sum of squares
+	in float64. The sum adds each part's float32 product of length and value,
+	as libBigWig does. Each record that is closed is written to the next row
+	of `out_ints` (chromosome, start, end, bases) and `out_floats` (minimum,
+	maximum, sum, sum of squares, as float32). Returns the number of records
+	written.
+
+	When `out_ints` is full and another record closes, the kernel stops before
+	changing anything, so that the output buffer can be any size. `progress`
+	says where to start and, on return, where to go on: the item, and the
+	first base of it not yet summarized, or -1 for its start. progress[0] is
+	the number of items once every item is summarized.
+	"""
+
+	n = 0
+	i = progress[0]
+	while i < values.shape[0]:
+		tid = tids[i]
+		start = starts[i] if progress[1] < 0 else progress[1]
+		end = ends[i]
+		value = values[i]
+		as_double = numpy.float64(value)
+
+		while start < end:
+			reach = size
+			if start + reach > 0xFFFFFFFF:
+				reach = 0xFFFFFFFF - start
+
+			if (open_ints[0] == 1 and open_ints[1] < 1023 and open_ints[2] == tid
+					and start < open_ints[3] + reach):
+				length = min(open_ints[3] + reach, end) - start
+				open_ints[4] = start + length
+				open_ints[5] += length
+				if open_floats[0] > as_double:
+					open_floats[0] = as_double
+				if open_floats[1] < as_double:
+					open_floats[1] = as_double
+
+				open_floats[2] += numpy.float64(numpy.float32(length) * value)
+				open_floats[3] += numpy.float64(length) * (as_double * as_double)
+				start += length
+				continue
+
+			if open_ints[0] == 1:
+				if n == out_ints.shape[0]:
+					progress[0] = i
+					progress[1] = start
+					return n
+
+				out_ints[n, 0] = open_ints[2]
+				out_ints[n, 1] = open_ints[3]
+				out_ints[n, 2] = open_ints[4]
+				out_ints[n, 3] = open_ints[5]
+				out_floats[n, 0] = open_floats[0]
+				out_floats[n, 1] = open_floats[1]
+				out_floats[n, 2] = open_floats[2]
+				out_floats[n, 3] = open_floats[3]
+				n += 1
+
+			if open_ints[1] == 1023:
+				open_ints[1] = 0
+
+			length = min(reach, end - start)
+			open_ints[0] = 1
+			open_ints[1] += 1
+			open_ints[2] = tid
+			open_ints[3] = start
+			open_ints[4] = start + length
+			open_ints[5] = length
+			open_floats[0] = as_double
+			open_floats[1] = as_double
+			open_floats[2] = numpy.float64(numpy.float32(length) * value)
+			open_floats[3] = numpy.float64(length) * (as_double * as_double)
+			start += length
+
+		progress[1] = -1
+		i += 1
+
+	progress[0] = i
+	return n
 
 
 def _pread_into(fd, buffer, offset):

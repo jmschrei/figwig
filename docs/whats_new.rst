@@ -20,4 +20,10 @@ Highlights
 
 	- A ``BigWig`` can be read from several threads at once and pickled, so it can be part of a PyTorch Dataset read by DataLoader workers under any start method.
 
+	- ``BigWigWriter(path, chroms, zooms=10, level=6, engine='auto', n_jobs=8)`` writes a bigWig chromosome by chromosome, with ``add(chrom, starts, ends, values)`` for intervals, ``add(chrom, positions, values=values)`` for single bases and ``add(chrom, start, values=array)`` for a dense array, whose bases equal to ``missing`` (0.0 unless given) or NaN are left out. ``write_bigwig(path, chroms, data)`` writes one from values held in memory in one call. Data blocks are compressed on up to ``n_jobs`` threads by zlib's ``compress2()``, or by libdeflate when the ``deflate`` package is installed (the new ``fast`` extra), both called without the GIL, except on Windows, where neither library can be loaded and Python's zlib module compresses the blocks; ``engine='isal'`` uses ISA-L. Zoom levels are built when the writer is closed.
+
+	- Written files are laid out as libBigWig, pyBigWig's writer, lays them out, and a file of intervals or single bases without zoom levels written with zlib at level 6 is pyBigWig's byte for byte. Where libBigWig writes a wrong value, figwig writes the correct one: the header's maximum when the first value is the largest or no value is positive, the end of the last fixedStep block of each call, which libBigWig puts 6 bases past it, and the sum and sum of squares of the last zoom record of each zoom block, which libBigWig leaves at 0. libBigWig's empty blocks are not written, and zoom levels go on past a level that is no smaller than the one before it, where libBigWig stops.
+
+	- Tested on Linux with Python 3.10 to 3.14, and on macOS and Windows with Python 3.10 and 3.13. On Windows, which has no ``os.pread`` and where neither zlib's library nor libdeflate's functions can be loaded, blocks are read by seeking the file, and decompressed and compressed by Python's zlib module, with the same values.
+
 	- The reader began inside tangermeme's ``extract_loci`` (tangermeme #107).

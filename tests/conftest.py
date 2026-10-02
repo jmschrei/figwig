@@ -16,8 +16,20 @@ import numpy
 import pytest
 
 import figwig.bigwig
+import figwig._kernels
 
 from .writers import write_bigwig
+
+
+def pytest_report_header(config):
+	"""Which compression libraries loaded, since the kernels that call them
+	run only where they do, and Python's zlib module is used elsewhere."""
+
+	found = {False: 'not found', True: 'found'}
+	return "figwig: zlib's uncompress {}, zlib's compress2 {}, libdeflate {}".format(
+		found[figwig._kernels._zlib_uncompress() is not None],
+		found[figwig._kernels._zlib_compress() is not None],
+		found[figwig._kernels._libdeflate() is not None])
 
 
 def _step_entries(rng, chroms, gap_p, max_len, values):
