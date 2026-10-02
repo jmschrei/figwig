@@ -8,7 +8,9 @@ import sys
 import zlib
 import numbers
 
+from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait
 
 import numpy
 
@@ -46,9 +48,11 @@ _ZOOM_BLOCK_RECORDS = 1023
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
 
-# The data blocks read back, at a time, to build the zoom levels, and the
-# zoom blocks compressed in one task.
-_ZOOM_CHUNK_BLOCKS = 512
+# The data blocks read back in one task to build the zoom levels, the most
+# of these chunks read past the one the slowest level is on, and the zoom
+# blocks compressed in one task.
+_ZOOM_CHUNK_BLOCKS = 64
+_ZOOM_READ_AHEAD = 8
 _ZOOM_COMPRESS_BLOCKS = 64
 
 # The records the record kernel writes before it stops, into one buffer that
@@ -904,13 +908,12 @@ class BigWigWriter:
 		fd = self._file.fileno()
 		lengths = numpy.concatenate(self._sizes)
 
-		def read(a):
-			"""Start reading the chunk of blocks from `a`, in up to n_jobs parts."""
+		def read(k):
+			"""Start reading chunk `k` of the blocks."""
 
-			b = min(a + _ZOOM_CHUNK_BLOCKS, blocks.size)
-			cuts = numpy.linspace(a, b, min(self.n_jobs, b - a) + 1).astype(int)
-			return [self._task(_read_items, fd, blocks[x:y], lengths[x:y]) for x,
-				y in zip(cuts[:-1], cuts[1:])]
+			a = k * _ZOOM_CHUNK_BLOCKS
+			b = a + _ZOOM_CHUNK_BLOCKS
+			return self._task(_read_items, fd, blocks[a:b], lengths[a:b])
 
 		# The finest level is always kept, so it is written as its blocks are
 		# compressed rather than held to the end, where reading back leaves the
@@ -920,22 +923,46 @@ class BigWigWriter:
 			streamed = zooms[0]
 			self._start_zoom_level(streamed)
 
-		# Each chunk is read while the one before it is summarized, and the zoom
-		# blocks the summaries complete are compressed on the pool meanwhile.
-		# A level summarizes its chunks one after another, since its open record
-		# carries over, but the levels run side by side.
-		reading = read(0)
-		for a in range(0, blocks.size, _ZOOM_CHUNK_BLOCKS):
-			parts = [part.result() for part in reading]
-			if a + _ZOOM_CHUNK_BLOCKS < blocks.size:
-				reading = read(a + _ZOOM_CHUNK_BLOCKS)
+		# A level summarizes the chunks one after another, since its open record
+		# carries over, but each starts its next chunk as soon as it is done
+		# with one and the chunk has been read, without waiting for the other
+		# levels. Chunks are read up to `ahead` past the one the slowest level
+		# is on, and the zoom blocks the summaries complete are compressed on
+		# the pool meanwhile.
+		ahead = min(self.n_jobs, _ZOOM_READ_AHEAD)
+		n_chunks = -(-blocks.size // _ZOOM_CHUNK_BLOCKS)
+		chunks = {}
+		n_read = 0
+		positions = [0] * len(zooms)
+		running = [None] * len(zooms)
+		while min(positions) < n_chunks:
+			while n_read < min(n_chunks, min(positions) + ahead + 1):
+				chunks[n_read] = read(n_read)
+				n_read += 1
 
-			summaries = [self._task(zoom.add, parts) for zoom in zooms]
-			for zoom, summary in zip(zooms, summaries):
-				self._compress_zoom(zoom, *summary.result())
+			progressed = False
+			for i, zoom in enumerate(zooms):
+				if running[i] is not None and running[i].done():
+					self._compress_zoom(zoom, *running[i].result())
+					running[i] = None
+					positions[i] += 1
+					progressed = True
+
+				k = positions[i]
+				if running[i] is None and k < n_read and chunks[k].done():
+					running[i] = self._task(zoom.add, *chunks[k].result())
+					progressed = True
+
+			for k in [k for k in chunks if k < min(positions)]:
+				del chunks[k]
 
 			if streamed is not None:
 				self._write_zoom_blocks(streamed, False)
+
+			if not progressed:
+				wait([summary for summary in running if summary is not None] + [chunk
+					for chunk in chunks.values() if not chunk.done()],
+					return_when=FIRST_COMPLETED)
 
 		for zoom in zooms:
 			self._compress_zoom(zoom, *zoom.finish())
@@ -1165,20 +1192,19 @@ class _ZoomLevel:
 		self.entries = []
 		self.data_offset = None
 
-	def add(self, parts):
-		"""Summarize the items of `parts`, each (chromosome ids, starts, ends,
-		values), in file order, and return the records of every zoom block
-		they complete, as (ints, floats)."""
+	def add(self, tids, starts, ends, values):
+		"""Summarize items, given by chromosome id, start, end and value in file
+		order, and return the records of every zoom block they complete, as
+		(ints, floats)."""
 
 		records = []
-		for tids, starts, ends, values in parts:
-			progress = numpy.array([0, -1], dtype=numpy.int64)
-			while progress[0] < len(values):
-				n = _zoom_records(self.size, tids, starts, ends, values, progress,
-					self.open_ints, self.open_floats, self.scratch_ints,
-					self.scratch_floats)
-				records.append((self.scratch_ints[:n].copy(),
-					self.scratch_floats[:n].copy()))
+		progress = numpy.array([0, -1], dtype=numpy.int64)
+		while progress[0] < len(values):
+			n = _zoom_records(self.size, tids, starts, ends, values, progress,
+				self.open_ints, self.open_floats, self.scratch_ints,
+				self.scratch_floats)
+			records.append((self.scratch_ints[:n].copy(),
+				self.scratch_floats[:n].copy()))
 
 		return self._take(records, False)
 

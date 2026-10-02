@@ -3,7 +3,9 @@
 
 import os
 import sys
+import time
 import struct
+import threading
 import pathlib
 import zlib
 import types
@@ -267,20 +269,22 @@ def random_intervals(rng, length, n):
 CHROMS = {'chr1': 3_000_000, 'chr2': 1_000_000, 'chrM': 16_569}
 
 
-@pytest.fixture(params=[(1 << 20, 512, 64, 1 << 16), (5000, 3, 2, 777),
-	(1, 1, 1, 1), (1 << 20, 512, 64, 5)], ids=['default_batches',
+@pytest.fixture(params=[(1 << 20, 64, 8, 64, 1 << 16), (5000, 3, 2, 2, 777),
+	(1, 1, 1, 1, 1), (1 << 20, 64, 8, 64, 5)], ids=['default_batches',
 	'small_batches', 'tiny_batches', 'small_scratch'])
 def writer_batching(request, monkeypatch):
 	"""Lay items out in batches of this many, read blocks back for the zoom
-	levels this many at a time, compress zoom blocks this many to a task, and
-	let the record kernel write this many records before it stops. The
-	fixtures are smaller than a default batch, so the small sizes are what
-	reach the batch boundaries. 'small_scratch' stops the kernel part way
-	through parts of the read-back that hold more than one chromosome."""
+	levels this many at a time and up to this many chunks ahead, compress
+	zoom blocks this many to a task, and let the record kernel write this
+	many records before it stops. The fixtures are smaller than a default
+	batch, so the small sizes are what reach the batch boundaries.
+	'small_scratch' stops the kernel part way through chunks of the read-back
+	that hold more than one chromosome."""
 
-	items, zoom_blocks, zoom_compress, zoom_scratch = request.param
+	items, zoom_blocks, zoom_ahead, zoom_compress, zoom_scratch = request.param
 	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', items)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', zoom_blocks)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_READ_AHEAD', zoom_ahead)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', zoom_compress)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_SCRATCH_RECORDS', zoom_scratch)
 	return request.param
@@ -698,6 +702,49 @@ def test_finest_zoom_level_written_during_pass(tmp_path, monkeypatch):
 	assert size == min(size for size, _, _ in seen)
 	assert n_written == n_blocks > 1
 	assert all(n_written == 0 for _, n_written, _ in seen[1:])
+
+
+def test_zoom_read_ahead_is_bounded(tmp_path, monkeypatch):
+	"""However many threads there are, blocks are read back for the zoom
+	levels at most _ZOOM_READ_AHEAD chunks past the one the slowest level is
+	on. With summaries slowed down, the reads reach that bound."""
+
+	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', 1)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_READ_AHEAD', 2)
+	lock = threading.Lock()
+	n_reads, summarized, most = [0], {}, [0]
+	init = figwig.writer._ZoomLevel.__init__
+	add = figwig.writer._ZoomLevel.add
+	read_items = figwig.writer._read_items
+
+	def registered(self, size):
+		init(self, size)
+		summarized[size] = 0
+
+	def slow(self, *args):
+		time.sleep(0.002)
+		records = add(self, *args)
+		with lock:
+			summarized[self.size] += 1
+		return records
+
+	def counted(*args):
+		with lock:
+			n_reads[0] += 1
+			most[0] = max(most[0], n_reads[0] - min(summarized.values()))
+		return read_items(*args)
+
+	monkeypatch.setattr(figwig.writer._ZoomLevel, '__init__', registered)
+	monkeypatch.setattr(figwig.writer._ZoomLevel, 'add', slow)
+	monkeypatch.setattr(figwig.writer, '_read_items', counted)
+	positions = numpy.arange(0, 2_000_000, 20)
+	values = numpy.random.default_rng(0).random(len(positions)).astype(
+		numpy.float32)
+	write_figwig(tmp_path / 'a.bw', CHROMS, [('bases', 'chr1', positions,
+		values)], n_jobs=8)
+
+	assert n_reads[0] > 10
+	assert most[0] == 3
 
 
 def test_levels_change_bytes_not_values(tmp_path):
