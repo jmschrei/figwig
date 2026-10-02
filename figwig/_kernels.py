@@ -261,6 +261,171 @@ def _deflate_blocks_libdeflate(compress, compressor, data, bounds, out, sizes):
 	return -1
 
 
+@numba.njit(nogil=True, cache=True)
+def _update_summary(spans, values, counts, stats):
+	"""Fold items, in file order, into a bigWig's total summary.
+
+	Item i covers spans[i] bases with the float32 values[i]. `counts` holds
+	the bases covered and the number of items, `stats` the minimum, maximum,
+	sum and sum of squares, as float64. The sums are added the way libBigWig
+	(pyBigWig's writer) adds them, so that they agree with pyBigWig's to the
+	last bit: the product of a span and a value is rounded to float32 before
+	it is added to the sum, and the sum of squares adds span * value**2 in
+	float64. The minimum and maximum are those of the values. libBigWig
+	compares a value with its maximum only when it is not a new minimum, and
+	starts its maximum at the smallest positive double, so its maximum misses
+	a first value that is the largest, and stays at that double when no
+	value is positive.
+	"""
+
+	for i in range(values.shape[0]):
+		value = values[i]
+		span = spans[i]
+		as_double = numpy.float64(value)
+
+		if as_double < stats[0]:
+			stats[0] = as_double
+		if as_double > stats[1]:
+			stats[1] = as_double
+
+		counts[0] += span
+		counts[1] += 1
+		stats[2] += numpy.float64(numpy.float32(span) * value)
+		stats[3] += numpy.float64(span) * (as_double * as_double)
+
+
+@numba.njit(nogil=True, cache=True)
+def _decode_items(words, bounds, tids, starts, ends, values):
+	"""The items of decompressed data blocks, in file order.
+
+	Block b is the 32-bit words words[bounds[b]:bounds[b + 1]], one or more
+	sections of a bigWig written by BigWigWriter. Item i is written to
+	tids[i], starts[i], ends[i] and values[i]. Returns the number of items.
+	"""
+
+	floats = words.view(numpy.float32)
+	n = 0
+	for b in range(bounds.shape[0] - 1):
+		offset = bounds[b]
+		while offset < bounds[b + 1]:
+			tid = numpy.int64(words[offset])
+			section_start = numpy.int64(words[offset + 1])
+			step = numpy.int64(words[offset + 3])
+			span = numpy.int64(words[offset + 4])
+			kind = words[offset + 5] & 0xFF
+			count = numpy.int64(words[offset + 5] >> 16)
+			item = offset + 6
+
+			for i in range(count):
+				if kind == 1:
+					start = numpy.int64(words[item + 3 * i])
+					end = numpy.int64(words[item + 3 * i + 1])
+					value = floats[item + 3 * i + 2]
+				elif kind == 2:
+					start = numpy.int64(words[item + 2 * i])
+					end = start + span
+					value = floats[item + 2 * i + 1]
+				else:
+					start = section_start + i * step
+					end = start + span
+					value = floats[item + i]
+
+				tids[n] = tid
+				starts[n] = start
+				ends[n] = end
+				values[n] = value
+				n += 1
+
+			offset = item + count * (3 if kind == 1 else 2 if kind == 2 else 1)
+
+	return n
+
+
+@numba.njit(nogil=True, cache=True)
+def _zoom_records(size, tids, starts, ends, values, open_ints, open_floats,
+	out_ints, out_floats):
+	"""Summarize items into the records of one zoom level, as libBigWig bins
+	them.
+
+	A record summarizes the bases from its start to at most `size` bases
+	later. Items are taken in file order. The part of an item that falls
+	within the open record's `size` bases, on its chromosome, is added to it;
+	anything else starts a new record at the first base not yet summarized.
+	A zoom block holds 1023 records, and once the open record is the 1023rd
+	of its block, the next part of an item starts a new record, in a new
+	block, even where it could have been added. That is how libBigWig
+	(pyBigWig's writer) lays zoom levels out. Unlike libBigWig, every record's
+	sum and sum of squares are kept, including those of the last record of
+	a block, which libBigWig leaves at 0.
+
+	The open record carries over between calls, in `open_ints`: whether there
+	is one, its place in its block, chromosome, start, end and number of
+	bases; and in `open_floats`: its minimum, maximum, sum and sum of squares
+	in float64. The sum adds each part's float32 product of length and value,
+	as libBigWig does. Each record that is closed is written to the next row
+	of `out_ints` (chromosome, start, end, bases) and `out_floats` (minimum,
+	maximum, sum, sum of squares, as float32). Returns the number of records
+	written.
+	"""
+
+	n = 0
+	for i in range(values.shape[0]):
+		tid = tids[i]
+		start = starts[i]
+		end = ends[i]
+		value = values[i]
+		as_double = numpy.float64(value)
+
+		while start < end:
+			reach = size
+			if start + reach > 0xFFFFFFFF:
+				reach = 0xFFFFFFFF - start
+
+			if (open_ints[0] == 1 and open_ints[1] < 1023 and open_ints[2] == tid
+					and start < open_ints[3] + reach):
+				length = min(open_ints[3] + reach, end) - start
+				open_ints[4] = start + length
+				open_ints[5] += length
+				if open_floats[0] > as_double:
+					open_floats[0] = as_double
+				if open_floats[1] < as_double:
+					open_floats[1] = as_double
+
+				open_floats[2] += numpy.float64(numpy.float32(length) * value)
+				open_floats[3] += numpy.float64(length) * (as_double * as_double)
+				start += length
+				continue
+
+			if open_ints[0] == 1:
+				out_ints[n, 0] = open_ints[2]
+				out_ints[n, 1] = open_ints[3]
+				out_ints[n, 2] = open_ints[4]
+				out_ints[n, 3] = open_ints[5]
+				out_floats[n, 0] = open_floats[0]
+				out_floats[n, 1] = open_floats[1]
+				out_floats[n, 2] = open_floats[2]
+				out_floats[n, 3] = open_floats[3]
+				n += 1
+
+			if open_ints[1] == 1023:
+				open_ints[1] = 0
+
+			length = min(reach, end - start)
+			open_ints[0] = 1
+			open_ints[1] += 1
+			open_ints[2] = tid
+			open_ints[3] = start
+			open_ints[4] = start + length
+			open_ints[5] = length
+			open_floats[0] = as_double
+			open_floats[1] = as_double
+			open_floats[2] = numpy.float64(numpy.float32(length) * value)
+			open_floats[3] = numpy.float64(length) * (as_double * as_double)
+			start += length
+
+	return n
+
+
 def _pread_into(fd, buffer, offset):
 	"""Read into the uint8 array `buffer` from `offset`; return the bytes read.
 
