@@ -266,16 +266,18 @@ def random_intervals(rng, length, n):
 CHROMS = {'chr1': 3_000_000, 'chr2': 1_000_000, 'chrM': 16_569}
 
 
-@pytest.fixture(params=[(1 << 20, 512), (5000, 3), (1, 1)],
+@pytest.fixture(params=[(1 << 20, 512, 64), (5000, 3, 2), (1, 1, 1)],
 	ids=['default_batches', 'small_batches', 'tiny_batches'])
 def writer_batching(request, monkeypatch):
-	"""Lay items out in batches of this many, and read blocks back for the
-	zoom levels this many at a time. The fixtures are smaller than a default
-	batch, so the small sizes are what reach the batch boundaries."""
+	"""Lay items out in batches of this many, read blocks back for the zoom
+	levels this many at a time, and compress zoom blocks this many to a task.
+	The fixtures are smaller than a default batch, so the small sizes are
+	what reach the batch boundaries."""
 
-	items, zoom_blocks = request.param
+	items, zoom_blocks, zoom_compress = request.param
 	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', items)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', zoom_blocks)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', zoom_compress)
 	return request.param
 
 

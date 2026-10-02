@@ -46,8 +46,10 @@ _ZOOM_BLOCK_RECORDS = 1023
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
 
-# The data blocks read back, at a time, to build the zoom levels.
+# The data blocks read back, at a time, to build the zoom levels, and the
+# zoom blocks compressed in one task.
 _ZOOM_CHUNK_BLOCKS = 512
+_ZOOM_COMPRESS_BLOCKS = 64
 
 _FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
@@ -892,18 +894,36 @@ class BigWigWriter:
 		if len(reductions) == 0:
 			return []
 
-		zooms = [_ZoomLevel(size, self.engine, self.level) for size in reductions]
-		map_ = self._pool.map if self._pool is not None else map
+		zooms = [_ZoomLevel(size) for size in reductions]
 
 		self._file.flush()
 		fd = self._file.fileno()
 		lengths = numpy.concatenate(self._sizes)
-		for a in range(0, blocks.size, _ZOOM_CHUNK_BLOCKS):
-			chunk = blocks[a:a + _ZOOM_CHUNK_BLOCKS]
-			items = _read_items(fd, chunk, lengths[a:a + chunk.size])
-			list(map_(lambda zoom: zoom.add(*items), zooms))
 
-		list(map_(lambda zoom: zoom.finish(), zooms))
+		def read(a):
+			"""Start reading the chunk of blocks from `a`, in up to n_jobs parts."""
+
+			b = min(a + _ZOOM_CHUNK_BLOCKS, blocks.size)
+			cuts = numpy.linspace(a, b, min(self.n_jobs, b - a) + 1).astype(int)
+			return [self._task(_read_items, fd, blocks[x:y], lengths[x:y]) for x,
+				y in zip(cuts[:-1], cuts[1:])]
+
+		# Each chunk is read while the one before it is summarized, and the zoom
+		# blocks the summaries complete are compressed on the pool meanwhile.
+		# A level summarizes its chunks one after another, since its open record
+		# carries over, but the levels run side by side.
+		reading = read(0)
+		for a in range(0, blocks.size, _ZOOM_CHUNK_BLOCKS):
+			parts = [part.result() for part in reading]
+			if a + _ZOOM_CHUNK_BLOCKS < blocks.size:
+				reading = read(a + _ZOOM_CHUNK_BLOCKS)
+
+			summaries = [self._task(zoom.add, parts) for zoom in zooms]
+			for zoom, summary in zip(zooms, summaries):
+				self._compress_zoom(zoom, *summary.result())
+
+		for zoom in zooms:
+			self._compress_zoom(zoom, *zoom.finish())
 
 		# Where there is no pread, as on Windows, reading moved the file's
 		# position, so the zoom levels are written from its end explicitly.
@@ -915,10 +935,11 @@ class BigWigWriter:
 				continue
 
 			fewest = zoom.n_records
+			streams = [block for part in zoom.blocks for block in part.result()]
 			data_offset = self._file.tell()
-			self._file.write(numpy.uint32(len(zoom.blocks)).tobytes())
-			index = numpy.empty(len(zoom.blocks), dtype=_LEAF_ITEM)
-			for i, (stream, entry) in enumerate(zoom.blocks):
+			self._file.write(numpy.uint32(len(streams)).tobytes())
+			index = numpy.empty(len(streams), dtype=_LEAF_ITEM)
+			for i, (stream, entry) in enumerate(streams):
 				index[i] = entry + (self._file.tell(), len(stream))
 				self._file.write(stream)
 
@@ -927,6 +948,33 @@ class BigWigWriter:
 			written.append((zoom.size, 0, data_offset, index_offset))
 
 		return written
+
+	def _task(self, function, *args):
+		"""Run function(*args) on the pool, or here when there is none."""
+
+		if self._pool is not None:
+			return self._pool.submit(function, *args)
+
+		return _Done(function(*args))
+
+	def _compress_zoom(self, zoom, ints, floats):
+		"""Start compressing whole zoom blocks of records, in parts of
+		_ZOOM_COMPRESS_BLOCKS blocks, and add the parts to the level's."""
+
+		step = _ZOOM_BLOCK_RECORDS * _ZOOM_COMPRESS_BLOCKS
+		for a in range(0, len(ints), step):
+			zoom.blocks.append(self._task(_compress_zoom_blocks, self.engine,
+				self.level, ints[a:a + step], floats[a:a + step]))
+
+
+class _Done:
+	"""The result of a function that has already run, read as a future's."""
+
+	def __init__(self, value):
+		self.value = value
+
+	def result(self):
+		return self.value
 
 
 def _layout(runs):
@@ -1050,13 +1098,15 @@ def _read_items(fd, blocks, lengths):
 
 
 class _ZoomLevel:
-	"""The records of one zoom level, built from items as they are read back,
-	and its zoom blocks, compressed as each one fills."""
+	"""The records of one zoom level, built from items as they are read back.
 
-	def __init__(self, size, engine, level):
+	`add` and `finish` give back the records of the zoom blocks they complete,
+	to be compressed elsewhere; `blocks` collects the futures of their
+	compressed streams, in order.
+	"""
+
+	def __init__(self, size):
 		self.size = size
-		self.engine = engine
-		self.level = level
 		self.open_ints = numpy.zeros(6, dtype=numpy.int64)
 		self.open_floats = numpy.zeros(4, dtype=numpy.float64)
 		self.pending_ints = numpy.zeros((0, 4), dtype=numpy.uint32)
@@ -1064,21 +1114,27 @@ class _ZoomLevel:
 		self.blocks = []
 		self.n_records = 0
 
-	def add(self, tids, starts, ends, values):
-		"""Summarize the next items, in file order."""
+	def add(self, parts):
+		"""Summarize the items of `parts`, each (chromosome ids, starts, ends,
+		values), in file order, and return the records of every zoom block
+		they complete, as (ints, floats)."""
 
-		# An item makes at most one record per `size` bases it covers, and one
-		# more for where it starts.
-		capacity = int(((ends - starts + self.size - 1) // self.size).sum()) + \
-			len(values) + 1
-		ints = numpy.empty((capacity, 4), dtype=numpy.uint32)
-		floats = numpy.empty((capacity, 4), dtype=numpy.float32)
-		n = _zoom_records(self.size, tids, starts, ends, values, self.open_ints,
-			self.open_floats, ints, floats)
-		self._extend(ints[:n], floats[:n], False)
+		records = []
+		for tids, starts, ends, values in parts:
+			# An item makes at most one record per `size` bases it covers, and
+			# one more for where it starts.
+			capacity = int(((ends - starts + self.size - 1) // self.size).sum()) + \
+				len(values) + 1
+			ints = numpy.empty((capacity, 4), dtype=numpy.uint32)
+			floats = numpy.empty((capacity, 4), dtype=numpy.float32)
+			n = _zoom_records(self.size, tids, starts, ends, values,
+				self.open_ints, self.open_floats, ints, floats)
+			records.append((ints[:n], floats[:n]))
+
+		return self._take(records, False)
 
 	def finish(self):
-		"""Close the last record and compress the last block."""
+		"""Close the last record, and return the records of the last blocks."""
 
 		ints = numpy.zeros((0, 4), dtype=numpy.uint32)
 		floats = numpy.zeros((0, 4), dtype=numpy.float32)
@@ -1087,36 +1143,39 @@ class _ZoomLevel:
 			floats = self.open_floats[None].astype(numpy.float32)
 			self.open_ints[0] = 0
 
-		self._extend(ints, floats, True)
+		return self._take([(ints, floats)], True)
 
-	def _extend(self, ints, floats, final):
-		self.n_records += len(ints)
-		ints = numpy.concatenate([self.pending_ints, ints])
-		floats = numpy.concatenate([self.pending_floats, floats])
+	def _take(self, records, final):
+		self.n_records += sum(len(ints) for ints, _ in records)
+		ints = numpy.concatenate([self.pending_ints] + [i for i, _ in records])
+		floats = numpy.concatenate([self.pending_floats] + [f for _, f in records])
 
 		n = len(ints) if final else len(ints) - len(ints) % _ZOOM_BLOCK_RECORDS
-		if n > 0:
-			self._compress(ints[:n], floats[:n])
-
 		self.pending_ints = ints[n:]
 		self.pending_floats = floats[n:]
+		return ints[:n], floats[:n]
 
-	def _compress(self, ints, floats):
-		records = numpy.empty((len(ints), 8), dtype='<u4')
-		records[:, :4] = ints
-		records[:, 4:] = floats.view('<u4')
 
-		firsts = numpy.arange(0, len(ints), _ZOOM_BLOCK_RECORDS)
-		lasts = numpy.minimum(firsts + _ZOOM_BLOCK_RECORDS, len(ints)) - 1
-		bounds = 32 * numpy.append(firsts, len(ints)).astype(numpy.int64)
-		out, sizes = _compress_blocks(self.engine, self.level, records.view(
-			numpy.uint8).ravel(), bounds)
+def _compress_zoom_blocks(engine, level, ints, floats):
+	"""Lay zoom records out as zoom blocks of 1023 records, the last of which
+	may be short, and compress each. Returns (stream, index entry) for each
+	block, its entry being the first record's chromosome and start and the
+	last record's chromosome and end."""
 
-		offsets = numpy.cumsum(sizes) - sizes
-		for first, last, offset, size in zip(firsts, lasts, offsets, sizes):
-			self.blocks.append((out[offset:offset + size].tobytes(), (int(ints[
-				first, 0]), int(ints[first, 1]), int(ints[last, 0]),
-				int(ints[last, 2]))))
+	records = numpy.empty((len(ints), 8), dtype='<u4')
+	records[:, :4] = ints
+	records[:, 4:] = floats.view('<u4')
+
+	firsts = numpy.arange(0, len(ints), _ZOOM_BLOCK_RECORDS)
+	lasts = numpy.minimum(firsts + _ZOOM_BLOCK_RECORDS, len(ints)) - 1
+	bounds = 32 * numpy.append(firsts, len(ints)).astype(numpy.int64)
+	out, sizes = _compress_blocks(engine, level, records.view(numpy.uint8).ravel(),
+		bounds)
+
+	offsets = numpy.cumsum(sizes) - sizes
+	return [(out[offset:offset + size].tobytes(), (int(ints[first, 0]),
+		int(ints[first, 1]), int(ints[last, 0]), int(ints[last, 2]))) for first,
+		last, offset, size in zip(firsts, lasts, offsets, sizes)]
 
 
 def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
