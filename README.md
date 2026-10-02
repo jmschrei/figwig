@@ -24,8 +24,8 @@ as a model's predictions. It lays the file out the way pyBigWig does, and
 compresses its data blocks on several threads, with zlib or, when the optional
 `deflate` package is installed, with libdeflate, both without the GIL. On the
 two tracks timed below, on 8 threads with libdeflate, it wrote the same files
-12 and 16 times faster than pyBigWig without zoom levels, and 6 times faster
-with them.
+23 and 26 times faster than pyBigWig without zoom levels, and 16 and 17 times
+faster with them.
 
 figwig depends only on numpy and numba. A file it cannot read with certainty
 raises a `ValueError` that says what it found, rather than being guessed at,
@@ -438,9 +438,9 @@ plus strand, as counts at 15,875,960 single bases, and the fold-change signal
 of ENCODE snATAC-seq pseudobulk ENCSR206UWN, ENCFF932UQM, as 21,212,477
 intervals. figwig and pyBigWig wrote one call per
 chromosome, and pybigtools one `write()` from an iterator of tuples. Every
-write, opening the file and closing it included, ran in its own process,
-three times, onto tmpfs, and the table gives the median, at compression level
-6. pybigtools 0.2.5's `write()` takes no option for zoom levels and writes
+write, opening the file and closing it included, ran in its own process
+after a warm-up write of the first 1,000 values of each chromosome, three
+times, onto tmpfs, and the table gives the median, at compression level 6. pybigtools 0.2.5's `write()` takes no option for zoom levels and writes
 them, so it was timed with them only.
 
 The machine, Python and numpy were those above, with pyBigWig 0.3.26,
@@ -450,19 +450,20 @@ on 2,000 windows of 1,000 bases read back with figwig.
 
 | writer | counts | counts, zoom levels | signal | signal, zoom levels |
 |---|---|---|---|---|
-| pyBigWig 0.3.26 | 4.19 s | 12.72 s | 7.43 s | 10.30 s |
-| pybigtools 0.2.5 | | 4.06 s | | 5.16 s |
-| figwig, zlib, 1 thread | 4.37 s | 12.41 s | 6.33 s | 8.42 s |
-| figwig, zlib, 8 threads | 0.73 s | 4.22 s | 0.98 s | 2.32 s |
-| figwig, libdeflate, 1 thread | 1.21 s | 5.17 s | 1.90 s | 3.53 s |
-| figwig, libdeflate, 8 threads | **0.36 s** | **1.98 s** | **0.47 s** | **1.64 s** |
+| pyBigWig 0.3.26 | 4.20 s | 12.81 s | 7.42 s | 10.41 s |
+| pybigtools 0.2.5 | | 4.25 s | | 5.27 s |
+| figwig, zlib, 1 thread | 4.22 s | 12.20 s | 6.17 s | 8.24 s |
+| figwig, zlib, 8 threads | 0.53 s | 1.68 s | 0.79 s | 1.16 s |
+| figwig, libdeflate, 1 thread | 1.07 s | 4.93 s | 1.75 s | 3.37 s |
+| figwig, libdeflate, 8 threads | **0.18 s** | **0.81 s** | **0.29 s** | **0.62 s** |
 
 figwig's files were the size of pyBigWig's: 35.7 and 107.1 MB without zoom
 levels, against 35.8 and 108.0 MB, and 214.0 and 126.5 MB with them, against
 213.9 and 127.4 MB. pybigtools chooses its zoom levels differently, and wrote
 96.4 and 162.2 MB. With zoom levels most of figwig's time is spent building
-them. Its peak memory was above pyBigWig's: 566 MB against 352 MB for the
-counts without zoom levels, of which the arrays of values held 318 MB.
+them. Its peak memory was above pyBigWig's: 565 MB against 355 MB for the
+counts without zoom levels on one thread, of which the arrays of values held
+318 MB, and 1,502 MB against 1,090 MB with zoom levels on 8 threads.
 
 ## Origin
 
