@@ -474,7 +474,9 @@ def test_read_windows_several_files_share_a_pool(dense_bw, sparse_bw,
 def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 	"""Each kernel is called first on the calling thread when it has not been
 	compiled, the inflater for the first compressed file even when an
-	uncompressed file comes before it."""
+	uncompressed file comes before it. The inflater is called only where
+	zlib's library can be loaded; elsewhere, as on Windows, blocks are
+	inflated by zlib.decompress."""
 
 	sections = [_bedgraph('chr1', s, [(0, 5, 1.0)]) for s in range(0, 9000,
 		100)]
@@ -502,7 +504,9 @@ def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 	files = [tmp_path / 'False.bw', tmp_path / 'True.bw']
 	X = read_windows(files, 'chr1', numpy.arange(0, 9000, 50), 10, n_jobs=4)
 	assert calls['_read_windows'] is threading.main_thread()
-	assert calls['_inflate_blocks'] is threading.main_thread()
+	if figwig._kernels._zlib_uncompress() is not None:
+		assert calls['_inflate_blocks'] is threading.main_thread()
+
 	assert_identical(X[:, 0], X[:, 1])
 
 

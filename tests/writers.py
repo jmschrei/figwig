@@ -10,17 +10,30 @@ block. `write_bigwig` writes an ordinary bigWig with pybigtools, which the
 tests also use as the reference reader.
 """
 
+import os
 import zlib
 import struct
+import pathlib
 
 import pybigtools
 
 
 def write_bigwig(path, chroms, entries):
-	"""Write `entries`, (chrom, start, end, value) tuples, with pybigtools."""
+	"""Write `entries`, (chrom, start, end, value) tuples, with pybigtools.
 
-	bw = pybigtools.open(str(path), 'w')
-	bw.write(chroms, iter(entries))
+	pybigtools refuses to write to a path that parses as a URL, which a
+	Windows path does, its drive letter read as the scheme, so the file is
+	written by name from its directory.
+	"""
+
+	path = pathlib.Path(path).resolve()
+	cwd = os.getcwd()
+	os.chdir(path.parent)
+	try:
+		bw = pybigtools.open(path.name, 'w')
+		bw.write(chroms, iter(entries))
+	finally:
+		os.chdir(cwd)
 
 
 def write_raw_bigwig(path, chroms, sections, compress=True,
