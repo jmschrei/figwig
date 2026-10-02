@@ -19,6 +19,13 @@ import numpy
 # zlib's uncompress() through ctypes, loaded on the first read.
 _ZLIB_UNCOMPRESS = []
 
+# zlib's compress2() through ctypes, loaded on the first write.
+_ZLIB_COMPRESS = []
+
+# libdeflate's compressor functions through ctypes, from the `deflate`
+# package, loaded on the first write that uses them.
+_LIBDEFLATE = []
+
 # The names zlib's shared library goes by on Linux, macOS and Windows, tried
 # in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
 _ZLIB_NAMES = ('libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll',
@@ -85,6 +92,81 @@ def _zlib_function(symbol):
 	return None
 
 
+def _zlib_compress():
+	"""zlib's compress2() as a ctypes function, or None if it cannot be loaded.
+
+	`_deflate_blocks_zlib` calls it without the GIL. Where it cannot be
+	loaded, blocks are compressed by `zlib.compress`, with the same bytes,
+	since both are zlib.
+	"""
+
+	if len(_ZLIB_COMPRESS) == 0:
+		_ZLIB_COMPRESS.append(_load_zlib_compress())
+
+	return _ZLIB_COMPRESS[0]
+
+
+def _load_zlib_compress():
+	"""(compress2, the dtype of a C unsigned long), or None."""
+
+	try:
+		import ctypes
+	except ImportError:
+		return None
+
+	function = _zlib_function('compress2')
+	if function is None:
+		return None
+
+	function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+		ctypes.c_ulong, ctypes.c_int]
+	function.restype = ctypes.c_int
+	return function, numpy.dtype(ctypes.c_ulong)
+
+
+def _libdeflate():
+	"""libdeflate's (alloc_compressor, zlib_compress, free_compressor) as
+	ctypes functions, or None if the `deflate` package is not installed or
+	its library does not export them.
+
+	The `deflate` package links libdeflate into its extension module, and
+	exports libdeflate's functions from it. `_deflate_blocks_libdeflate`
+	calls `zlib_compress` without the GIL. A compressor is passed to it as an
+	integer, which is why its first argument is a size_t rather than a
+	pointer.
+	"""
+
+	if len(_LIBDEFLATE) == 0:
+		_LIBDEFLATE.append(_load_libdeflate())
+
+	return _LIBDEFLATE[0]
+
+
+def _load_libdeflate():
+	try:
+		import ctypes
+		import deflate._deflate
+	except ImportError:
+		return None
+
+	try:
+		library = ctypes.CDLL(deflate._deflate.__file__)
+		alloc = library.libdeflate_alloc_compressor
+		compress = library.libdeflate_zlib_compress
+		free = library.libdeflate_free_compressor
+	except (OSError, AttributeError):
+		return None
+
+	alloc.argtypes = [ctypes.c_int]
+	alloc.restype = ctypes.c_size_t
+	compress.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+		ctypes.c_void_p, ctypes.c_size_t]
+	compress.restype = ctypes.c_size_t
+	free.argtypes = [ctypes.c_size_t]
+	free.restype = None
+	return alloc, compress, free
+
+
 @numba.njit(nogil=True, cache=True)
 def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 	"""Inflate data blocks one after another into `buffer`, without the GIL.
@@ -121,6 +203,62 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 			position += n
 
 	return position
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_blocks_zlib(compress2, level, data, bounds, out, sizes, length):
+	"""Compress blocks one after another into `out` with zlib's compress2(),
+	without the GIL.
+
+	Block k is data[bounds[k]:bounds[k + 1]]. Each block's zlib stream is
+	written straight after the one before it, so the streams of a run of
+	blocks end up back to back in `out` and can be written to the file as
+	they are; sizes[k] is the length of block k's. compress2() is offered all
+	of `out` that is left, which is enough as long as `out` holds a bound on
+	every block's stream. `length` is a one-element array of C unsigned
+	longs, which are 32 bits on Windows. Returns -1, or the first block that
+	compress2() failed on.
+	"""
+
+	position = 0
+	for k in range(sizes.shape[0]):
+		length[0] = min(out.shape[0] - position, 2 ** 32 - 1)
+		source = data[bounds[k]:bounds[k + 1]]
+		status = compress2(out[position:].ctypes, length.ctypes, source.ctypes,
+			bounds[k + 1] - bounds[k], level)
+		if status != 0:
+			return k
+
+		sizes[k] = length[0]
+		position += sizes[k]
+
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_blocks_libdeflate(compress, compressor, data, bounds, out, sizes):
+	"""Compress blocks one after another into `out` with libdeflate's
+	zlib_compress(), without the GIL.
+
+	The layout of `data`, `bounds`, `out` and `sizes` is that of
+	`_deflate_blocks_zlib`. `compressor` is a libdeflate compressor, which
+	holds the compression level and can be used by one thread at a time.
+	Returns -1, or the first block that did not fit in what was left of
+	`out`.
+	"""
+
+	position = 0
+	for k in range(sizes.shape[0]):
+		source = data[bounds[k]:bounds[k + 1]]
+		n = compress(compressor, source.ctypes, bounds[k + 1] - bounds[k],
+			out[position:].ctypes, out.shape[0] - position)
+		if n == 0:
+			return k
+
+		sizes[k] = n
+		position += n
+
+	return -1
 
 
 def _pread_into(fd, buffer, offset):

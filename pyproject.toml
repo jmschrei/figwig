@@ -36,9 +36,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+fast = [
+    "deflate>=0.9",
+]
 dev = [
     "pytest>=7.0",
     "pybigtools>=0.2.5,<0.3",
+    "pyBigWig>=0.3.26",
+    "deflate>=0.9",
     "ruff>=0.4",
     "build>=1.0",
     "twine>=4.0",
