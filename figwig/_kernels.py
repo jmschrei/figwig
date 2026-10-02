@@ -10,6 +10,7 @@ holds the GIL between blocks.
 """
 
 import os
+import threading
 
 import numba
 import numpy
@@ -18,14 +19,25 @@ import numpy
 # zlib's uncompress() through ctypes, loaded on the first read.
 _ZLIB_UNCOMPRESS = []
 
+# The names zlib's shared library goes by on Linux, macOS and Windows, tried
+# in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
+_ZLIB_NAMES = ('libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll',
+	'zlib.dll')
+
+# Where there is no pread, as on Windows, a read seeks the shared file
+# descriptor and then reads from it, and this lock keeps another thread from
+# moving the file position in between.
+_SEEK_LOCK = threading.Lock()
+
 
 def _zlib_uncompress():
 	"""zlib's uncompress() as a ctypes function, or None if it cannot be loaded.
 
 	`_inflate_blocks` calls it without the GIL. The zlib module links the
-	same library on Linux, where it is already loaded under this name.
-	Without it, every block is inflated by `zlib.decompress`, with the same
-	result.
+	same library on Linux, where it is already loaded under this name. A
+	Python whose zlib is built into the interpreter, as on Windows, may have
+	no zlib library to load. Without it, every block is inflated by
+	`zlib.decompress`, with the same result.
 	"""
 
 	if len(_ZLIB_UNCOMPRESS) == 0:
@@ -43,10 +55,10 @@ def _load_zlib_uncompress():
 	except ImportError:
 		return None
 
-	for name in ('libz.so.1', 'libz.dylib', 'zlib1.dll', 'z'):
+	for name in _ZLIB_NAMES + ('z', 'zlib'):
 		try:
-			if name == 'z':
-				name = ctypes.util.find_library('z')
+			if name in ('z', 'zlib'):
+				name = ctypes.util.find_library(name)
 				if name is None:
 					continue
 
@@ -72,8 +84,9 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 	bytes or to bytes that are not whole 32-bit words gets blocks[k, 5] = 0,
 	as it would from zlib.decompress. A block that uncompress() cannot
 	inflate into the rest of `buffer` gets 2, and is left to zlib.decompress.
-	`length` is a one-element array of C unsigned longs. Returns the number
-	of bytes of `buffer` that were used.
+	`length` is a one-element array of C unsigned longs, which are 32 bits on
+	Windows, so the room offered for a block is at most 2**32 - 1 bytes.
+	Returns the number of bytes of `buffer` that were used.
 	"""
 
 	position = 0
@@ -81,7 +94,7 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 		if blocks[k, 5] != 1:
 			continue
 
-		length[0] = buffer.shape[0] - position
+		length[0] = min(buffer.shape[0] - position, 2 ** 32 - 1)
 		source = data[starts[k]:starts[k] + sizes[k]]
 		status = uncompress(buffer[position:].ctypes, length.ctypes,
 			source.ctypes, sizes[k])
@@ -100,14 +113,43 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 
 
 def _pread_into(fd, buffer, offset):
-	"""Read into the uint8 array `buffer` from `offset`; return the bytes read."""
+	"""Read into the uint8 array `buffer` from `offset`; return the bytes read.
 
-	if hasattr(os, 'preadv'):
-		return os.preadv(fd, [buffer], offset)
+	A read may return fewer bytes than asked for, and Linux returns at most
+	about 2 GiB from one, so this reads until `buffer` is full or the file
+	ends. preadv reads straight into `buffer`, pread into a copy, and where
+	neither exists, as on Windows, the file is seeked and read under
+	`_SEEK_LOCK`, since its position is shared by every thread.
+	"""
 
-	data = os.pread(fd, len(buffer), offset)
-	buffer[:len(data)] = numpy.frombuffer(data, dtype=numpy.uint8)
-	return len(data)
+	total = 0
+	while total < len(buffer):
+		if hasattr(os, 'preadv'):
+			n = os.preadv(fd, [buffer[total:]], offset + total)
+		else:
+			if hasattr(os, 'pread'):
+				data = os.pread(fd, len(buffer) - total, offset + total)
+			else:
+				with _SEEK_LOCK:
+					os.lseek(fd, offset + total, os.SEEK_SET)
+					data = os.read(fd, len(buffer) - total)
+
+			n = len(data)
+			buffer[total:total + n] = numpy.frombuffer(data, dtype=numpy.uint8)
+
+		if n == 0:
+			break
+
+		total += n
+
+	return total
+
+
+def _pread(fd, n, offset):
+	"""Up to `n` bytes from `offset`, fewer only where the file ends."""
+
+	buffer = numpy.empty(n, dtype=numpy.uint8)
+	return buffer[:_pread_into(fd, buffer, offset)].tobytes()
 
 
 @numba.njit(nogil=True, cache=True)
@@ -122,13 +164,19 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 	inside the entry's range [base_start, base_end). Overlapping items have
 	no single value per base, and readers disagree on them: pybigtools sums
 	them.
+
+	Returns whether the block passes, the start of its first item and the
+	end of its last, which `_read_windows` uses to check that items in
+	neighbouring blocks do not overlap either. A block without items gives
+	the largest int64 as its first start and `base_start` as its last end.
 	"""
 
 	offset = begin
 	previous_end = base_start
+	first_start = numpy.iinfo(numpy.int64).max
 	while offset < end:
 		if offset + 6 > end or words[offset] != chrom:
-			return False
+			return False, first_start, previous_end
 
 		section_start = numpy.int64(words[offset + 1])
 		step = numpy.int64(words[offset + 3])
@@ -143,12 +191,12 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 		elif kind == 3:
 			size = 1
 		else:
-			return False
+			return False, first_start, previous_end
 
 		item = offset + 6
 		next_offset = item + count * size
 		if next_offset > end:
-			return False
+			return False, first_start, previous_end
 
 		for i in range(count):
 			if kind == 1:
@@ -162,20 +210,21 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 				item_end = item_start + span
 
 			if item_start < previous_end or item_end < item_start:
-				return False
+				return False, first_start, previous_end
 
+			first_start = min(first_start, item_start)
 			previous_end = item_end
 
 		if previous_end > base_end:
-			return False
+			return False, first_start, previous_end
 
 		offset = next_offset
 
-	return True
+	return True, first_start, previous_end
 
 
 @numba.njit(nogil=True, cache=True)
-def _read_windows(words, blocks, windows, out, signal, failed):
+def _read_windows(words, blocks, windows, out, signal, failed, missing):
 	"""Write the per-base values of bigWig windows into rows of `out`.
 
 	`words` holds decompressed data blocks, one after another, as 32-bit
@@ -183,32 +232,43 @@ def _read_windows(words, blocks, windows, out, signal, failed):
 	chromosome, start and end of its index entry, and whether it was
 	decompressed. Row j of `windows` describes window j: the blocks [lo, hi)
 	that overlap it, its start, the length of its chromosome and the row of
-	`out` it is written to. The width of every window is out.shape[2].
+	`out` it is written to, in channel `signal`. The width of every window
+	is out.shape[2].
 
-	Each base of a window is given the value of the item that covers it, 0
-	when no item does and NaN past the end of the chromosome. Items with a
-	NaN value are skipped, so their bases are 0. A window with a block that
-	fails `_check_block` is not written and is marked in `failed`.
+	Each base of a window is given the value of the item that covers it,
+	`missing`, a float32, when no item does, and NaN past the end of the
+	chromosome. Items with a NaN value are skipped, so their bases are
+	`missing`. A window is not written, and is marked in `failed`, when one
+	of its blocks fails `_check_block` or has an item that overlaps an item
+	of an earlier block. A window's blocks are consecutive in the index, so
+	comparing each block's first item with the furthest end of the blocks
+	before it finds every overlap.
 	"""
 
 	values = words.view(numpy.float32)
 	width = out.shape[2]
 	nan = numpy.float32(numpy.nan)
 
-	good = numpy.zeros(blocks.shape[0], dtype=numpy.bool_)
-	for b in range(blocks.shape[0]):
+	n_blocks = blocks.shape[0]
+	good = numpy.zeros(n_blocks, dtype=numpy.bool_)
+	first = numpy.zeros(n_blocks, dtype=numpy.int64)
+	last = numpy.zeros(n_blocks, dtype=numpy.int64)
+	for b in range(n_blocks):
 		if blocks[b, 5] != 0:
-			good[b] = _check_block(words, blocks[b, 0], blocks[b, 1],
-				blocks[b, 2], blocks[b, 3], blocks[b, 4])
+			good[b], first[b], last[b] = _check_block(words, blocks[b, 0],
+				blocks[b, 1], blocks[b, 2], blocks[b, 3], blocks[b, 4])
 
 	for j in range(windows.shape[0]):
 		lo, hi = windows[j, 0], windows[j, 1]
 		start, row = windows[j, 2], windows[j, 4]
 
 		usable = True
+		reach = numpy.iinfo(numpy.int64).min
 		for b in range(lo, hi):
-			if not good[b]:
+			if not good[b] or first[b] < reach:
 				usable = False
+
+			reach = max(reach, last[b])
 
 		if not usable:
 			failed[j] = True
@@ -216,7 +276,7 @@ def _read_windows(words, blocks, windows, out, signal, failed):
 
 		end = min(start + width, max(start, windows[j, 3]))
 		for p in range(end - start):
-			out[row, signal, p] = 0
+			out[row, signal, p] = missing
 		for p in range(end - start, width):
 			out[row, signal, p] = nan
 

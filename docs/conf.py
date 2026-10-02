@@ -15,7 +15,6 @@ extensions = [
 	'sphinx.ext.napoleon',
 	'sphinx.ext.viewcode',
 	'sphinx.ext.intersphinx',
-	'nbsphinx',
 ]
 
 templates_path = ['_templates']
@@ -27,8 +26,6 @@ html_static_path = []
 autodoc_member_order = 'bysource'
 napoleon_numpy_docstring = True
 napoleon_google_docstring = False
-
-nbsphinx_execute = 'never'
 
 intersphinx_mapping = {
 	'python': ('https://docs.python.org/3', None),
