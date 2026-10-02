@@ -266,18 +266,22 @@ def random_intervals(rng, length, n):
 CHROMS = {'chr1': 3_000_000, 'chr2': 1_000_000, 'chrM': 16_569}
 
 
-@pytest.fixture(params=[(1 << 20, 512, 64), (5000, 3, 2), (1, 1, 1)],
-	ids=['default_batches', 'small_batches', 'tiny_batches'])
+@pytest.fixture(params=[(1 << 20, 512, 64, 1 << 18), (5000, 3, 2, 777),
+	(1, 1, 1, 1), (1 << 20, 512, 64, 777)], ids=['default_batches',
+	'small_batches', 'tiny_batches', 'small_slices'])
 def writer_batching(request, monkeypatch):
 	"""Lay items out in batches of this many, read blocks back for the zoom
-	levels this many at a time, and compress zoom blocks this many to a task.
-	The fixtures are smaller than a default batch, so the small sizes are
-	what reach the batch boundaries."""
+	levels this many at a time, compress zoom blocks this many to a task, and
+	summarize this many items in one call of the zoom kernel. The fixtures
+	are smaller than a default batch, so the small sizes are what reach the
+	batch boundaries. 'small_slices' cuts parts of the read-back that hold
+	more than one chromosome into several calls of the kernel."""
 
-	items, zoom_blocks, zoom_compress = request.param
+	items, zoom_blocks, zoom_compress, zoom_slice = request.param
 	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', items)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', zoom_blocks)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', zoom_compress)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_SLICE_ITEMS', zoom_slice)
 	return request.param
 
 
