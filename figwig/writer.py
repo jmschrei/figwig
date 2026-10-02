@@ -51,10 +51,9 @@ _BATCH_ITEMS = 1 << 20
 _ZOOM_CHUNK_BLOCKS = 512
 _ZOOM_COMPRESS_BLOCKS = 64
 
-# The items summarized in one call of the record kernel. A level reuses one
-# output buffer for every call, large enough for what that many items can
-# make, and keeps only the records made.
-_ZOOM_SLICE_ITEMS = 1 << 18
+# The records the record kernel writes before it stops, into one buffer that
+# each zoom level reuses; the records made are copied out of it.
+_ZOOM_SCRATCH_RECORDS = 1 << 16
 
 _FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
@@ -1116,8 +1115,10 @@ class _ZoomLevel:
 		self.open_floats = numpy.zeros(4, dtype=numpy.float64)
 		self.pending_ints = numpy.zeros((0, 4), dtype=numpy.uint32)
 		self.pending_floats = numpy.zeros((0, 4), dtype=numpy.float32)
-		self.scratch_ints = numpy.zeros((0, 4), dtype=numpy.uint32)
-		self.scratch_floats = numpy.zeros((0, 4), dtype=numpy.float32)
+		self.scratch_ints = numpy.empty((_ZOOM_SCRATCH_RECORDS, 4),
+			dtype=numpy.uint32)
+		self.scratch_floats = numpy.empty((_ZOOM_SCRATCH_RECORDS, 4),
+			dtype=numpy.float32)
 		self.blocks = []
 		self.n_records = 0
 
@@ -1128,20 +1129,10 @@ class _ZoomLevel:
 
 		records = []
 		for tids, starts, ends, values in parts:
-			for a in range(0, len(values), _ZOOM_SLICE_ITEMS):
-				b = a + _ZOOM_SLICE_ITEMS
-
-				# An item makes at most one record per `size` bases it covers, and
-				# one more for where it starts.
-				capacity = int(((ends[a:b] - starts[a:b] + self.size - 1) //
-					self.size).sum()) + len(values[a:b]) + 1
-				if capacity > len(self.scratch_ints):
-					self.scratch_ints = numpy.empty((capacity, 4), dtype=numpy.uint32)
-					self.scratch_floats = numpy.empty((capacity, 4),
-						dtype=numpy.float32)
-
-				n = _zoom_records(self.size, tids[a:b], starts[a:b], ends[a:b],
-					values[a:b], self.open_ints, self.open_floats, self.scratch_ints,
+			progress = numpy.array([0, -1], dtype=numpy.int64)
+			while progress[0] < len(values):
+				n = _zoom_records(self.size, tids, starts, ends, values, progress,
+					self.open_ints, self.open_floats, self.scratch_ints,
 					self.scratch_floats)
 				records.append((self.scratch_ints[:n].copy(),
 					self.scratch_floats[:n].copy()))

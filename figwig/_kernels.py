@@ -342,8 +342,8 @@ def _decode_items(words, bounds, tids, starts, ends, values):
 
 
 @numba.njit(nogil=True, cache=True)
-def _zoom_records(size, tids, starts, ends, values, open_ints, open_floats,
-	out_ints, out_floats):
+def _zoom_records(size, tids, starts, ends, values, progress, open_ints,
+	open_floats, out_ints, out_floats):
 	"""Summarize items into the records of one zoom level, as libBigWig bins
 	them.
 
@@ -366,12 +366,19 @@ def _zoom_records(size, tids, starts, ends, values, open_ints, open_floats,
 	of `out_ints` (chromosome, start, end, bases) and `out_floats` (minimum,
 	maximum, sum, sum of squares, as float32). Returns the number of records
 	written.
+
+	When `out_ints` is full and another record closes, the kernel stops before
+	changing anything, so that the output buffer can be any size. `progress`
+	says where to start and, on return, where to go on: the item, and the
+	first base of it not yet summarized, or -1 for its start. progress[0] is
+	the number of items once every item is summarized.
 	"""
 
 	n = 0
-	for i in range(values.shape[0]):
+	i = progress[0]
+	while i < values.shape[0]:
 		tid = tids[i]
-		start = starts[i]
+		start = starts[i] if progress[1] < 0 else progress[1]
 		end = ends[i]
 		value = values[i]
 		as_double = numpy.float64(value)
@@ -397,6 +404,11 @@ def _zoom_records(size, tids, starts, ends, values, open_ints, open_floats,
 				continue
 
 			if open_ints[0] == 1:
+				if n == out_ints.shape[0]:
+					progress[0] = i
+					progress[1] = start
+					return n
+
 				out_ints[n, 0] = open_ints[2]
 				out_ints[n, 1] = open_ints[3]
 				out_ints[n, 2] = open_ints[4]
@@ -423,6 +435,10 @@ def _zoom_records(size, tids, starts, ends, values, open_ints, open_floats,
 			open_floats[3] = numpy.float64(length) * (as_double * as_double)
 			start += length
 
+		progress[1] = -1
+		i += 1
+
+	progress[0] = i
 	return n
 
 

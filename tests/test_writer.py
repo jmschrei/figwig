@@ -266,22 +266,22 @@ def random_intervals(rng, length, n):
 CHROMS = {'chr1': 3_000_000, 'chr2': 1_000_000, 'chrM': 16_569}
 
 
-@pytest.fixture(params=[(1 << 20, 512, 64, 1 << 18), (5000, 3, 2, 777),
-	(1, 1, 1, 1), (1 << 20, 512, 64, 777)], ids=['default_batches',
-	'small_batches', 'tiny_batches', 'small_slices'])
+@pytest.fixture(params=[(1 << 20, 512, 64, 1 << 16), (5000, 3, 2, 777),
+	(1, 1, 1, 1), (1 << 20, 512, 64, 5)], ids=['default_batches',
+	'small_batches', 'tiny_batches', 'small_scratch'])
 def writer_batching(request, monkeypatch):
 	"""Lay items out in batches of this many, read blocks back for the zoom
 	levels this many at a time, compress zoom blocks this many to a task, and
-	summarize this many items in one call of the zoom kernel. The fixtures
-	are smaller than a default batch, so the small sizes are what reach the
-	batch boundaries. 'small_slices' cuts parts of the read-back that hold
-	more than one chromosome into several calls of the kernel."""
+	let the record kernel write this many records before it stops. The
+	fixtures are smaller than a default batch, so the small sizes are what
+	reach the batch boundaries. 'small_scratch' stops the kernel part way
+	through parts of the read-back that hold more than one chromosome."""
 
-	items, zoom_blocks, zoom_compress, zoom_slice = request.param
+	items, zoom_blocks, zoom_compress, zoom_scratch = request.param
 	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', items)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', zoom_blocks)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', zoom_compress)
-	monkeypatch.setattr(figwig.writer, '_ZOOM_SLICE_ITEMS', zoom_slice)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_SCRATCH_RECORDS', zoom_scratch)
 	return request.param
 
 
@@ -712,15 +712,93 @@ def test_zoom_records_by_hand():
 	open_floats = numpy.zeros(4)
 	ints = numpy.zeros((10, 4), dtype=numpy.uint32)
 	floats = numpy.zeros((10, 4), dtype=numpy.float32)
+	progress = numpy.array([0, -1], dtype=numpy.int64)
 
-	n = figwig._kernels._zoom_records(10, tids, starts, ends, values, open_ints,
-		open_floats, ints, floats)
+	n = figwig._kernels._zoom_records(10, tids, starts, ends, values, progress,
+		open_ints, open_floats, ints, floats)
 
 	assert n == 2
 	assert ints[:2].tolist() == [[0, 0, 10, 8], [0, 10, 12, 2]]
 	assert floats[:2].tolist() == [[1, 2, 11, 17], [2, 2, 4, 8]]
 	assert open_ints.tolist() == [1, 3, 0, 30, 31, 1]
 	assert open_floats.tolist() == [3, 3, 3, 9]
+	assert progress.tolist() == [3, -1]
+
+
+def test_zoom_records_stops_when_full():
+	"""With room for one record and records of 10 bases, [0, 35) at 2 fills
+	the buffer with [0, 10) and stops at base 20, where [10, 20) would close,
+	then at base 30. The third call finishes the item and stops at the start
+	of [40, 41), where [30, 35) would close, and the fourth finishes. No call
+	changes the open record after its last write."""
+
+	tids = numpy.zeros(2, dtype=numpy.int64)
+	starts = numpy.array([0, 40], dtype=numpy.int64)
+	ends = numpy.array([35, 41], dtype=numpy.int64)
+	values = numpy.array([2, 3], dtype=numpy.float32)
+	open_ints = numpy.zeros(6, dtype=numpy.int64)
+	open_floats = numpy.zeros(4)
+	ints = numpy.zeros((1, 4), dtype=numpy.uint32)
+	floats = numpy.zeros((1, 4), dtype=numpy.float32)
+	progress = numpy.array([0, -1], dtype=numpy.int64)
+
+	calls = [
+		([[0, 0, 10, 10]], [[2, 2, 20, 40]], [0, 20], [1, 2, 0, 10, 20, 10]),
+		([[0, 10, 20, 10]], [[2, 2, 20, 40]], [0, 30], [1, 3, 0, 20, 30, 10]),
+		([[0, 20, 30, 10]], [[2, 2, 20, 40]], [1, 40], [1, 4, 0, 30, 35, 5]),
+		([[0, 30, 35, 5]], [[2, 2, 10, 20]], [2, -1], [1, 5, 0, 40, 41, 1]),
+	]
+
+	for record_ints, record_floats, where, opened in calls:
+		n = figwig._kernels._zoom_records(10, tids, starts, ends, values,
+			progress, open_ints, open_floats, ints, floats)
+
+		assert n == 1
+		assert ints.tolist() == record_ints
+		assert floats.tolist() == record_floats
+		assert progress.tolist() == where
+		assert open_ints.tolist() == opened
+
+	assert open_floats.tolist() == [3, 3, 3, 9]
+
+
+@pytest.mark.parametrize('room', [1, 2, 7, 1_000_000])
+def test_zoom_records_any_buffer_size(room):
+	"""Calling the kernel until every item is summarized gives the same
+	records, and the same open record, whatever its output buffer holds:
+	items of several chromosomes, spanning many records and few, with more
+	than 1023 records to a block."""
+
+	rng = numpy.random.default_rng(0)
+	widths = rng.integers(1, 60, 5000)
+	gaps = rng.integers(0, 30, 5000)
+	starts = numpy.cumsum(gaps + widths) - widths
+	ends = starts + widths
+	tids = numpy.repeat(numpy.arange(4), [1000, 2500, 1, 1499])
+	values = rng.random(5000).astype(numpy.float32)
+
+	def records(room):
+		open_ints = numpy.zeros(6, dtype=numpy.int64)
+		open_floats = numpy.zeros(4)
+		ints = numpy.zeros((room, 4), dtype=numpy.uint32)
+		floats = numpy.zeros((room, 4), dtype=numpy.float32)
+		progress = numpy.array([0, -1], dtype=numpy.int64)
+
+		out_ints, out_floats = [], []
+		while progress[0] < len(values):
+			n = figwig._kernels._zoom_records(10, tids, starts, ends, values,
+				progress, open_ints, open_floats, ints, floats)
+			out_ints.append(ints[:n].copy())
+			out_floats.append(floats[:n].copy())
+
+		return (numpy.concatenate(out_ints), numpy.concatenate(out_floats),
+			open_ints, open_floats)
+
+	expected = records(1_000_000)
+	assert len(expected[0]) > 2 * 1023
+
+	for x, y in zip(records(room), expected):
+		numpy.testing.assert_array_equal(x, y)
 
 
 def test_zoom_records_full_block():
@@ -736,9 +814,10 @@ def test_zoom_records_full_block():
 	open_floats = numpy.zeros(4)
 	ints = numpy.zeros((1100, 4), dtype=numpy.uint32)
 	floats = numpy.zeros((1100, 4), dtype=numpy.float32)
+	progress = numpy.array([0, -1], dtype=numpy.int64)
 
-	n = figwig._kernels._zoom_records(10, tids, starts, ends, values, open_ints,
-		open_floats, ints, floats)
+	n = figwig._kernels._zoom_records(10, tids, starts, ends, values, progress,
+		open_ints, open_floats, ints, floats)
 
 	assert n == 1023
 	assert ints[1022].tolist() == [0, 102_200, 102_201, 1]
