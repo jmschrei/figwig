@@ -131,8 +131,15 @@ def _check_engine(engine, level):
 	if engine == 'auto':
 		engine = 'libdeflate' if _libdeflate() is not None else 'zlib'
 	elif engine == 'libdeflate' and _libdeflate() is None:
-		raise ValueError("engine='libdeflate' needs the deflate package: "
-			"pip install deflate.")
+		try:
+			import deflate  # noqa: F401
+		except ImportError:
+			raise ValueError("engine='libdeflate' needs the deflate package: "
+				"pip install deflate.")
+
+		raise ValueError("engine='libdeflate' needs libdeflate's functions, "
+			"which could not be loaded from the deflate package here, as on "
+			"Windows; use engine='zlib'.")
 	elif engine == 'isal':
 		try:
 			import isal.isal_zlib  # noqa: F401
@@ -483,8 +490,10 @@ class BigWigWriter:
 		'libdeflate', which needs the `deflate` package, in figwig's `fast`
 		extra, and is several times faster than zlib at the same level, for
 		files as small or smaller. Both write the zlib streams every bigWig
-		reader reads. 'auto' is libdeflate when it is installed, and zlib
-		otherwise. 'isal' needs the `isal` package, and is faster still at
+		reader reads. Where zlib's library cannot be loaded, as on Windows,
+		'zlib' compresses with Python's zlib module, with the same bytes, and
+		libdeflate's functions cannot be loaded there either. 'auto' is
+		libdeflate when its functions can be loaded, and zlib otherwise. 'isal' needs the `isal` package, and is faster still at
 		levels 1 to 3, but at levels 1 and 2 its output has been seen to
 		differ from one run to the next on the same input, so files written
 		with it are not reproducible byte for byte; their values are.

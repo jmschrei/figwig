@@ -640,7 +640,8 @@ def test_dense_negative_zero(tmp_path):
 
 def test_engine_auto(tmp_path, monkeypatch):
 	"""'auto' is libdeflate when the deflate package's library is there, and
-	zlib otherwise."""
+	zlib otherwise. Asking for libdeflate where its functions do not load
+	says whether the package is missing or only its functions."""
 
 	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
 		assert writer.engine == 'libdeflate'
@@ -648,8 +649,12 @@ def test_engine_auto(tmp_path, monkeypatch):
 	monkeypatch.setattr(figwig.writer, '_libdeflate', lambda: None)
 	with figwig.BigWigWriter(tmp_path / 'b.bw', CHROMS) as writer:
 		assert writer.engine == 'zlib'
-	with pytest.raises(ValueError, match="needs the deflate package"):
+	with pytest.raises(ValueError, match="could not be loaded from the deflate"):
 		figwig.BigWigWriter(tmp_path / 'c.bw', CHROMS, engine='libdeflate')
+
+	monkeypatch.setitem(sys.modules, 'deflate', None)
+	with pytest.raises(ValueError, match="needs the deflate package"):
+		figwig.BigWigWriter(tmp_path / 'd.bw', CHROMS, engine='libdeflate')
 
 
 def test_engine_isal_needs_isal(tmp_path, monkeypatch):
