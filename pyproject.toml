@@ -42,7 +42,7 @@ fast = [
 dev = [
     "pytest>=7.0",
     "pybigtools>=0.2.5,<0.3",
-    "pyBigWig>=0.3.26",
+    "pyBigWig>=0.3.26; sys_platform != 'win32'",
     "deflate>=0.9",
     "isal>=1.0",
     "ruff>=0.4",

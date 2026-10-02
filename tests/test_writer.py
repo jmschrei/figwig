@@ -13,12 +13,19 @@ import types
 import numpy
 import pytest
 import deflate
-import pyBigWig
 import pybigtools
 
 import figwig
 import figwig._kernels
 import figwig.writer
+
+# pyBigWig, the writer's byte-for-byte oracle, does not build on Windows, so
+# the tests that compare against it run everywhere else.
+if sys.platform != 'win32':
+	import pyBigWig
+
+needs_pybigwig = pytest.mark.skipif(sys.platform == 'win32',
+	reason='pyBigWig does not build on Windows')
 
 
 def blocks_of(sizes, random_state=0):
@@ -319,6 +326,7 @@ def calls_of(kind, random_state=0):
 ##
 
 
+@needs_pybigwig
 @pytest.mark.parametrize('kind', ['bases', 'intervals'])
 @pytest.mark.parametrize('n_jobs', [1, 3])
 def test_bytes_identical_to_pybigwig(tmp_path, writer_batching, kind, n_jobs):
@@ -335,6 +343,7 @@ def test_bytes_identical_to_pybigwig(tmp_path, writer_batching, kind, n_jobs):
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
+@needs_pybigwig
 def test_mixed_sections_match_pybigwig_but_for_empty_blocks(tmp_path):
 	"""Intervals, then single bases, then intervals again on one chromosome
 	each start a new data block, as they do in pyBigWig, and calls of the same
@@ -367,6 +376,7 @@ def test_mixed_sections_match_pybigwig_but_for_empty_blocks(tmp_path):
 	assert a['chrom_tree'] == b['chrom_tree']
 
 
+@needs_pybigwig
 @pytest.mark.parametrize('values', [[5.0, 1.0, 2.0], [-3.0, -1.0, -2.0],
 	[0.0, 0.0]], ids=['first_largest', 'negative', 'zero'])
 def test_header_maximum(tmp_path, values):
@@ -387,6 +397,7 @@ def test_header_maximum(tmp_path, values):
 		values)
 
 
+@needs_pybigwig
 @pytest.mark.parametrize('zooms', [0, 10])
 def test_bytes_identical_to_pybigwig_without_values(tmp_path, zooms):
 	"""A file with chromosomes but no values has no index and no zoom levels,
@@ -397,6 +408,7 @@ def test_bytes_identical_to_pybigwig_without_values(tmp_path, zooms):
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
+@needs_pybigwig
 def test_bytes_identical_to_pybigwig_many_chromosomes(tmp_path):
 	"""With more than 32,767 chromosomes, the chromosome tree has a root over
 	several leaves, laid out as libBigWig lays it out."""
@@ -410,6 +422,7 @@ def test_bytes_identical_to_pybigwig_many_chromosomes(tmp_path):
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
+@needs_pybigwig
 def test_fixedstep_matches_pybigwig_but_for_block_ends(tmp_path,
 	writer_batching):
 	"""A dense array is written as pyBigWig writes one fixedStep call per run
@@ -444,6 +457,7 @@ def test_fixedstep_matches_pybigwig_but_for_block_ends(tmp_path,
 	assert 0 < shifted < len(a['blocks'])
 
 
+@needs_pybigwig
 def test_zoom_levels_match_pybigwig(tmp_path, writer_batching):
 	"""The zoom levels pyBigWig writes are written here with the same
 	reductions, records, blocks and index entries, but for the sums of the
@@ -511,6 +525,7 @@ def record_sums(items, record):
 	return numpy.float32(total), numpy.float32(squares)
 
 
+@needs_pybigwig
 def test_zoom_levels_read_by_pybigwig(tmp_path):
 	"""pyBigWig takes the statistics of a whole chromosome from the zoom
 	levels, and on a file written here they agree with the exact ones to
