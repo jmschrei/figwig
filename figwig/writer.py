@@ -459,7 +459,7 @@ class BigWigWriter:
 		from them. Their sizes are chosen the way libBigWig chooses them, from
 		16 times the mean width of an item, 4 times larger at each level, up
 		to the longest chromosome; a level that would hold no fewer records
-		than the level before it is skipped. They are made when the writer is
+		than the last level kept is skipped. They are made when the writer is
 		closed, from the data written, and add a pass over it. 0 writes none.
 		Default is 10.
 
@@ -469,15 +469,16 @@ class BigWigWriter:
 		uses.
 
 	engine: str, optional
-		What compresses the blocks. 'zlib' is zlib's own library, which the
-		file always needs to be read. 'libdeflate' needs the `deflate` package
-		(`pip install figwig[fast]`), and is several times faster than zlib
-		at the same level, for files as small or smaller. 'auto' is
-		libdeflate when it is installed, and zlib otherwise. 'isal' needs the
-		`isal` package, and is faster still at levels 1 to 3, but at levels 1
-		and 2 its output has been seen to differ from one run to the next on
-		the same input, so files written with it are not reproducible byte
-		for byte; their values are. Default is 'auto'.
+		What compresses the blocks: zlib's own library, 'zlib', or
+		'libdeflate', which needs the `deflate` package, in figwig's `fast`
+		extra, and is several times faster than zlib at the same level, for
+		files as small or smaller. Both write the zlib streams every bigWig
+		reader reads. 'auto' is libdeflate when it is installed, and zlib
+		otherwise. 'isal' needs the `isal` package, and is faster still at
+		levels 1 to 3, but at levels 1 and 2 its output has been seen to
+		differ from one run to the next on the same input, so files written
+		with it are not reproducible byte for byte; their values are.
+		Default is 'auto'.
 
 	n_jobs: int, optional
 		The most threads that compress blocks at once, besides the calling

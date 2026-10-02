@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "figwig"
 dynamic = ["version"]
-description = "A fast, multithreaded reader of many bigWig windows at once, into numpy."
+description = "A fast, multithreaded reader and writer of bigWig files, into and out of numpy."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
