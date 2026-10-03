@@ -30,6 +30,11 @@ table gives the median and range over repetitions, the size of the file and
 the process's peak resident memory. Threads are pinned through OMP, MKL,
 OpenBLAS, NUMBA and RAYON.
 
+The peak memory is Linux's VmHWM, which counts only the process's own
+memory. Its ru_maxrss would not do: on Linux it carries over the memory of
+the process that started it, here the parent, which holds every interval of
+a bigWig while it caches them. Elsewhere ru_maxrss is all there is.
+
 Each run then reads 2,000 windows of 1,000 bases, at positions drawn from a
 fixed seed on the chromosomes with values that are longer than 1,000 bases,
 from the file it wrote with
@@ -152,6 +157,22 @@ def windows_hash(path, chroms, entries):
 	return hashlib.sha256(y.tobytes()).hexdigest()
 
 
+def peak_mb():
+	"""This process's peak resident memory, in MB: VmHWM where /proc has
+	it, and otherwise ru_maxrss, in bytes on macOS and in KB elsewhere."""
+
+	try:
+		with open('/proc/self/status') as handle:
+			for line in handle:
+				if line.startswith('VmHWM:'):
+					return int(line.split()[1]) / 1024
+	except OSError:
+		pass
+
+	rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+	return rss / 2**20 if sys.platform == 'darwin' else rss / 1024
+
+
 def time_one(args):
 	chroms, entries, single = load_entries(entries_path(args.scratch,
 		args.bigwig))
@@ -170,10 +191,9 @@ def time_one(args):
 
 	record = {'bigwig': args.bigwig, 'lib': args.lib, 'engine': args.engine,
 		'threads': args.threads, 'zooms': args.zooms, 'seconds': seconds,
-		'bytes': os.path.getsize(path), 'peak_mb': resource.getrusage(
-		resource.RUSAGE_SELF).ru_maxrss / 1024, 'hash': windows_hash(path,
-		chroms, entries), 'items': int(sum(len(s) for s, _, _ in
-		entries.values())), 'single': single}
+		'bytes': os.path.getsize(path), 'peak_mb': peak_mb(), 'hash':
+		windows_hash(path, chroms, entries), 'items': int(sum(len(s) for s, _, _
+		in entries.values())), 'single': single}
 	print(json.dumps(record), flush=True)
 
 
