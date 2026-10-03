@@ -22,6 +22,7 @@ from ._kernels import _inflate_blocks
 from ._kernels import _libdeflate
 from ._kernels import _pread
 from ._kernels import _update_summary
+from ._kernels import _window_items
 from ._kernels import _zlib_compress
 from ._kernels import _zlib_uncompress
 from ._kernels import _zoom_records
@@ -50,9 +51,16 @@ _ZOOM_BLOCK_RECORDS = 1023
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
 
-# A window wider than this many bases is taken in pieces of whole segments
-# of this many, so that its values are converted a batch at a time.
+# Each window, or each segment of this many bases of a wider one, is written
+# as whichever section type is smallest, and a wider window is converted a
+# piece of whole segments at a time. Segments do not depend on the batch
+# size, so neither does the file.
 _SEGMENT_BASES = 1 << 16
+
+# The bytes a data block takes besides its items, for choosing a segment's
+# section type: its 24-byte section header, its 32-byte index entry, and
+# about 8 of zlib's own.
+_BLOCK_BYTES = 64
 
 # The data blocks read back in one task to build the zoom levels, the most
 # of these chunks read past the one the slowest level is on, and the zoom
@@ -68,6 +76,10 @@ _ZOOM_SCRATCH_RECORDS = 1 << 16
 _FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
 _DBL_MIN = sys.float_info.min
+
+# The items of each section type a data block holds, by its type number.
+_CAPACITY = numpy.array([0, _BLOCK_ITEMS[_BEDGRAPH], _BLOCK_ITEMS[_VARSTEP],
+	_BLOCK_ITEMS[_FIXEDSTEP]], dtype=numpy.int64)
 
 _ENGINES = ('auto', 'zlib', 'libdeflate', 'isal')
 _LEVELS = {'zlib': (0, 9), 'libdeflate': (0, 12), 'isal': (0, 3)}
@@ -689,8 +701,12 @@ class BigWigWriter:
 		where its bases are NaN, as `BigWig.read` gives them there. Values are
 		written as float32, and must not be infinite.
 
-		Windows are written as fixedStep sections, one for each stretch of
-		bases that are written, and intervals as bedGraph sections.
+		Each window, or each segment of 65,536 bases of a wider one, is
+		written as whichever section type takes the fewest bytes before
+		compression, counting each data block's header and index entry:
+		fixedStep for runs of bases, which start a new block at each gap;
+		varStep for scattered bases; or bedGraph for stretches of one value.
+		Intervals are written as bedGraph sections, as they are given.
 
 		A call that raises writes nothing.
 
@@ -753,9 +769,15 @@ class BigWigWriter:
 		if n == 0:
 			return
 
-		tids = numpy.array([self._tids[name] for name in names],
-			dtype=numpy.int64)[codes]
-		lengths = self._lengths[tids]
+		# One chromosome for every item is common, and its id and length are
+		# broadcast rather than repeated for each item.
+		ids = numpy.array([self._tids[name] for name in names],
+			dtype=numpy.int64)
+		if len(names) == 1:
+			tids = numpy.broadcast_to(ids[0], (n,))
+			lengths = numpy.broadcast_to(self._lengths[ids[0]], (n,))
+		else:
+			tids, lengths = ids[codes], self._lengths[ids][codes]
 
 		def describe(j):
 			return "{} {} on {!r}".format(item, j, names[codes[j]])
@@ -790,7 +812,7 @@ class BigWigWriter:
 			stops = ends
 
 		order = None
-		keys = (tids << 32) | starts
+		keys = starts if len(names) == 1 else (tids << 32) | starts
 		if (keys[1:] < keys[:-1]).any():
 			order = numpy.argsort(keys, kind='stable')
 			tids, starts, stops = tids[order], starts[order], stops[order]
@@ -800,21 +822,20 @@ class BigWigWriter:
 				"before it in chrom_sizes.".format(self._chrom_list[tids[0]][0],
 				self._chrom_list[self._last_tid][0]))
 
-		before = numpy.concatenate([[self._last_end], stops[:-1]])
-		same = numpy.concatenate([[self._last_tid], tids[:-1]]) == tids
-		overlap = same & (starts < before)
+		overlap = numpy.concatenate([[tids[0] == self._last_tid and starts[0] <
+			self._last_end], (tids[1:] == tids[:-1]) & (starts[1:] < stops[:-1])])
 		if overlap.any():
 			k = int(numpy.argmax(overlap))
 			j = k if order is None else int(order[k])
 			if k == 0:
 				raise ValueError("{} starts at {}, before the end of what was "
 					"written on it before, {}.".format(describe(j), starts[0],
-					before[0]))
+					self._last_end))
 
 			i = k - 1 if order is None else int(order[k - 1])
 			raise ValueError("{}, at {}, starts before {} {} ends, at {}; they "
 				"must not overlap.".format(describe(j), starts[k], item, i,
-				before[k]))
+				stops[k - 1]))
 
 		if ends is None:
 			self._write_windows(tids, starts, values, order, missing)
@@ -824,30 +845,44 @@ class BigWigWriter:
 		self._last_tid, self._last_end = int(tids[-1]), int(stops[-1])
 
 	def _write_windows(self, tids, starts, values, order, missing):
-		"""Write windows' values a piece at a time, in sorted order, as runs
-		of the bases that are not `missing` or NaN."""
+		"""Write windows' values a piece at a time, in sorted order, leaving
+		out the bases that are `missing` or NaN, and laying each window, or
+		segment of a wider one, out as the section type that takes it in the
+		fewest bytes."""
 
+		width = values.shape[1]
 		for a, b, c0, c1 in _pieces(*values.shape):
 			rows = slice(a, b) if order is None else order[a:b]
 			block = numpy.ascontiguousarray(values[rows, c0:c1],
 				dtype=numpy.float32)
 
-			keep = ~numpy.isnan(block)
-			if not numpy.isnan(missing):
-				keep &= block != missing
+			n = block.size
+			item_starts = numpy.empty(n, dtype=numpy.int64)
+			item_ends = numpy.empty(n, dtype=numpy.int64)
+			item_values = numpy.empty(n, dtype=numpy.float32)
+			parts = numpy.empty((n, 3), dtype=numpy.int64)
+			n_items, n_parts = _window_items(block, block.view(numpy.uint32),
+				starts[a:b] + c0, numpy.ascontiguousarray(tids[a:b]), missing,
+				width <= _SEGMENT_BASES, _SEGMENT_BASES, _BLOCK_BYTES, _CAPACITY,
+				item_starts, item_ends, item_values, parts)
 
-			index = numpy.flatnonzero(keep)
-			if index.size > 0:
-				row = index // block.shape[1]
-				positions = starts[a:b][row] + c0 + (index - row * block.shape[1])
-				kept = block.ravel()[index]
-				item_tids = tids[a:b][row]
+			# The runs keep views of these until they are laid out, so a piece
+			# with few items keeps only those.
+			if n_items < n // 2:
+				item_starts = item_starts[:n_items].copy()
+				item_ends = item_ends[:n_items].copy()
+				item_values = item_values[:n_items].copy()
 
-				breaks = numpy.flatnonzero((positions[1:] != positions[:-1] + 1) |
-					(item_tids[1:] != item_tids[:-1])) + 1
-				for r0, r1 in pairwise([0] + breaks.tolist() + [index.size]):
-					self._append(_FIXEDSTEP, int(item_tids[r0]), int(positions[r0]),
-						None, None, kept[r0:r1])
+			bounds = parts[:n_parts, 0].tolist() + [n_items]
+			for p in range(n_parts):
+				i0, i1 = bounds[p], bounds[p + 1]
+				kind, tid = int(parts[p, 1]), int(parts[p, 2])
+				if kind == _FIXEDSTEP:
+					self._append(kind, tid, int(item_starts[i0]), None, None,
+						item_values[i0:i1])
+				else:
+					self._append(kind, tid, int(item_starts[i0]), item_starts[i0:i1],
+						item_ends[i0:i1], item_values[i0:i1])
 
 			self._flush_if_full()
 

@@ -767,6 +767,38 @@ def test_wide_windows_in_pieces(tmp_path, monkeypatch, writer_batching):
 		100_000], 23_456), y.astype(numpy.float32))
 
 
+def section_types(path):
+	"""The section type of each data block, in file order."""
+
+	return [raw[20] for _, raw in parse(path)['blocks']]
+
+
+def test_write_chooses_the_smallest_section_type(tmp_path, monkeypatch):
+	"""Each window, or segment of a wider one, is written as the section type
+	that takes it in the fewest bytes: fixedStep for a run of distinct
+	values, varStep for scattered bases, and bedGraph for stretches of one
+	value. The values read back whichever is chosen."""
+
+	monkeypatch.setattr(figwig.writer, '_SEGMENT_BASES', 1000)
+	rng = numpy.random.default_rng(11)
+	runs = rng.normal(0, 1, 1000)
+	scattered = numpy.zeros(1000)
+	scattered[rng.choice(1000, 40, replace=False)] = rng.normal(0, 1, 40)
+	stretches = numpy.repeat(rng.normal(0, 1, 10), 100)
+	y = numpy.concatenate([runs, scattered, stretches])[None]
+
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
+		writer.write('chr1', [0], y[:, :1000])
+		writer.write('chr1', [1000], y[:, 1000:2000])
+		writer.write('chr1', [2000], y[:, 2000:])
+		writer.write('chr2', [0], y)
+
+	assert section_types(tmp_path / 'a.bw') == [3, 2, 1, 3, 2, 1]
+	y = y.astype(numpy.float32)
+	assert_bits(figwig.read_bigwig(tmp_path / 'a.bw', ['chr1', 'chr2'], [0, 0],
+		3000), numpy.concatenate([y, y]))
+
+
 @pytest.mark.parametrize('call, error, match', [
 	(lambda w: w.write(1, [0], [[1]]), ValueError, 'one name per start'),
 	(lambda w: w.write(['chr1', 'chr1'], [0], [[1]]), ValueError,
