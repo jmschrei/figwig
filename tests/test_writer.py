@@ -188,16 +188,20 @@ def dense_runs(start, values, missing=0.0):
 def write_figwig(path, chroms, calls, **kwargs):
 	"""Make each call, ('intervals', chrom, starts, ends, values), ('bases',
 	chrom, positions, values) or ('dense', chrom, start, values), with
-	BigWigWriter."""
+	BigWigWriter.write: single bases as windows of width 1, and a dense
+	array as one window. Intervals and single bases are written with
+	missing=NaN, so that every one is written, as pyBigWig writes them."""
 
 	with figwig.BigWigWriter(path, chroms, **kwargs) as writer:
 		for call in calls:
 			if call[0] == 'intervals':
-				writer.add(call[1], call[2], call[3], call[4])
+				writer.write(call[1], call[2], call[4], ends=call[3],
+					missing=numpy.nan)
 			elif call[0] == 'bases':
-				writer.add(call[1], call[2], values=call[3])
+				writer.write(call[1], call[2], numpy.asarray(call[3])[:, None],
+					missing=numpy.nan)
 			else:
-				writer.add(call[1], call[2], values=call[3])
+				writer.write(call[1], [call[2]], numpy.asarray(call[3])[None])
 
 
 def write_pybigwig(path, chroms, calls, zooms):
@@ -331,7 +335,7 @@ def calls_of(kind, random_state=0):
 		d1 = rng.normal(0, 1, 20_000).astype(numpy.float32)
 		d1[rng.random(d1.size) < 0.002] = 0
 		d2 = rng.normal(0, 1, 9000).astype(numpy.float32)
-		d3 = numpy.where(rng.random(30_000) < 0.5, 0, rng.normal(0, 1, 30_000))
+		d3 = numpy.where(rng.random(30_000) < 0.01, 0, rng.normal(0, 1, 30_000))
 		return [('dense', 'chr1', 1000, d1), ('dense', 'chr1', 21_000, d2),
 			('dense', 'chr2', 5, d3.astype(numpy.float32))]
 
@@ -444,11 +448,12 @@ def test_bytes_identical_to_pybigwig_many_chromosomes(tmp_path):
 @needs_pybigwig
 def test_fixedstep_matches_pybigwig_but_for_block_ends(tmp_path,
 	writer_batching):
-	"""A dense array is written as pyBigWig writes one fixedStep call per run
-	of its bases that are not 0, with two contiguous calls continuing one run,
-	except that each block's end is the end of its last item. libBigWig puts
-	the end of the last block of each call 6 bases further on, in the
-	section header and in the index."""
+	"""A dense window whose runs are long enough to be written as fixedStep
+	is written as pyBigWig writes one fixedStep call per run of its bases
+	that are not 0, with two contiguous windows continuing one run, except
+	that each block's end is the end of its last item. libBigWig puts the
+	end of the last block of each call 6 bases further on, in the section
+	header and in the index."""
 
 	calls = calls_of('dense')
 	write_figwig(tmp_path / 'a.bw', CHROMS, calls, zooms=0, engine='zlib',
@@ -554,8 +559,8 @@ def test_zoom_levels_read_by_pybigwig(tmp_path):
 	rng = numpy.random.default_rng(5)
 	p1, v1 = random_bases(rng, 3_000_000, 20_000)
 	p2, v2 = random_bases(rng, 1_000_000, 9000, 'normal')
-	figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, {'chr1': (p1, v1), 'chr2': (
-		p2, v2)})
+	figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, ['chr1'] * len(p1) + ['chr2'] *
+		len(p2), numpy.concatenate([p1, p2]), numpy.concatenate([v1, v2])[:, None])
 	write_pybigwig(tmp_path / 'b.bw', CHROMS, [('bases', 'chr1', p1, v1),
 		('bases', 'chr2', p2, v2)], zooms=10)
 
@@ -595,8 +600,9 @@ def assert_bits(a, b):
 @pytest.mark.parametrize('engine', ['zlib', pytest.param('libdeflate',
 	marks=needs_c_libraries), 'isal'])
 def test_round_trip(tmp_path, engine):
-	"""Values written in each of the three ways, with each engine, read back
-	bit for bit with figwig and with pybigtools, zoom levels included."""
+	"""Intervals, single bases and a dense window, with each engine, read
+	back bit for bit with figwig and with pybigtools, zoom levels
+	included."""
 
 	rng = numpy.random.default_rng(7)
 	length = 200_000
@@ -613,9 +619,9 @@ def test_round_trip(tmp_path, engine):
 
 	with figwig.BigWigWriter(tmp_path / 'a.bw', {'chr1': length, 'chr2': 10},
 			engine=engine, level=1, n_jobs=2) as writer:
-		writer.add('chr1', s, e, v)
-		writer.add('chr1', p + 60_000, values=w)
-		writer.add('chr1', 130_000, values=d)
+		writer.write('chr1', s, v, ends=e)
+		writer.write('chr1', p + 60_000, w[:, None])
+		writer.write('chr1', [130_000], d[None])
 
 	y, reference = read_back(tmp_path / 'a.bw', 'chr1', length)
 	assert_bits(y, expected)
@@ -629,7 +635,7 @@ def test_dense_missing(tmp_path, missing):
 
 	values = numpy.array([0, 1.5, -1, numpy.nan, 0, 0, 2, -1, 3],
 		dtype=numpy.float32)
-	figwig.write_bigwig(tmp_path / 'a.bw', {'chr1': 20}, {'chr1': values},
+	figwig.write_bigwig(tmp_path / 'a.bw', {'chr1': 20}, 'chr1', [0], values[None],
 		missing=missing)
 
 	expected = numpy.full(20, missing, dtype=numpy.float32)
@@ -648,8 +654,8 @@ def test_dense_negative_zero(tmp_path):
 	"""-0.0 equals 0.0, so with missing=0.0 it is left out and reads back as
 	0.0, without its sign bit."""
 
-	figwig.write_bigwig(tmp_path / 'a.bw', {'chr1': 4}, {'chr1': numpy.array(
-		[-0.0, 1.0, -0.0, 2.0])})
+	figwig.write_bigwig(tmp_path / 'a.bw', {'chr1': 4}, 'chr1', [0], [[-0.0, 1.0,
+		-0.0, 2.0]])
 	y, _ = read_back(tmp_path / 'a.bw', 'chr1', 4)
 	assert_bits(y, numpy.array([0.0, 1.0, 0.0, 2.0], dtype=numpy.float32))
 
@@ -826,6 +832,8 @@ def test_write_chooses_the_smallest_section_type(tmp_path, monkeypatch):
 		'past its length'),
 	(lambda w: w.write('chrM', [16_000], [numpy.ones(570)]), ValueError,
 		'where its values must be NaN'),
+	(lambda w: w.write('chr2', [999_999, 1_000_000], [[1], [2]]), ValueError,
+		'window 1 on .chr2. runs past the end'),
 	(lambda w: w.write('chr1', [0], [[1, numpy.inf]]), ValueError,
 		'finite or NaN'),
 	(lambda w: w.write('chr1', [0], [numpy.inf], ends=[2]), ValueError,
@@ -843,7 +851,8 @@ def test_write_chooses_the_smallest_section_type(tmp_path, monkeypatch):
 ], ids=['chrom_type', 'n_chroms', 'chrom_unknown', 'values_strings',
 	'float_starts', 'starts_2d', 'windows_1d', 'n_rows', 'no_columns',
 	'intervals_2d', 'n_ends', 'negative', 'past_2_32', 'empty_interval',
-	'interval_past_end', 'window_past_end', 'window_inf', 'interval_inf',
+	'interval_past_end', 'window_past_end', 'base_past_end', 'window_inf',
+	'interval_inf',
 	'float32_range', 'overlapping_windows', 'overlapping_intervals', 'repeat',
 	'missing_type'])
 def test_bad_write(tmp_path, call, error, match):
@@ -889,13 +898,6 @@ def test_write_that_raises_writes_nothing(tmp_path, monkeypatch):
 		writer.write('chr2', [5], [[2.0]])
 
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
-
-
-def test_write_after_close(tmp_path):
-	writer = figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS)
-	writer.close()
-	with pytest.raises(ValueError, match="has been closed"):
-		writer.write('chr1', [0], [[1.0]])
 
 
 ## Engines, levels, threads and batches
@@ -1289,85 +1291,20 @@ def test_bad_arguments(tmp_path, kwargs, error, match):
 	assert not (tmp_path / 'a.bw').exists()
 
 
-@pytest.mark.parametrize('call, error, match', [
-	(lambda w: w.add(1, [0], values=[1]), TypeError, 'chrom must be a string'),
-	(lambda w: w.add('chr3', [0], values=[1]), ValueError, 'not one of the'),
-	(lambda w: w.add('chr1', [0]), TypeError, 'add needs values'),
-	(lambda w: w.add('chr1', 0, [5], [1]), ValueError, 'single start and no'),
-	(lambda w: w.add('chr1', [0, 1], values=[[1, 2]]), ValueError,
-		'one-dimensional'),
-	(lambda w: w.add('chr1', [0], values=['a']), TypeError, 'must be numbers'),
-	(lambda w: w.add('chr1', [0.0, 1.0], values=[1, 2]), TypeError,
-		'must be integers'),
-	(lambda w: w.add('chr1', [[0, 1]], values=[1, 2]), ValueError,
-		'one-dimensional'),
-	(lambda w: w.add('chr1', [0, 1], values=[1]), ValueError,
-		'same length'),
-	(lambda w: w.add('chr1', [0, 3], [2], [1, 2]), ValueError, 'same length'),
-	(lambda w: w.add('chr1', [0], values=[numpy.nan]), ValueError,
-		'must be finite'),
-	(lambda w: w.add('chr1', [0], [2], [numpy.inf]), ValueError,
-		'must be finite'),
-	(lambda w: w.add('chr1', [0], values=[1e39]), ValueError,
-		"outside float32's range"),
-	(lambda w: w.add('chr1', [-1], values=[1]), ValueError, 'before 0'),
-	(lambda w: w.add('chr1', [5], [5], [1]), ValueError, 'at or before its'),
-	(lambda w: w.add('chr1', [0, 4], [5, 9], [1, 2]), ValueError,
-		'sorted and must not overlap'),
-	(lambda w: w.add('chr1', [5, 5], values=[1, 2]), ValueError,
-		'position 1'),
-	(lambda w: w.add('chr2', [999_999, 1_000_000], values=[1, 2]), ValueError,
-		'past its length'),
-	(lambda w: w.add('chr2', [10], [1_000_001], [1]), ValueError,
-		'past its length'),
-	(lambda w: w.add('chr1', -1, values=[1]), ValueError, 'before 0'),
-	(lambda w: w.add('chrM', 16_000, values=numpy.ones(570)), ValueError,
-		'past its length'),
-	(lambda w: w.add('chr1', 0, values=[1, numpy.inf]), ValueError,
-		'finite or NaN'),
-	(lambda w: w.add('chr1', 0, values=[1], missing='0'), TypeError,
-		'missing must be a number'),
-], ids=['chrom_type', 'chrom_unknown', 'no_values', 'dense_with_ends',
-	'values_2d', 'values_strings', 'float_starts', 'starts_2d', 'n_values',
-	'n_ends', 'nan', 'inf', 'float32_range', 'negative', 'empty_interval',
-	'overlap', 'repeat', 'past_end', 'interval_past_end', 'dense_negative',
-	'dense_past_end', 'dense_inf', 'missing_type'])
-def test_bad_add(tmp_path, call, error, match):
-	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
-		with pytest.raises(error, match=match):
-			call(writer)
-
-
-@pytest.mark.parametrize('first, second', [
-	(('chr1', [100], [200], [1]), ('chr1', [150], [300], [2])),
-	(('chr1', [100], None, [1]), ('chr1', [100], None, [2])),
-	(('chr1', 100, None, [1, 2]), ('chr1', [101], None, [3])),
-	(('chr2', [5], None, [1]), ('chr1', [5], None, [1])),
-], ids=['intervals', 'bases', 'dense', 'chromosome_order'])
-def test_add_out_of_order(tmp_path, first, second):
-	"""Each call starts at or after the end of the last on its chromosome,
-	and chromosomes come in the order of `chroms`."""
-
-	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
-		writer.add(first[0], first[1], first[2], values=first[3])
-		with pytest.raises(ValueError, match="before"):
-			writer.add(second[0], second[1], second[2], values=second[3])
-
-
 ## Behaviour
 
 
-def test_empty_adds_change_nothing(tmp_path):
-	"""Adding no values, or a dense array that is all `missing`, writes nothing
-	and does not count as reaching a chromosome."""
+def test_empty_writes_change_nothing(tmp_path):
+	"""Writing no windows or intervals, or windows whose values are all
+	`missing`, writes no data, and nothing about the file changes."""
 
 	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS, zooms=0) as writer:
-		writer.add('chr2', [], values=[])
-		writer.add('chr2', 0, values=numpy.zeros(100))
-		writer.add('chr2', [], [], [])
-		writer.add('chr1', [5], values=[1.0])
+		writer.write('chr1', [], numpy.zeros((0, 5)))
+		writer.write('chr1', [], [], ends=[])
+		writer.write('chr1', [0, 10], numpy.zeros((2, 5)))
+		writer.write('chr1', [20], [[1.0]])
 
-	write_figwig(tmp_path / 'b.bw', CHROMS, [('bases', 'chr1', [5], [1.0])],
+	write_figwig(tmp_path / 'b.bw', CHROMS, [('bases', 'chr1', [20], [1.0])],
 		zooms=0)
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
@@ -1377,53 +1314,85 @@ def test_empty_adds_change_nothing(tmp_path):
 @pytest.mark.parametrize('value_dtype', [numpy.float32, numpy.float64,
 	numpy.int16, numpy.uint8, bool, 'list'])
 def test_input_types(tmp_path, dtype, value_dtype):
-	"""Positions of any integer type and values of any real type, or lists of
-	them, write the same file as int64 positions and float64 values."""
+	"""Starts and ends of any integer type and values of any real type, or
+	lists of them, write the same file as int64 positions and float64
+	values."""
 
-	positions = numpy.array([3, 8, 9, 100])
+	starts = numpy.array([3, 8, 9, 100])
 	values = numpy.array([1, 0, 1, 1])
 
 	def cast(x, t):
 		return x.tolist() if t == 'list' else x.astype(t)
 
-	figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, {'chr1': (cast(positions,
-		dtype), cast(values, value_dtype))})
-	figwig.write_bigwig(tmp_path / 'b.bw', CHROMS, {'chr1': (positions,
-		values.astype(numpy.float64))})
-	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
+	for name, x, ends in [('windows', values[:, None], None), ('intervals',
+			values, starts + 1)]:
+		figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, 'chr1', cast(starts,
+			dtype), cast(x, value_dtype), ends=None if ends is None else cast(
+			ends, dtype))
+		figwig.write_bigwig(tmp_path / 'b.bw', CHROMS, 'chr1', starts,
+			x.astype(numpy.float64), ends=ends)
+		assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
 def test_path_types(tmp_path):
-	figwig.write_bigwig(str(tmp_path / 'a.bw'), CHROMS, {'chr1': [1.0]})
-	figwig.write_bigwig(tmp_path / 'b.bw', list(CHROMS.items()), {'chr1': [1.0]})
+	figwig.write_bigwig(str(tmp_path / 'a.bw'), CHROMS, 'chr1', [0], [[1.0]])
+	figwig.write_bigwig(tmp_path / 'b.bw', list(CHROMS.items()), 'chr1', [0],
+		[[1.0]])
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
 
 
-def test_write_bigwig_follows_chroms(tmp_path):
-	"""write_bigwig writes chromosomes in the order of `chroms`, whatever the
-	order of `data`, and takes each of the three forms of values."""
+@pytest.mark.parametrize('container', [list, tuple])
+def test_write_bigwig_several_files(tmp_path, container):
+	"""Given a list of paths, channel i of the values is written to the i-th
+	path, as BigWigWriter.write writes it, and read_bigwig of the same paths
+	reads the values back."""
 
-	rng = numpy.random.default_rng(8)
-	s, e, v = random_intervals(rng, 1_000_000, 100)
-	p, w = random_bases(rng, 3_000_000, 100)
-	d = rng.normal(0, 1, 1000).astype(numpy.float32)
+	rng = numpy.random.default_rng(12)
+	chroms, starts = tiled_windows(rng, {'chr1': 300_000, 'chr2': 100_000}, 500,
+		100)
+	lengths = numpy.where(chroms == 'chr1', 300_000, 100_000)
+	y = rng.normal(0, 1, (len(starts), 3, 500)).astype(numpy.float32)
+	y[rng.random(y.shape) < 0.5] = 0
+	y[numpy.broadcast_to(numpy.arange(500) >= (lengths - starts)[:, None, None],
+		y.shape)] = numpy.nan
 
-	figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, {'chrM': d, 'chr2': (s, e, v),
-		'chr1': (p, w)}, n_jobs=1)
-	write_figwig(tmp_path / 'b.bw', CHROMS, [('bases', 'chr1', p, w),
-		('intervals', 'chr2', s, e, v), ('dense', 'chrM', 0, d)], n_jobs=1)
-	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
-	assert figwig.BigWig(str(tmp_path / 'a.bw')).chrom_sizes == CHROMS
+	chrom_sizes = {'chr1': 300_000, 'chr2': 100_000}
+	paths = [tmp_path / '{}.bw'.format(i) for i in range(3)]
+	figwig.write_bigwig(container(paths), chrom_sizes, chroms, starts, y,
+		n_jobs=2)
+	for i in range(3):
+		figwig.write_bigwig(tmp_path / 'one.bw', chrom_sizes, chroms, starts,
+			y[:, i], n_jobs=2)
+		assert paths[i].read_bytes() == (tmp_path / 'one.bw').read_bytes()
+
+	assert_bits(figwig.read_bigwig(paths, chroms, starts, 500), y)
+
+	inside = starts + 50 <= lengths
+	chroms, starts, v = chroms[inside], starts[inside], y[inside, :, 0]
+	figwig.write_bigwig(paths[:2], chrom_sizes, chroms, starts, v[:, :2],
+		ends=starts + 50)
+	for i in range(2):
+		figwig.write_bigwig(tmp_path / 'one.bw', chrom_sizes, chroms, starts,
+			v[:, i], ends=starts + 50)
+		assert paths[i].read_bytes() == (tmp_path / 'one.bw').read_bytes()
 
 
-@pytest.mark.parametrize('data, error, match', [
-	([1.0], TypeError, 'data must be a dict'),
-	({'chr9': [1.0]}, ValueError, "not in chrom_sizes: 'chr9'"),
-	({'chr1': ([1], [2], [3], [4])}, ValueError, 'tuple of 4 arrays'),
-], ids=['not_dict', 'unknown', 'tuple'])
-def test_write_bigwig_bad_data(tmp_path, data, error, match):
+@pytest.mark.parametrize('kwargs, error, match', [
+	({'paths': []}, ValueError, 'at least one path'),
+	({'paths': [1]}, TypeError, 'paths must be a path'),
+	({'values': numpy.zeros((2, 3, 5))}, ValueError,
+		r'one channel per path, of shape \(n, 2, width\)'),
+	({'values': numpy.zeros((2, 5))}, ValueError, 'one channel per path'),
+	({'values': numpy.zeros((2, 2, 5)), 'ends': [5, 15]}, ValueError,
+		r'one channel per path, of shape \(n, 2\)'),
+], ids=['no_paths', 'path_type', 'n_channels', 'no_channels', 'intervals'])
+def test_write_bigwig_bad_arguments(tmp_path, kwargs, error, match):
+	arguments = {'paths': [tmp_path / 'a.bw', tmp_path / 'b.bw'], 'chrom_sizes':
+		CHROMS, 'chroms': 'chr1', 'starts': [0, 10], 'values': numpy.zeros((2, 2,
+		5))}
+	arguments.update(kwargs)
 	with pytest.raises(error, match=match):
-		figwig.write_bigwig(tmp_path / 'a.bw', CHROMS, data)
+		figwig.write_bigwig(**arguments)
 
 
 def test_failure_leaves_no_header(tmp_path):
@@ -1432,8 +1401,8 @@ def test_failure_leaves_no_header(tmp_path):
 
 	with pytest.raises(ValueError):
 		with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS, n_jobs=4) as writer:
-			writer.add('chr1', [5], values=[1.0])
-			writer.add('chr1', [4], values=[1.0])
+			writer.write('chr1', [5], [[1.0]])
+			writer.write('chr1', [4], [[1.0]])
 
 	assert writer._pool is None and writer._file is None
 	with pytest.raises(ValueError, match="not a bigWig"):
@@ -1441,18 +1410,18 @@ def test_failure_leaves_no_header(tmp_path):
 
 
 def test_close(tmp_path):
-	"""close writes the file; closing again does nothing, and adding after it
-	raises."""
+	"""close writes the file; closing again does nothing, and writing after
+	it raises."""
 
 	writer = figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS)
-	writer.add('chr1', [5], values=[2.0])
+	writer.write('chr1', [5], [[2.0]])
 	writer.close()
 	data = (tmp_path / 'a.bw').read_bytes()
 	writer.close()
 	assert (tmp_path / 'a.bw').read_bytes() == data
 
 	with pytest.raises(ValueError, match="has been closed"):
-		writer.add('chr1', [6], values=[1.0])
+		writer.write('chr1', [6], [[1.0]])
 
 	assert repr(writer) == "BigWigWriter({!r})".format(str(tmp_path / 'a.bw'))
 	assert writer.chrom_sizes == CHROMS
