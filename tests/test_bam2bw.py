@@ -1350,8 +1350,8 @@ def test_bgzipped_fasta(stranded, bam, sizes, fastas, tmp_path):
 
 
 def test_verbose_with_parallel_files(run, bam, sizes, tmp_path):
-	"""The per-file progress bars share a lock across the worker processes,
-	which is only exercised when more than one file is read at once."""
+	"""Two files under -v, each with its own progress bar, read one after
+	another in the main process."""
 
 	process = run(bam, bam, "-s", sizes, "-v", "-p", 2)
 
@@ -1999,6 +1999,142 @@ def test_write_counts_in_batches(tmp_path, monkeypatch, batch):
 	for chrom, (positions, counts) in reads.items():
 		expected = numpy.float32(counts * 2.5 / 7).tolist()
 		assert values[chrom] == dict(zip(positions.tolist(), expected))
+
+
+## Which files are read where
+#
+# Files the fast readers take are read one after another in the main process,
+# each on every core -p gives; files read on one thread whatever they are
+# given go to a pool of processes.
+
+
+@pytest.fixture(scope="session")
+def sam(data_dir, bam):
+	path = data_dir / "test.sam"
+	with pysam.AlignmentFile(str(bam), "rb") as infile:
+		with pysam.AlignmentFile(str(path), "w", header=infile.header) as out:
+			for alignment in infile:
+				out.write(alignment)
+
+	return path
+
+
+@pytest.fixture(scope="session")
+def bgzf_tsv(data_dir, tsv):
+	path = str(data_dir / "test.bgzf.tsv.gz")
+	pysam.tabix_compress(str(tsv), path)
+	return path
+
+
+def parse(*args):
+	return figwig.bam2bw._parser("figwig bam2bw").parse_args([str(arg)
+		for arg in args] + ["-n", "out"])
+
+
+def test_cores(monkeypatch):
+	monkeypatch.setattr(figwig.bam2bw, "_cpu_count", lambda: 16)
+
+	assert figwig.bam2bw._cores(1) == 1
+	assert figwig.bam2bw._cores(5) == 5
+	assert figwig.bam2bw._cores(-1) == 16
+	assert figwig.bam2bw._cores(-4) == 13
+	assert figwig.bam2bw._cores(-40) == 1
+
+	with pytest.raises(ValueError, match="not 0"):
+		figwig.bam2bw._cores(0)
+
+
+@pytest.mark.parametrize("kind,one_thread", [("bam", False), ("bed", False),
+	("tsv", False), ("bgzf_tsv", False), ("sam", True), ("bed_gz", True),
+	("tsv_gz", True)])
+def test_reads_on_one_thread(sizes, request, kind, one_thread):
+	path = str(request.getfixturevalue(kind))
+	args = parse(path, "-s", sizes)
+
+	assert figwig.bam2bw._reads_on_one_thread(path, args) == one_thread
+
+
+def test_reads_on_one_thread_mate_pairs_and_remote(bam, sizes, tmp_path):
+	assert figwig.bam2bw._reads_on_one_thread(str(bam), parse(bam, "-s",
+		sizes, "-mp"))
+
+	for path in ("https://example.org/test.bam", str(tmp_path / "missing.bam")):
+		assert figwig.bam2bw._reads_on_one_thread(path, parse(path, "-s", sizes))
+
+
+def test_plan(bam, sam, bed, bed_gz, sizes):
+	"""Files the fast readers take get every core the pool leaves; the pool has
+	a process per file read on one thread, up to the cores there are."""
+
+	plan = figwig.bam2bw._plan
+
+	assert plan(parse(sam, "-s", sizes), 4) == ([0], [], 0, 4)
+	assert plan(parse(bam, bed, bam, "-s", sizes), 6) == ([0, 1, 2], [], 0, 6)
+	assert plan(parse(sam, bam, bed_gz, "-s", sizes), 4) == ([1], [0, 2], 2, 2)
+	assert plan(parse(sam, bam, bed_gz, "-s", sizes), 2) == ([1], [0, 2], 2, 1)
+	assert plan(parse(sam, sam, sam, "-s", sizes), 2) == ([], [0, 1, 2], 2, 1)
+	assert plan(parse(sam, bam, bed_gz, "-s", sizes), 1) == ([0, 1, 2], [], 0, 1)
+
+
+def test_each_bam_gets_the_threads_it_is_given(bam, sizes, monkeypatch):
+	"""The BAM reader takes the threads extract_reads is given, not -p divided
+	by the number of files."""
+
+	given = []
+	counter = figwig.bam2bw._KeyCounter
+
+	class Recorder(counter):
+		def __init__(self, arrays, stranded, threads):
+			given.append(threads)
+			super().__init__(arrays, stranded, threads)
+
+	monkeypatch.setattr(figwig.bam2bw, "_KeyCounter", Recorder)
+
+	args = parse(bam, bam, bam, "-s", sizes, "-p", 6)
+	pos_reads, _ = figwig.bam2bw.extract_reads(args, CHROM_SIZES, 1, threads=6)
+
+	assert given == [6]
+	assert isinstance(pos_reads["chr1"], tuple)
+
+
+@pytest.mark.parametrize("p", [2, 3, 8, -1])
+def test_pool_and_threads_write_what_one_core_does(run, bam, sam, bed, bed_gz,
+	bgzf_tsv, sizes, tmp_path, p):
+	"""SAM and plain-gzip files read by the pool, at the same time as BAM and
+	BED files read here on the cores left, give the bytes of every file read
+	here on one core. The pool's processes exit as usual, so that a spawned
+	or forkserver pool (macOS, Python 3.14) reports no leaked semaphore."""
+
+	files = [sam, bam, bed_gz, bgzf_tsv, sam, bed]
+	for name, cores in (("one", 1), ("many", p)):
+		process = run(*files, "-s", sizes, "-p", cores, name=name)
+		assert process.returncode == 0, process.stderr
+		assert "leaked" not in process.stderr
+
+	for suffix in (".+.bw", ".-.bw"):
+		assert ((tmp_path / ("one" + suffix)).read_bytes() ==
+			(tmp_path / ("many" + suffix)).read_bytes())
+
+
+def test_verbose_with_pooled_files(run, sam, sizes, tmp_path):
+	"""The progress bars of the pool's processes share this process's lock."""
+
+	process = run(sam, sam, "-s", sizes, "-v", "-p", 2)
+
+	assert process.returncode == 0, process.stderr
+	assert "leaked" not in process.stderr
+
+	pos = read_counts(tmp_path / "out.+.bw")
+	positions, counts = entries(pos, "chr1")
+	assert_array_almost_equal(positions, [100, 200])
+	assert_array_almost_equal(counts, [4, 2], 4)
+
+
+def test_zero_parallel_is_rejected(run, bam, sizes):
+	process = run(bam, "-s", sizes, "-p", 0)
+
+	assert process.returncode != 0
+	assert "-p/--parallel" in process.stderr
 
 
 ## Known bugs
