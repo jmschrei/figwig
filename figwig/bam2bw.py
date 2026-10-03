@@ -37,6 +37,7 @@ import sys
 import gzip
 import zlib
 import queue
+import re
 import codecs
 import numpy
 import argparse
@@ -60,6 +61,16 @@ def _parser(prog):
 	parser = argparse.ArgumentParser(
 		prog=prog,
 		description='This tool will convert BAM files to bigwig files without an intermediate.')
+
+	# Python 3.14's argparse takes any argument that starts with '-' and a
+	# digit to be a negative number, so it counts -3p as an option that looks
+	# like one, and then reads the -4 of `-ns -4` as an option rather than a
+	# value. The pattern of Python 3.10 to 3.13, whole numbers and decimals
+	# only, keeps both working. The parser and each of its argument groups,
+	# through which options are added, hold their own copy.
+	for container in [parser] + parser._action_groups:
+		if hasattr(container, '_negative_number_matcher'):
+			container._negative_number_matcher = re.compile(r'^-\d+$|^-\d*\.\d+$')
 
 	parser.add_argument('filename', nargs='+',
 		help="""The SAM/BAM or tsv/tsv.gz file to be processed.""")
