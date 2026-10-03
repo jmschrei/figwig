@@ -15,7 +15,7 @@ Every library writes window j into row j of a float32 array of shape
 (n, width), except that figwig writes the windows in the order it is given
 them, and a sorted read is put back in order after the timing stops:
 
-	- figwig: one BigWig.read over every window, on `threads` threads.
+	- figwig: one BigWigReader.read over every window, on `threads` threads.
 	- pybigtools: one values(arr=) per window, into a float64 row.
 	- pyBigWig: one values(numpy=True) per window.
 	- pybbi: one stackup over the windows.
@@ -80,9 +80,10 @@ def chunks(idx, k):
 
 
 def read_figwig(path, names, starts, idx, out, threads, width):
-	from figwig import BigWig
+	from figwig import BigWigReader
 
-	return BigWig(path).read(names[idx], starts[idx], width, n_jobs=threads)
+	return BigWigReader(path).read(names[idx], starts[idx], width,
+		n_jobs=threads)
 
 
 def read_pybigtools(path, names, starts, idx, out, threads, width):

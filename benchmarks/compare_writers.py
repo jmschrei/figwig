@@ -145,7 +145,7 @@ WRITERS = {'figwig': write_figwig, 'pybigwig': write_pybigwig,
 def windows_hash(path, chroms, entries):
 	"""The SHA-256 of 2,000 windows of 1,000 bases read back with figwig."""
 
-	from figwig import BigWig
+	from figwig import BigWigReader
 
 	rng = numpy.random.default_rng(0)
 	names = sorted(name for name in entries if chroms[name] > 1000)
@@ -153,7 +153,7 @@ def windows_hash(path, chroms, entries):
 	chosen = numpy.array([names[i] for i in picks])
 	starts = numpy.array([rng.integers(0, chroms[name] - 1000) for name in
 		chosen], dtype=numpy.int64)
-	y = BigWig(path).read(chosen, starts, width=1000)
+	y = BigWigReader(path).read(chosen, starts, width=1000)
 	return hashlib.sha256(y.tobytes()).hexdigest()
 
 

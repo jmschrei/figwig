@@ -2,4 +2,4 @@ bigwig
 ======
 
 .. automodule:: figwig.bigwig
-	:members: BigWig, read_bigwig
+	:members: BigWigReader, read_bigwig

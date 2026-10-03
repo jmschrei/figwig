@@ -583,7 +583,8 @@ def test_zoom_levels_read_by_pybigwig(tmp_path):
 def read_back(path, chrom, width, missing=0.0):
 	"""Every base of a chromosome, read by figwig and by pybigtools."""
 
-	y = figwig.BigWig(str(path)).read(chrom, [0], width=width, missing=missing)
+	y = figwig.BigWigReader(str(path)).read(chrom, [0], width=width,
+		missing=missing)
 	bw = pybigtools.open(str(path))
 	reference = numpy.empty(width, dtype=numpy.float64)
 	bw.values(chrom, 0, width, missing=float(missing), arr=reference)
@@ -1405,7 +1406,7 @@ def test_failure_leaves_no_header(tmp_path):
 
 	assert writer._pool is None and writer._file is None
 	with pytest.raises(ValueError, match="not a bigWig"):
-		figwig.BigWig(str(tmp_path / 'a.bw'))
+		figwig.BigWigReader(str(tmp_path / 'a.bw'))
 
 
 def test_close(tmp_path):
@@ -1424,5 +1425,5 @@ def test_close(tmp_path):
 
 	assert repr(writer) == "BigWigWriter({!r})".format(str(tmp_path / 'a.bw'))
 	assert writer.chrom_sizes == CHROMS
-	assert figwig.BigWig(str(tmp_path / 'a.bw')).read('chr1', [5], 2).tolist() \
-		== [[2.0, 0.0]]
+	assert figwig.BigWigReader(str(tmp_path / 'a.bw')).read('chr1', [5],
+		2).tolist() == [[2.0, 0.0]]

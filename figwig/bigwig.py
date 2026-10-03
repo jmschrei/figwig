@@ -41,13 +41,13 @@ _LEAF_TYPE = numpy.dtype([('start_chrom', '<u4'), ('start', '<u4'),
 	('end_chrom', '<u4'), ('end', '<u4'), ('offset', '<u8'), ('size', '<u8')])
 
 
-class BigWig:
+class BigWigReader:
 	"""A bigWig file, read many windows at a time on several threads.
 
-	`BigWig` reads the per-base values of many windows of the same width in
-	one call, straight into a float32 numpy array. It is built for loading
-	training data: tens or hundreds of thousands of windows, such as 1,000 bp
-	around every peak and background region of an experiment.
+	`BigWigReader` reads the per-base values of many windows of the same
+	width in one call, straight into a float32 numpy array. It is built for
+	loading training data: tens or hundreds of thousands of windows, such as
+	1,000 bp around every peak and background region of an experiment.
 
 	The file's header and chromosome tree are read when it is opened, and its
 	data index on the first read, after which the index is kept for every
@@ -91,8 +91,8 @@ class BigWig:
 		  values, and readers disagree on which to report: pybigtools sums
 		  them.
 
-	A `BigWig` holds no open file between reads, and one object can be read
-	from several Python threads at once. It can be pickled, so it can be
+	A `BigWigReader` holds no open file between reads, and one object can be
+	read from several Python threads at once. It can be pickled, so it can be
 	part of a PyTorch Dataset read by DataLoader workers.
 
 
@@ -145,7 +145,7 @@ class BigWig:
 		self._index_lock = threading.Lock()
 
 	def __repr__(self):
-		return "BigWig('{}', {} chromosomes)".format(self.path,
+		return "BigWigReader('{}', {} chromosomes)".format(self.path,
 			len(self.chrom_sizes))
 
 	def __getstate__(self):
@@ -646,11 +646,11 @@ class _Read:
 def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
 	"""Read windows from one or more open bigWigs into one array.
 
-	With `single`, `bigwigs` holds one BigWig and the output has shape
+	With `single`, `bigwigs` holds one BigWigReader and the output has shape
 	(n, width); otherwise it has shape (n, len(bigwigs), width), and channel
 	i holds the values from bigwigs[i]. Every file's batches run on one
-	pool of threads. This is called by `BigWig.read` and `read_bigwig`, and
-	the warnings it raises name the line that called them.
+	pool of threads. This is called by `BigWigReader.read` and `read_bigwig`,
+	and the warnings it raises name the line that called them.
 	"""
 
 	n_jobs = _check_n_jobs(n_jobs)
@@ -724,14 +724,14 @@ def _run(reads, n_jobs):
 		read.finish()
 
 
-def read_bigwig(bigwigs: str | os.PathLike | BigWig | list | tuple,
+def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
 	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
 	missing: float = 0.0) -> numpy.ndarray:
 	"""Read the per-base values of many windows of one width from bigWigs.
 
-	Given one bigWig, this reads the windows as `BigWig.read` does, into an
-	array of shape (n, width). Given a list of them, such as the plus and
+	Given one bigWig, this reads the windows as `BigWigReader.read` does, into
+	an array of shape (n, width). Given a list of them, such as the plus and
 	minus strands of a stranded assay or one track per task of a model, it
 	reads every file into one array of shape (n, len(bigwigs), width), in
 	which channel i holds the values from bigwigs[i]. That is the
@@ -742,17 +742,18 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWig | list | tuple,
 
 	A path is opened, and its data index read, on every call. To read the
 	same files more than once, as a data loader does, open them with
-	`BigWig` and pass those, which keep their indexes.
+	`BigWigReader` and pass those, which keep their indexes.
 
-	Each file is read as `BigWig.read` describes: a window on a chromosome
-	that one file does not have is `missing` throughout in that file's
-	channel, with a warning, and the files need not share chromosomes.
+	Each file is read as `BigWigReader.read` describes: a window on a
+	chromosome that one file does not have is `missing` throughout in that
+	file's channel, with a warning, and the files need not share
+	chromosomes.
 
 
 	Parameters
 	----------
-	bigwigs: str, os.PathLike, BigWig, or list or tuple of these
-		One bigWig, or several, as paths or as open `BigWig` objects.
+	bigwigs: str, os.PathLike, BigWigReader, or list or tuple of these
+		One bigWig, or several, as paths or as open `BigWigReader` objects.
 
 	chroms: str, list of str, or numpy.ndarray of str
 		The chromosome of each window, or one name for every window.
@@ -780,7 +781,8 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWig | list | tuple,
 	Returns
 	-------
 	out: numpy.ndarray, dtype=float32, shape=(n, width) or (n, len(bigwigs), width)
-		The value of every base of every window, as `BigWig.read` gives it.
+		The value of every base of every window, as `BigWigReader.read` gives
+		it.
 	"""
 
 	single = not isinstance(bigwigs, (list, tuple))
@@ -789,10 +791,10 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWig | list | tuple,
 		raise ValueError("bigwigs must hold at least one bigWig.")
 
 	for bigwig in files:
-		if not isinstance(bigwig, (str, os.PathLike, BigWig)):
-			raise TypeError("bigwigs must be a path, a BigWig, or a list or tuple "
-				"of them, not {}.".format(type(bigwig).__name__))
+		if not isinstance(bigwig, (str, os.PathLike, BigWigReader)):
+			raise TypeError("bigwigs must be a path, a BigWigReader, or a list "
+				"or tuple of them, not {}.".format(type(bigwig).__name__))
 
-	files = [bigwig if isinstance(bigwig, BigWig) else BigWig(bigwig) for
-		bigwig in files]
+	files = [bigwig if isinstance(bigwig, BigWigReader) else BigWigReader(
+		bigwig) for bigwig in files]
 	return _read(files, single, chroms, starts, width, out, n_jobs, missing)
