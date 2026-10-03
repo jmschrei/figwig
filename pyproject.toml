@@ -46,7 +46,6 @@ bam2bw = [
     "pyfaidx>=0.8",
     "biopython>=1.73",
     "tqdm>=4.60",
-    "joblib>=1.2",
     "isal>=1.0",
     "deflate>=0.9",
 ]
@@ -60,7 +59,6 @@ dev = [
     "pyfaidx>=0.8",
     "biopython>=1.73",
     "tqdm>=4.60",
-    "joblib>=1.2",
     "ruff>=0.4",
     "build>=1.0",
     "twine>=4.0",
