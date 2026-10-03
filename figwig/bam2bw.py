@@ -1130,7 +1130,7 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 	return keys[:state[0]]
 
 def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
-	idx, name):
+	idx, name, threads=1):
 	"""Count the reads of an open BAM file without going through pysam's
 	per-read objects.
 
@@ -1142,7 +1142,9 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	would -- an unusual record, an error, a remote file -- and that nothing
 	has been recorded or printed, so the caller reads it with pysam instead.
 	`bam` is the file as opened by pysam, positioned after the header, which
-	this reader does not move.
+	this reader does not move. `threads` threads inflate the file's blocks and
+	count its keys while the calling thread walks the records; with 1, the
+	calling thread does all three.
 	"""
 
 	if not os.path.isfile(filename):
@@ -1175,10 +1177,6 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	tqdm = _tqdm(args.verbose)
 	kernel = _bam_kernel()
 	progress = tqdm(disable=not args.verbose, position=idx, desc=name)
-
-	# The cores -p gives each of the files being read at the same time.
-	n_files = len(args.filename)
-	threads = args.parallel // min(args.parallel, n_files) if args.parallel > 1 else 1
 
 	# A file the block reader cannot take exactly as htslib would read it goes
 	# to the pysam loop.
@@ -2082,7 +2080,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 
 		if mode == "rb" and not args.mate_pairs:
 			if count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads,
-				args, idx, name):
+				args, idx, name, threads):
 				bam.close()
 				return pos_reads, neg_reads
 
