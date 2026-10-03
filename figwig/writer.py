@@ -76,20 +76,21 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'),
 	('extension', '<u8')])
 
 
-def _check_chroms(chroms):
-	"""The `chroms` argument as a list of (name, length) pairs, in order."""
+def _check_chrom_sizes(chrom_sizes):
+	"""The `chrom_sizes` argument as a list of (name, length) pairs, in
+	order."""
 
-	if isinstance(chroms, dict):
-		pairs = list(chroms.items())
+	if isinstance(chrom_sizes, dict):
+		pairs = list(chrom_sizes.items())
 	else:
 		try:
-			pairs = [tuple(pair) for pair in chroms]
+			pairs = [tuple(pair) for pair in chrom_sizes]
 		except TypeError:
-			raise TypeError("chroms must be a dict of chromosome lengths, or a "
-				"list of (name, length) pairs.")
+			raise TypeError("chrom_sizes must be a dict of chromosome lengths, or "
+				"a list of (name, length) pairs.")
 
 	if len(pairs) == 0:
-		raise ValueError("chroms must name at least one chromosome.")
+		raise ValueError("chrom_sizes must name at least one chromosome.")
 	if len(pairs) > 1073676289:
 		raise ValueError("a bigWig can hold at most 1,073,676,289 chromosomes.")
 
@@ -466,7 +467,7 @@ class BigWigWriter:
 	path: str or os.PathLike
 		The file to write. It is created, or emptied, when the writer is made.
 
-	chroms: dict or list of (str, int)
+	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order their values will be
 		added: a dict such as `BigWig.chrom_sizes`, or a list of (name, length)
 		pairs. Chromosomes that get no values are still in the file's header.
@@ -504,14 +505,14 @@ class BigWigWriter:
 		thread, or -1 for one per CPU. Default is 8.
 	"""
 
-	def __init__(self, path: str | os.PathLike, chroms: dict | list,
+	def __init__(self, path: str | os.PathLike, chrom_sizes: dict | list,
 		zooms: int = 10, level: int = 6, engine: str = 'auto', n_jobs: int = 8):
 		self._file = None
 		self._pool = None
 
-		self.chroms = dict(_check_chroms(chroms))
-		self._chrom_list = list(self.chroms.items())
-		self._tids = {name: i for i, name in enumerate(self.chroms)}
+		self.chrom_sizes = dict(_check_chrom_sizes(chrom_sizes))
+		self._chrom_list = list(self.chrom_sizes.items())
+		self._tids = {name: i for i, name in enumerate(self.chrom_sizes)}
 
 		if isinstance(zooms, bool) or not isinstance(zooms, (int, numpy.integer)):
 			raise TypeError("zooms must be an integer.")
@@ -575,11 +576,11 @@ class BigWigWriter:
 		missing: float = 0.0):
 		"""Add values on one chromosome.
 
-		Chromosomes are added in the order of `chroms`, and within one, every
-		call starts at or after the end of the last; a chromosome may be added
-		over several calls. Positions are 0-based and ends are exclusive, as in
-		BED files, and must lie within the chromosome. Values are written as
-		float32, and must be finite.
+		Chromosomes are added in the order of `chrom_sizes`, and within one,
+		every call starts at or after the end of the last; a chromosome may be
+		added over several calls. Positions are 0-based and ends are exclusive,
+		as in BED files, and must lie within the chromosome. Values are written
+		as float32, and must be finite.
 
 		Parameters
 		----------
@@ -618,7 +619,7 @@ class BigWigWriter:
 			raise TypeError("add needs values.")
 
 		tid = self._tids[chrom]
-		length = self.chroms[chrom]
+		length = self.chrom_sizes[chrom]
 
 		dense = isinstance(starts, (numbers.Integral, numpy.integer)) and \
 			not isinstance(starts, bool)
@@ -635,7 +636,7 @@ class BigWigWriter:
 
 		if tid < self._last_tid:
 			raise ValueError("chromosome {!r} is added after {!r}, but comes "
-				"before it in chroms.".format(chrom, self._chrom_list[
+				"before it in chrom_sizes.".format(chrom, self._chrom_list[
 				self._last_tid][0]))
 		if tid == self._last_tid and runs[0][1] < self._last_end:
 			raise ValueError("values on {!r} start at {}, before the end of the "
@@ -1262,17 +1263,17 @@ def _compress_zoom_blocks(engine, level, ints, floats):
 		last, offset, size in zip(firsts, lasts, offsets, sizes)]
 
 
-def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
+def write_bigwig(path: str | os.PathLike, chrom_sizes: dict | list, data: dict,
 	zooms: int = 10, level: int = 6, engine: str = 'auto', n_jobs: int = 8,
 	missing: float = 0.0):
 	"""Write a bigWig file from values held in memory, in one call.
 
 	`write_bigwig` writes every chromosome of `data` with one
-	`BigWigWriter`, in the order of `chroms`, whatever order `data` is in.
-	Each chromosome's values are given the way `BigWigWriter.add` takes them:
-	a tuple of (starts, ends, values) for intervals, a tuple of (positions,
-	values) for single bases, and anything else, such as a numpy array or a
-	list, for a dense array of the values of every base from the start of the
+	`BigWigWriter`, in the order of `chrom_sizes`, whatever order `data` is
+	in. Each chromosome's values are given the way `BigWigWriter.add` takes
+	them: a tuple of (starts, ends, values) for intervals, a tuple of
+	(positions, values) for single bases, and anything else, such as a numpy
+	array or a list, for a dense array of the values of every base from the start of the
 	chromosome. A dense array may be shorter than its chromosome, and its
 	bases equal to `missing`, or NaN, are left out of the file.
 
@@ -1284,7 +1285,7 @@ def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
 	path: str or os.PathLike
 		The file to write. It is created, or emptied.
 
-	chroms: dict or list of (str, int)
+	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order they are written: a
 		dict such as `BigWig.chrom_sizes`, or a list of (name, length) pairs. A
 		chromosome without values is still in the file's header.
@@ -1315,14 +1316,14 @@ def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
 		raise TypeError("data must be a dict of each chromosome's values, not "
 			"{}.".format(type(data).__name__))
 
-	with BigWigWriter(path, chroms, zooms=zooms, level=level, engine=engine,
+	with BigWigWriter(path, chrom_sizes, zooms=zooms, level=level, engine=engine,
 			n_jobs=n_jobs) as writer:
-		unknown = [chrom for chrom in data if chrom not in writer.chroms]
+		unknown = [chrom for chrom in data if chrom not in writer.chrom_sizes]
 		if len(unknown) > 0:
-			raise ValueError("data has chromosomes that are not in chroms: {}."
+			raise ValueError("data has chromosomes that are not in chrom_sizes: {}."
 				.format(', '.join(map(repr, unknown))))
 
-		for chrom in writer.chroms:
+		for chrom in writer.chrom_sizes:
 			if chrom not in data:
 				continue
 

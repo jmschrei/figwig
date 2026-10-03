@@ -248,7 +248,7 @@ array of the values of every base from one start, which is what a model's
 predictions along a region are. In a dense array, the bases equal to
 `missing`, 0.0 unless given, and NaN are left out of the file, so that
 `BigWig.read` with the same `missing` reads the array back. Chromosomes are
-added in the order of `chroms`, and within one, each call starts at or after
+added in the order of `chrom_sizes`, and within one, each call starts at or after
 the end of the last, so a long chromosome can be written a part at a time.
 The header, the index and the zoom levels are written when the writer is
 closed, at the end of the `with` block.
@@ -278,7 +278,7 @@ print(bw.read("chr2", [868], width=5))
 `write_bigwig` takes each chromosome's values as a tuple of (starts, ends,
 values) for intervals, a tuple of (positions, values) for single bases, or an
 array for a dense array from the start of the chromosome, and writes the
-chromosomes in the order of `chroms`.
+chromosomes in the order of `chrom_sizes`.
 
 ## Values and coordinates
 

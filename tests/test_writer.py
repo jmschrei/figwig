@@ -1003,9 +1003,9 @@ def test_zoom_reductions():
 ## Arguments
 
 
-@pytest.mark.parametrize('chroms, error, match', [
+@pytest.mark.parametrize('chrom_sizes, error, match', [
 	({}, ValueError, 'at least one chromosome'),
-	(5, TypeError, 'chroms must be a dict'),
+	(5, TypeError, 'chrom_sizes must be a dict'),
 	([('chr1', 10, 3)], ValueError, r'\(name, length\) pair'),
 	([(1, 10)], TypeError, 'names must be strings'),
 	([('', 10)], ValueError, 'non-empty'),
@@ -1017,9 +1017,9 @@ def test_zoom_reductions():
 	([('chr1', 2 ** 32)], ValueError, 'from 1 to 2\\*\\*32 - 1'),
 ], ids=['empty', 'not_iterable', 'triple', 'name_type', 'empty_name', 'null',
 	'duplicate', 'float_length', 'bool_length', 'zero_length', 'long'])
-def test_bad_chroms(tmp_path, chroms, error, match):
+def test_bad_chrom_sizes(tmp_path, chrom_sizes, error, match):
 	with pytest.raises(error, match=match):
-		figwig.BigWigWriter(tmp_path / 'a.bw', chroms)
+		figwig.BigWigWriter(tmp_path / 'a.bw', chrom_sizes)
 	assert not (tmp_path / 'a.bw').exists()
 
 
@@ -1174,7 +1174,7 @@ def test_write_bigwig_follows_chroms(tmp_path):
 
 @pytest.mark.parametrize('data, error, match', [
 	([1.0], TypeError, 'data must be a dict'),
-	({'chr9': [1.0]}, ValueError, "not in chroms: 'chr9'"),
+	({'chr9': [1.0]}, ValueError, "not in chrom_sizes: 'chr9'"),
 	({'chr1': ([1], [2], [3], [4])}, ValueError, 'tuple of 4 arrays'),
 ], ids=['not_dict', 'unknown', 'tuple'])
 def test_write_bigwig_bad_data(tmp_path, data, error, match):
@@ -1211,5 +1211,6 @@ def test_close(tmp_path):
 		writer.add('chr1', [6], values=[1.0])
 
 	assert repr(writer) == "BigWigWriter({!r})".format(str(tmp_path / 'a.bw'))
+	assert writer.chrom_sizes == CHROMS
 	assert figwig.BigWig(str(tmp_path / 'a.bw')).read('chr1', [5], 2).tolist() \
 		== [[2.0, 0.0]]
