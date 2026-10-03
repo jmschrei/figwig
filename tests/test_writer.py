@@ -702,17 +702,17 @@ def test_write_sorts_items(tmp_path):
 	sorted by chromosome, in the order of chrom_sizes, and start write."""
 
 	rng = numpy.random.default_rng(1)
-	chroms, starts = tiled_windows(rng, {'chr2': 100_000, 'chr1': 200_000},
-		300, 50)
+	chroms, starts = tiled_windows(rng, {'chr2': 30_000, 'chr1': 60_000}, 300,
+		50)
 	y = rng.normal(0, 1, (len(starts), 300)).astype(numpy.float32)
 	y[rng.random(y.shape) < 0.2] = 0
-	lengths = numpy.where(chroms == 'chr1', 200_000, 100_000)
+	lengths = numpy.where(chroms == 'chr1', 60_000, 30_000)
 	y[numpy.arange(300) >= (lengths - starts)[:, None]] = numpy.nan
 
 	order = numpy.lexsort((starts, chroms == 'chr1'))
 	for name, index in [('a', numpy.arange(len(starts))), ('b', order)]:
-		with figwig.BigWigWriter(tmp_path / (name + '.bw'), {'chr2': 100_000,
-				'chr1': 200_000}) as writer:
+		with figwig.BigWigWriter(tmp_path / (name + '.bw'), {'chr2': 30_000,
+				'chr1': 60_000}) as writer:
 			writer.write(chroms[index], starts[index], y[index])
 
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
@@ -1348,15 +1348,14 @@ def test_write_bigwig_several_files(tmp_path, container):
 	reads the values back."""
 
 	rng = numpy.random.default_rng(12)
-	chroms, starts = tiled_windows(rng, {'chr1': 300_000, 'chr2': 100_000}, 500,
-		100)
-	lengths = numpy.where(chroms == 'chr1', 300_000, 100_000)
+	chrom_sizes = {'chr1': 60_000, 'chr2': 20_000}
+	chroms, starts = tiled_windows(rng, chrom_sizes, 500, 100)
+	lengths = numpy.where(chroms == 'chr1', 60_000, 20_000)
 	y = rng.normal(0, 1, (len(starts), 3, 500)).astype(numpy.float32)
 	y[rng.random(y.shape) < 0.5] = 0
 	y[numpy.broadcast_to(numpy.arange(500) >= (lengths - starts)[:, None, None],
 		y.shape)] = numpy.nan
 
-	chrom_sizes = {'chr1': 300_000, 'chr2': 100_000}
 	paths = [tmp_path / '{}.bw'.format(i) for i in range(3)]
 	figwig.write_bigwig(container(paths), chrom_sizes, chroms, starts, y,
 		n_jobs=2)
