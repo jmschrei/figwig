@@ -10,7 +10,6 @@ import zlib
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
-from itertools import pairwise
 
 import numpy
 
@@ -76,9 +75,14 @@ _FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
 _DBL_MIN = sys.float_info.min
 
-# The items of each section type a data block holds, by its type number.
-_CAPACITY = numpy.array([0, _BLOCK_ITEMS[_BEDGRAPH], _BLOCK_ITEMS[_VARSTEP],
-	_BLOCK_ITEMS[_FIXEDSTEP]], dtype=numpy.int64)
+# The bytes a segment of windows takes as each section type: a fixedStep
+# base, and the block each run of them starts; a varStep base; and a
+# bedGraph stretch. An item's share of its block's bytes is included.
+_COSTS = numpy.array([
+	4 * _ITEM_WORDS[_FIXEDSTEP] + _BLOCK_BYTES / _BLOCK_ITEMS[_FIXEDSTEP],
+	_BLOCK_BYTES,
+	4 * _ITEM_WORDS[_VARSTEP] + _BLOCK_BYTES / _BLOCK_ITEMS[_VARSTEP],
+	4 * _ITEM_WORDS[_BEDGRAPH] + _BLOCK_BYTES / _BLOCK_ITEMS[_BEDGRAPH]])
 
 _ENGINES = ('auto', 'zlib', 'libdeflate', 'isal')
 _LEVELS = {'zlib': (0, 9), 'libdeflate': (0, 12), 'isal': (0, 3)}
@@ -699,7 +703,7 @@ class BigWigWriter:
 		def describe(j):
 			return "{} {} on {!r}".format(item, j, names[codes[j]])
 
-		if (starts < 0).any():
+		if starts.min() < 0:
 			j = int(numpy.argmax(starts < 0))
 			raise ValueError("{} starts before 0, at {}.".format(describe(j),
 				starts[j]))
@@ -708,13 +712,12 @@ class BigWigWriter:
 			width = values.shape[1]
 			# Compared with 2**32 - 1 - width, so that a start near 2**63 does
 			# not overflow into one that passes.
-			if (starts > 2**32 - 1 - width).any():
+			if starts.max() > 2**32 - 1 - width:
 				j = int(numpy.argmax(starts > 2**32 - 1 - width))
 				raise ValueError("{} ends at {}, past 2**32 - 1.".format(
 					describe(j), int(starts[j]) + width))
 
 			_check_window_values(values, starts, lengths, describe)
-			stops = starts + width
 		else:
 			if (ends <= starts).any():
 				j = int(numpy.argmax(ends <= starts))
@@ -726,40 +729,49 @@ class BigWigWriter:
 					describe(j), ends[j], lengths[j]))
 
 			_check_interval_values(values, describe)
-			stops = ends
+
+		# Windows whose keys are each at least `width` past the last are
+		# sorted and do not overlap: on one chromosome the keys are starts,
+		# and on the next the key is more than any start plus `width`.
+		keys = starts if len(names) == 1 else (tids << 32) | starts
+		gaps = numpy.diff(keys)
+		apart = ends is None and bool((gaps >= width).all())
 
 		order = None
-		keys = starts if len(names) == 1 else (tids << 32) | starts
-		if (keys[1:] < keys[:-1]).any():
+		if not apart and (gaps < 0).any():
 			order = numpy.argsort(keys, kind='stable')
-			tids, starts, stops = tids[order], starts[order], stops[order]
+			tids, starts = tids[order], starts[order]
+			ends = None if ends is None else ends[order]
 
 		if tids[0] < self._last_tid:
 			raise ValueError("chromosome {!r} is written after {!r}, but comes "
 				"before it in chrom_sizes.".format(self._chrom_list[tids[0]][0],
 				self._chrom_list[self._last_tid][0]))
+		if tids[0] == self._last_tid and starts[0] < self._last_end:
+			j = 0 if order is None else int(order[0])
+			raise ValueError("{} starts at {}, before the end of what was "
+				"written on it before, {}.".format(describe(j), starts[0],
+				self._last_end))
 
-		overlap = numpy.concatenate([[tids[0] == self._last_tid and starts[0] <
-			self._last_end], (tids[1:] == tids[:-1]) & (starts[1:] < stops[:-1])])
-		if overlap.any():
-			k = int(numpy.argmax(overlap))
-			j = k if order is None else int(order[k])
-			if k == 0:
-				raise ValueError("{} starts at {}, before the end of what was "
-					"written on it before, {}.".format(describe(j), starts[0],
-					self._last_end))
-
-			i = k - 1 if order is None else int(order[k - 1])
-			raise ValueError("{}, at {}, starts before {} {} ends, at {}; they "
-				"must not overlap.".format(describe(j), starts[k], item, i,
-				stops[k - 1]))
+		if not apart:
+			stops = starts + width if ends is None else ends
+			overlap = (tids[1:] == tids[:-1]) & (starts[1:] < stops[:-1])
+			if overlap.any():
+				k = int(numpy.argmax(overlap)) + 1
+				j = k if order is None else int(order[k])
+				i = k - 1 if order is None else int(order[k - 1])
+				raise ValueError("{}, at {}, starts before {} {} ends, at {}; they "
+					"must not overlap.".format(describe(j), starts[k], item, i,
+					stops[k - 1]))
 
 		if ends is None:
 			self._write_windows(tids, starts, values, order, missing)
 		else:
-			self._write_intervals(tids, starts, stops, values, order, missing)
+			self._write_intervals(tids, starts, ends, values, order, missing)
 
-		self._last_tid, self._last_end = int(tids[-1]), int(stops[-1])
+		self._last_tid = int(tids[-1])
+		self._last_end = int(starts[-1]) + width if ends is None else int(
+			ends[-1])
 
 	def _write_windows(self, tids, starts, values, order, missing):
 		"""Write windows' values a piece at a time, in sorted order, leaving
@@ -773,6 +785,14 @@ class BigWigWriter:
 			block = numpy.ascontiguousarray(values[rows, c0:c1],
 				dtype=numpy.float32)
 
+			# A window of one base is smallest as varStep, whatever its value,
+			# so single bases are written as they are, without the kernel.
+			if width == 1:
+				self._append_items(_VARSTEP, tids[a:b], starts[a:b], None,
+					block[:, 0], missing)
+				self._flush_if_full()
+				continue
+
 			n = block.size
 			item_starts = numpy.empty(n, dtype=numpy.int64)
 			item_ends = numpy.empty(n, dtype=numpy.int64)
@@ -780,7 +800,7 @@ class BigWigWriter:
 			parts = numpy.empty((n, 3), dtype=numpy.int64)
 			n_items, n_parts = _window_items(block, block.view(numpy.uint32),
 				starts[a:b] + c0, numpy.ascontiguousarray(tids[a:b]), missing,
-				width <= _SEGMENT_BASES, _SEGMENT_BASES, _BLOCK_BYTES, _CAPACITY,
+				width <= _SEGMENT_BASES, _SEGMENT_BASES, _COSTS,
 				item_starts, item_ends, item_values, parts)
 
 			# The runs keep views of these until they are laid out, so a piece
@@ -811,21 +831,40 @@ class BigWigWriter:
 		for a in range(0, n, _BATCH_ITEMS):
 			b = min(n, a + _BATCH_ITEMS)
 			rows = slice(a, b) if order is None else order[a:b]
-			block = numpy.ascontiguousarray(values[rows], dtype=numpy.float32)
-
-			keep = ~numpy.isnan(block)
-			if not numpy.isnan(missing):
-				keep &= block != missing
-
-			t, s, e, v = tids[a:b][keep], starts[a:b][keep], ends[a:b][keep], \
-				block[keep]
-			if len(t) > 0:
-				breaks = numpy.flatnonzero(t[1:] != t[:-1]) + 1
-				for r0, r1 in pairwise([0] + breaks.tolist() + [len(t)]):
-					self._append(_BEDGRAPH, int(t[r0]), int(s[r0]), s[r0:r1],
-						e[r0:r1], v[r0:r1])
-
+			self._append_items(_BEDGRAPH, tids[a:b], starts[a:b], ends[a:b],
+				numpy.ascontiguousarray(values[rows], dtype=numpy.float32), missing)
 			self._flush_if_full()
+
+	def _append_items(self, kind, tids, starts, ends, values, missing):
+		"""Append items of one section type, in file order, as one run for
+		each chromosome, leaving out those whose value is `missing` or NaN.
+		Without `ends`, each item is one base."""
+
+		keep = ~numpy.isnan(values)
+		if not numpy.isnan(missing):
+			keep &= values != missing
+
+		# The runs hold these until they are laid out, so they are copies
+		# rather than views of what the caller may change.
+		every = bool(keep.all())
+		s = starts.copy() if every else starts[keep]
+		v = values.copy() if every else values[keep]
+		e = s + 1 if ends is None else ends.copy() if every else ends[keep]
+		if len(s) == 0:
+			return
+
+		# Where every item is on one chromosome, `tids` is that id broadcast,
+		# with a stride of 0, and is one run.
+		if tids.strides[0] == 0:
+			bounds, run_tids = [0, len(s)], [int(tids[0])]
+		else:
+			t = tids if every else tids[keep]
+			bounds = [0] + (numpy.flatnonzero(t[1:] != t[:-1]) + 1).tolist() + [
+				len(s)]
+			run_tids = t[bounds[:-1]].tolist()
+
+		for tid, r0, r1 in zip(run_tids, bounds[:-1], bounds[1:]):
+			self._append(kind, tid, int(s[r0]), s[r0:r1], e[r0:r1], v[r0:r1])
 
 	def _flush_if_full(self):
 		"""Lay out and compress what has been added once it is a batch."""
@@ -1198,6 +1237,9 @@ def _check_window_values(values, starts, lengths, describe):
 		_check_float32(values[a:b, c0:c1], describe, a)
 
 	width = values.shape[1]
+	if starts.max() + width <= lengths.min():
+		return
+
 	for j in numpy.flatnonzero(starts + width > lengths).tolist():
 		past = values[j, max(0, int(lengths[j] - starts[j])):]
 		if past.dtype.kind != 'f' or not numpy.isnan(past).all():

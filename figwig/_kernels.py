@@ -343,7 +343,7 @@ def _decode_items(words, bounds, tids, starts, ends, values):
 
 @numba.njit(nogil=True, cache=True)
 def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
-	block_bytes, capacity, starts, ends, values, parts):
+	costs, starts, ends, values, parts):
 	"""Windows' values as the items of data sections, each segment of them
 	as the section type that takes it in the fewest bytes.
 
@@ -354,12 +354,10 @@ def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
 	neither NaN nor `missing`.
 
 	A segment's written bases form runs of consecutive bases and, within
-	runs, stretches of one value, bit for bit. A data block holds
-	capacity[kind] items, of 4 bytes a word, and takes `block_bytes` more:
-	fixedStep (3) takes a word a base and a block a run, varStep (2) two
-	words a base, and bedGraph (1) three words a stretch. A segment is laid
-	out as the type with the fewest bytes, fixedStep first in a tie, then
-	varStep.
+	runs, stretches of one value, bit for bit. A segment takes costs[0]
+	bytes a base and costs[1] a run as fixedStep (3), costs[2] a base as
+	varStep (2), and costs[3] a stretch as bedGraph (1), and is laid out as
+	the type with the fewest, fixedStep first in a tie, then varStep.
 
 	Item i is written to starts[i], ends[i] and values[i]: a base, or a
 	stretch in bedGraph. Row p of `parts` is (first item, section type,
@@ -399,9 +397,9 @@ def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
 			if n_bases == 0:
 				continue
 
-			fixed = 4 * n_bases + block_bytes * (n_runs + n_bases / capacity[3])
-			var = 8 * n_bases + block_bytes * n_bases / capacity[2]
-			bed = 12 * n_stretches + block_bytes * n_stretches / capacity[1]
+			fixed = n_bases * costs[0] + n_runs * costs[1]
+			var = n_bases * costs[2]
+			bed = n_stretches * costs[3]
 			kind = 3 if fixed <= var and fixed <= bed else 2 if var <= bed else 1
 
 			kept = False
