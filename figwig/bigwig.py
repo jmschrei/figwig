@@ -486,6 +486,22 @@ def _check_missing(missing):
 	return numpy.float32(missing)
 
 
+def _chrom_codes(chroms, n):
+	"""The `chroms` argument, one name per start or one for all n, as the
+	names it holds and the position of each start's name among them."""
+
+	if isinstance(chroms, str):
+		return [chroms], numpy.zeros(n, dtype=numpy.int64)
+
+	chroms = numpy.asarray(chroms, dtype=str)
+	if chroms.shape != (n,):
+		raise ValueError("chroms must have one name per start, or be a single "
+			"name.")
+
+	names, codes = numpy.unique(chroms, return_inverse=True)
+	return names.tolist(), codes
+
+
 class _Windows:
 	"""The windows of a read, with their arguments checked.
 
@@ -517,17 +533,7 @@ class _Windows:
 			limit >= 0 else numpy.arange(n)
 		self._given = starts
 
-		if isinstance(chroms, str):
-			names, codes = [chroms], numpy.zeros(n, dtype=numpy.int64)
-		else:
-			chroms = numpy.asarray(chroms, dtype=str)
-			if chroms.shape != (n,):
-				raise ValueError("chroms must have one name per start, or be a "
-					"single name.")
-
-			names, codes = numpy.unique(chroms, return_inverse=True)
-			names = names.tolist()
-
+		names, codes = _chrom_codes(chroms, n)
 		self.n, self.width = n, width
 		self.names, self.codes = names, codes
 		self.starts = starts.astype(numpy.int64)

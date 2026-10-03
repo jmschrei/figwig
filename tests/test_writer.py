@@ -654,6 +654,218 @@ def test_dense_negative_zero(tmp_path):
 	assert_bits(y, numpy.array([0.0, 1.0, 0.0, 2.0], dtype=numpy.float32))
 
 
+## Writing windows and intervals
+
+
+def tiled_windows(rng, chrom_sizes, width, gap):
+	"""Windows of one width tiling each chromosome with gaps, the last few
+	running past its end or starting after it, in a random order."""
+
+	chroms, starts = [], []
+	for name, length in chrom_sizes.items():
+		first = numpy.arange(int(rng.integers(0, 50)), length + width // 2,
+			width + gap)
+		chroms += [name] * len(first)
+		starts += first.tolist()
+
+	order = rng.permutation(len(starts))
+	return numpy.array(chroms)[order], numpy.array(starts)[order]
+
+
+@pytest.mark.parametrize('missing', [0.0, numpy.nan])
+def test_write_reads_back_what_read_gives(tmp_path, dense_bw, sparse_bw,
+	writer_batching, missing):
+	"""Windows read from a file, in any order, on several chromosomes, and
+	running past the ends of their chromosomes, are written in one call and
+	read back bit for bit."""
+
+	for path, chrom_sizes in [dense_bw, sparse_bw]:
+		rng = numpy.random.default_rng(0)
+		chroms, starts = tiled_windows(rng, chrom_sizes, 700, 400)
+		y = figwig.read_bigwig(path, chroms, starts, 700, missing=missing)
+		with figwig.BigWigWriter(tmp_path / 'a.bw', chrom_sizes, n_jobs=3) as \
+				writer:
+			writer.write(chroms, starts, y, missing=missing)
+
+		assert_bits(figwig.read_bigwig(tmp_path / 'a.bw', chroms, starts, 700,
+			missing=missing), y)
+
+
+def test_write_sorts_items(tmp_path):
+	"""Windows given in any order write the file that the same windows
+	sorted by chromosome, in the order of chrom_sizes, and start write."""
+
+	rng = numpy.random.default_rng(1)
+	chroms, starts = tiled_windows(rng, {'chr2': 100_000, 'chr1': 200_000},
+		300, 50)
+	y = rng.normal(0, 1, (len(starts), 300)).astype(numpy.float32)
+	y[rng.random(y.shape) < 0.2] = 0
+	lengths = numpy.where(chroms == 'chr1', 200_000, 100_000)
+	y[numpy.arange(300) >= (lengths - starts)[:, None]] = numpy.nan
+
+	order = numpy.lexsort((starts, chroms == 'chr1'))
+	for name, index in [('a', numpy.arange(len(starts))), ('b', order)]:
+		with figwig.BigWigWriter(tmp_path / (name + '.bw'), {'chr2': 100_000,
+				'chr1': 200_000}) as writer:
+			writer.write(chroms[index], starts[index], y[index])
+
+	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
+
+
+def test_write_intervals(tmp_path, writer_batching):
+	"""Intervals in any order, on several chromosomes, read back as their
+	values, and those whose value is `missing` or NaN are not written."""
+
+	rng = numpy.random.default_rng(9)
+	s1, e1, v1 = random_intervals(rng, 3_000_000, 4000)
+	s2, e2, v2 = random_intervals(rng, 1_000_000, 3000)
+	v1[::7] = 0
+	v2[::11] = numpy.nan
+
+	chroms = numpy.array(['chr1'] * 4000 + ['chr2'] * 3000)
+	starts, ends = numpy.concatenate([s1, s2]), numpy.concatenate([e1, e2])
+	values = numpy.concatenate([v1, v2])
+	order = rng.permutation(len(starts))
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS, n_jobs=2) as writer:
+		writer.write(chroms[order], starts[order], values[order],
+			ends=ends[order])
+
+	for chrom, (s, e, v) in [('chr1', (s1, e1, v1)), ('chr2', (s2, e2, v2))]:
+		expected = numpy.zeros(CHROMS[chrom], dtype=numpy.float32)
+		for a, b, value in zip(s, e, numpy.nan_to_num(v).astype(numpy.float32)):
+			expected[a:b] = value
+
+		y, reference = read_back(tmp_path / 'a.bw', chrom, CHROMS[chrom])
+		assert_bits(y, expected)
+		assert_bits(reference, expected)
+
+	written = sum(struct.unpack_from('<H', raw, 22)[0] for _, raw in parse(
+		tmp_path / 'a.bw')['blocks'])
+	assert written == int(((values != 0) & ~numpy.isnan(values)).sum())
+
+
+def test_wide_windows_in_pieces(tmp_path, monkeypatch, writer_batching):
+	"""A window wider than _SEGMENT_BASES is converted and written a piece of
+	whole segments at a time, and the file does not depend on the batch
+	size."""
+
+	monkeypatch.setattr(figwig.writer, '_SEGMENT_BASES', 1000)
+	rng = numpy.random.default_rng(10)
+	y = rng.normal(0, 1, (2, 23_456))
+	y[rng.random(y.shape) < 0.1] = 0
+
+	def write(path):
+		with figwig.BigWigWriter(path, CHROMS, n_jobs=2) as writer:
+			writer.write(['chr2', 'chr1'], [5, 100_000], y)
+
+	write(tmp_path / 'a.bw')
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 1 << 20)
+	write(tmp_path / 'b.bw')
+
+	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
+	assert_bits(figwig.read_bigwig(tmp_path / 'a.bw', ['chr2', 'chr1'], [5,
+		100_000], 23_456), y.astype(numpy.float32))
+
+
+@pytest.mark.parametrize('call, error, match', [
+	(lambda w: w.write(1, [0], [[1]]), ValueError, 'one name per start'),
+	(lambda w: w.write(['chr1', 'chr1'], [0], [[1]]), ValueError,
+		'one name per start'),
+	(lambda w: w.write('chr3', [0], [[1]]), ValueError, 'not one of the'),
+	(lambda w: w.write('chr1', [0], [['a']]), TypeError, 'must be numbers'),
+	(lambda w: w.write('chr1', [0.0], [[1]]), TypeError, 'must be integers'),
+	(lambda w: w.write('chr1', [[0]], [[1]]), ValueError, 'one-dimensional'),
+	(lambda w: w.write('chr1', [0, 5], [1, 2]), ValueError,
+		'pass ends to write intervals'),
+	(lambda w: w.write('chr1', [0, 5], [[1, 2]]), ValueError,
+		'one row per start'),
+	(lambda w: w.write('chr1', [0], numpy.zeros((1, 0))), ValueError,
+		'at least one column'),
+	(lambda w: w.write('chr1', [0], [[1]], ends=[5]), ValueError,
+		'one value per interval'),
+	(lambda w: w.write('chr1', [0, 9], [1, 2], ends=[5]), ValueError,
+		'same length'),
+	(lambda w: w.write('chr1', [-1], [[1]]), ValueError, 'before 0'),
+	(lambda w: w.write('chr1', [2 ** 32 - 3], [[numpy.nan] * 5]), ValueError,
+		r'past 2\*\*32 - 1'),
+	(lambda w: w.write('chr1', [5], [1], ends=[5]), ValueError,
+		'at or before its start'),
+	(lambda w: w.write('chr2', [10], [1], ends=[1_000_001]), ValueError,
+		'past its length'),
+	(lambda w: w.write('chrM', [16_000], [numpy.ones(570)]), ValueError,
+		'where its values must be NaN'),
+	(lambda w: w.write('chr1', [0], [[1, numpy.inf]]), ValueError,
+		'finite or NaN'),
+	(lambda w: w.write('chr1', [0], [numpy.inf], ends=[2]), ValueError,
+		'finite or NaN'),
+	(lambda w: w.write('chr1', [0], [[1e39]]), ValueError,
+		"outside float32's range"),
+	(lambda w: w.write('chr1', [0, 4], [[1] * 5, [2] * 5]), ValueError,
+		'window 1 on .chr1., at 4, starts before window 0 ends'),
+	(lambda w: w.write('chr1', [4, 0], [2, 1], ends=[9, 5]), ValueError,
+		'interval 0 on .chr1., at 4, starts before interval 1 ends'),
+	(lambda w: w.write('chr1', [5, 5], [[1], [2]]), ValueError,
+		'must not overlap'),
+	(lambda w: w.write('chr1', [0], [[1]], missing='0'), TypeError,
+		'missing must be a number'),
+], ids=['chrom_type', 'n_chroms', 'chrom_unknown', 'values_strings',
+	'float_starts', 'starts_2d', 'windows_1d', 'n_rows', 'no_columns',
+	'intervals_2d', 'n_ends', 'negative', 'past_2_32', 'empty_interval',
+	'interval_past_end', 'window_past_end', 'window_inf', 'interval_inf',
+	'float32_range', 'overlapping_windows', 'overlapping_intervals', 'repeat',
+	'missing_type'])
+def test_bad_write(tmp_path, call, error, match):
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
+		with pytest.raises(error, match=match):
+			call(writer)
+
+
+@pytest.mark.parametrize('first, second', [
+	(('chr1', [100], [1], [200]), ('chr1', [150], [2], [300])),
+	(('chr1', [100], [[1, 2]], None), ('chr1', [101], [[3]], None)),
+	(('chr1', [100], [[0, 0]], None), ('chr1', [101], [[3]], None)),
+	(('chr2', [5], [[1]], None), ('chr1', [5], [[1]], None)),
+], ids=['intervals', 'windows', 'missing_window', 'chromosome_order'])
+def test_write_out_of_order(tmp_path, first, second):
+	"""Each call's items start at or after the end of the last call's last
+	item on their chromosome, a window whose values are all `missing`
+	included, and chromosomes come in the order of `chrom_sizes`."""
+
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
+		writer.write(*first[:3], ends=first[3])
+		with pytest.raises(ValueError, match="before"):
+			writer.write(*second[:3], ends=second[3])
+
+
+def test_write_that_raises_writes_nothing(tmp_path, monkeypatch):
+	"""A call that raises, here on an infinite value in a late piece of its
+	windows, writes none of them, and does not count as reaching their
+	chromosome."""
+
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 10)
+	y = numpy.ones((50, 10))
+	y[40, 3] = numpy.inf
+
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
+		writer.write('chr1', [0], [[5.0]])
+		with pytest.raises(ValueError, match="window 40 on 'chr2'"):
+			writer.write('chr2', numpy.arange(50) * 10, y)
+		writer.write('chr2', [5], [[2.0]])
+
+	with figwig.BigWigWriter(tmp_path / 'b.bw', CHROMS) as writer:
+		writer.write('chr1', [0], [[5.0]])
+		writer.write('chr2', [5], [[2.0]])
+
+	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
+
+
+def test_write_after_close(tmp_path):
+	writer = figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS)
+	writer.close()
+	with pytest.raises(ValueError, match="has been closed"):
+		writer.write('chr1', [0], [[1.0]])
+
+
 ## Engines, levels, threads and batches
 
 

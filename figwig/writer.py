@@ -11,6 +11,7 @@ import numbers
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait
+from itertools import pairwise
 
 import numpy
 
@@ -29,6 +30,7 @@ from .bigwig import _CHROM_TREE_MAGIC
 from .bigwig import _INDEX_MAGIC
 from .bigwig import _check_missing
 from .bigwig import _check_n_jobs
+from .bigwig import _chrom_codes
 
 
 # The layout of a file is libBigWig's (pyBigWig's writer): a data block is at
@@ -47,6 +49,10 @@ _ZOOM_BLOCK_RECORDS = 1023
 # many small chromosomes cost a few numpy calls, and a long one does not
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
+
+# A window wider than this many bases is taken in pieces of whole segments
+# of this many, so that its values are converted a batch at a time.
+_SEGMENT_BASES = 1 << 16
 
 # The data blocks read back in one task to build the zoom levels, the most
 # of these chunks read past the one the slowest level is on, and the zoom
@@ -513,6 +519,8 @@ class BigWigWriter:
 		self.chrom_sizes = dict(_check_chrom_sizes(chrom_sizes))
 		self._chrom_list = list(self.chrom_sizes.items())
 		self._tids = {name: i for i, name in enumerate(self.chrom_sizes)}
+		self._lengths = numpy.array(list(self.chrom_sizes.values()),
+			dtype=numpy.int64)
 
 		if isinstance(zooms, bool) or not isinstance(zooms, (int, numpy.integer)):
 			raise TypeError("zooms must be an integer.")
@@ -650,6 +658,225 @@ class BigWigWriter:
 		self._last_tid = tid
 		self._last_end = first + len(run_values) if kind == _FIXEDSTEP else \
 			int(run_ends[-1])
+
+		if self._pending_n + (self._run.n if self._run is not None else 0) >= \
+				_BATCH_ITEMS:
+			self._flush(final=False)
+
+	def write(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
+		numpy.ndarray, values, ends: list[int] | numpy.ndarray | None = None,
+		missing: float = 0.0):
+		"""Write the values of windows, or of intervals.
+
+		Without `ends`, item j is the window [starts[j], starts[j] + width) on
+		chroms[j], and row j of `values`, of shape (n, width), holds the value
+		of each of its bases, as `BigWig.read` returns them for the same
+		windows. With `ends`, item j is the interval [starts[j], ends[j]), and
+		values[j] is the value of every base in it. Positions are 0-based and
+		ends are exclusive, as in BED files.
+
+		Items may be given in any order, and are sorted by chromosome, in the
+		order of `chrom_sizes`, and by start, but must not overlap. The items
+		of a call come after those of the last call: on a chromosome later in
+		`chrom_sizes`, or on the same one at or after the end of the last
+		call's last item. A chromosome may be written over many calls, such
+		as one per batch of a model's predictions.
+
+		A base or interval whose value is `missing`, or NaN, is not written,
+		so that `BigWig.read` with the same `missing` reads the values back. A
+		base whose value is -0.0 is left out where `missing` is 0.0, and so
+		reads back as 0.0. A window may run past the end of its chromosome
+		where its bases are NaN, as `BigWig.read` gives them there. Values are
+		written as float32, and must not be infinite.
+
+		Windows are written as fixedStep sections, one for each stretch of
+		bases that are written, and intervals as bedGraph sections.
+
+		A call that raises writes nothing.
+
+
+		Parameters
+		----------
+		chroms: str, list of str, or numpy.ndarray of str
+			The chromosome of each item, or one name for every item. Each must
+			be one of `chrom_sizes`.
+
+		starts: list of int or numpy.ndarray of int, shape=(n,)
+			The start of each window or interval, at 0 or later.
+
+		values: array-like of numbers, shape=(n, width) or (n,)
+			The value of every base of each window, or with `ends`, the value
+			of each interval.
+
+		ends: list of int or numpy.ndarray of int, shape=(n,), or None, optional
+			The end of each interval, after its start and at most the length
+			of its chromosome. If None, the items are windows. Default is None.
+
+		missing: float, optional
+			The value of the bases and intervals that are not written. Default
+			is 0.0.
+		"""
+
+		if self._file is None:
+			raise ValueError("this BigWigWriter has been closed.")
+
+		missing = _check_missing(missing)
+		starts = self._positions(starts, 'starts')
+		values = numpy.asarray(values)
+		if values.dtype.kind not in 'biuf':
+			raise TypeError("values must be numbers, not {}.".format(values.dtype))
+
+		n = len(starts)
+		if ends is None:
+			item = 'window'
+			if values.ndim != 2 or len(values) != n:
+				raise ValueError("values must have one row per start, of shape "
+					"({}, width), not {}; pass ends to write intervals.".format(n,
+					values.shape))
+			if values.shape[1] < 1:
+				raise ValueError("values must have at least one column.")
+		else:
+			item = 'interval'
+			ends = self._positions(ends, 'ends')
+			if ends.shape != starts.shape:
+				raise ValueError("starts and ends must be the same length, not {} "
+					"and {}.".format(n, len(ends)))
+			if values.shape != starts.shape:
+				raise ValueError("values must hold one value per interval, of "
+					"shape ({},), not {}.".format(n, values.shape))
+
+		names, codes = _chrom_codes(chroms, n)
+		unknown = [name for name in names if name not in self._tids]
+		if len(unknown) > 0:
+			raise ValueError("chromosome {!r} is not one of the writer's "
+				"chromosomes.".format(unknown[0]))
+		if n == 0:
+			return
+
+		tids = numpy.array([self._tids[name] for name in names],
+			dtype=numpy.int64)[codes]
+		lengths = self._lengths[tids]
+
+		def describe(j):
+			return "{} {} on {!r}".format(item, j, names[codes[j]])
+
+		if (starts < 0).any():
+			j = int(numpy.argmax(starts < 0))
+			raise ValueError("{} starts before 0, at {}.".format(describe(j),
+				starts[j]))
+
+		if ends is None:
+			width = values.shape[1]
+			# Compared with 2**32 - 1 - width, so that a start near 2**63 does
+			# not overflow into one that passes.
+			if (starts > 2**32 - 1 - width).any():
+				j = int(numpy.argmax(starts > 2**32 - 1 - width))
+				raise ValueError("{} ends at {}, past 2**32 - 1.".format(
+					describe(j), int(starts[j]) + width))
+
+			_check_window_values(values, starts, lengths, describe)
+			stops = starts + width
+		else:
+			if (ends <= starts).any():
+				j = int(numpy.argmax(ends <= starts))
+				raise ValueError("{} ends at {}, at or before its start, {}."
+					.format(describe(j), ends[j], starts[j]))
+			if (ends > lengths).any():
+				j = int(numpy.argmax(ends > lengths))
+				raise ValueError("{} ends at {}, past its length, {}.".format(
+					describe(j), ends[j], lengths[j]))
+
+			_check_interval_values(values, describe)
+			stops = ends
+
+		order = None
+		keys = (tids << 32) | starts
+		if (keys[1:] < keys[:-1]).any():
+			order = numpy.argsort(keys, kind='stable')
+			tids, starts, stops = tids[order], starts[order], stops[order]
+
+		if tids[0] < self._last_tid:
+			raise ValueError("chromosome {!r} is written after {!r}, but comes "
+				"before it in chrom_sizes.".format(self._chrom_list[tids[0]][0],
+				self._chrom_list[self._last_tid][0]))
+
+		before = numpy.concatenate([[self._last_end], stops[:-1]])
+		same = numpy.concatenate([[self._last_tid], tids[:-1]]) == tids
+		overlap = same & (starts < before)
+		if overlap.any():
+			k = int(numpy.argmax(overlap))
+			j = k if order is None else int(order[k])
+			if k == 0:
+				raise ValueError("{} starts at {}, before the end of what was "
+					"written on it before, {}.".format(describe(j), starts[0],
+					before[0]))
+
+			i = k - 1 if order is None else int(order[k - 1])
+			raise ValueError("{}, at {}, starts before {} {} ends, at {}; they "
+				"must not overlap.".format(describe(j), starts[k], item, i,
+				before[k]))
+
+		if ends is None:
+			self._write_windows(tids, starts, values, order, missing)
+		else:
+			self._write_intervals(tids, starts, stops, values, order, missing)
+
+		self._last_tid, self._last_end = int(tids[-1]), int(stops[-1])
+
+	def _write_windows(self, tids, starts, values, order, missing):
+		"""Write windows' values a piece at a time, in sorted order, as runs
+		of the bases that are not `missing` or NaN."""
+
+		for a, b, c0, c1 in _pieces(*values.shape):
+			rows = slice(a, b) if order is None else order[a:b]
+			block = numpy.ascontiguousarray(values[rows, c0:c1],
+				dtype=numpy.float32)
+
+			keep = ~numpy.isnan(block)
+			if not numpy.isnan(missing):
+				keep &= block != missing
+
+			index = numpy.flatnonzero(keep)
+			if index.size > 0:
+				row = index // block.shape[1]
+				positions = starts[a:b][row] + c0 + (index - row * block.shape[1])
+				kept = block.ravel()[index]
+				item_tids = tids[a:b][row]
+
+				breaks = numpy.flatnonzero((positions[1:] != positions[:-1] + 1) |
+					(item_tids[1:] != item_tids[:-1])) + 1
+				for r0, r1 in pairwise([0] + breaks.tolist() + [index.size]):
+					self._append(_FIXEDSTEP, int(item_tids[r0]), int(positions[r0]),
+						None, None, kept[r0:r1])
+
+			self._flush_if_full()
+
+	def _write_intervals(self, tids, starts, ends, values, order, missing):
+		"""Write intervals a batch at a time, in sorted order, leaving out
+		those whose value is `missing` or NaN."""
+
+		n = len(starts)
+		for a in range(0, n, _BATCH_ITEMS):
+			b = min(n, a + _BATCH_ITEMS)
+			rows = slice(a, b) if order is None else order[a:b]
+			block = numpy.ascontiguousarray(values[rows], dtype=numpy.float32)
+
+			keep = ~numpy.isnan(block)
+			if not numpy.isnan(missing):
+				keep &= block != missing
+
+			t, s, e, v = tids[a:b][keep], starts[a:b][keep], ends[a:b][keep], \
+				block[keep]
+			if len(t) > 0:
+				breaks = numpy.flatnonzero(t[1:] != t[:-1]) + 1
+				for r0, r1 in pairwise([0] + breaks.tolist() + [len(t)]):
+					self._append(_BEDGRAPH, int(t[r0]), int(s[r0]), s[r0:r1],
+						e[r0:r1], v[r0:r1])
+
+			self._flush_if_full()
+
+	def _flush_if_full(self):
+		"""Lay out and compress what has been added once it is a batch."""
 
 		if self._pending_n + (self._run.n if self._run is not None else 0) >= \
 				_BATCH_ITEMS:
@@ -1055,6 +1282,69 @@ class _Done:
 
 	def done(self):
 		return True
+
+
+def _pieces(n, width):
+	"""Windows' values in pieces of about _BATCH_ITEMS values, as (first
+	window, end window, first column, end column): several whole windows at
+	a time, or one window wider than _SEGMENT_BASES in whole segments."""
+
+	if width <= _SEGMENT_BASES:
+		step = max(1, _BATCH_ITEMS // width)
+		for a in range(0, n, step):
+			yield a, min(n, a + step), 0, width
+	else:
+		step = max(1, _BATCH_ITEMS // _SEGMENT_BASES) * _SEGMENT_BASES
+		for j in range(n):
+			for c in range(0, width, step):
+				yield j, j + 1, c, min(width, c + step)
+
+
+def _check_float32(block, describe, first):
+	"""Raise if a piece of values, whose first item is `first`, holds an
+	infinite value or one outside float32's range."""
+
+	if block.dtype.kind != 'f':
+		return
+
+	infinite = numpy.isinf(block)
+	if infinite.any():
+		j = first + int(numpy.argmax(infinite.reshape(len(block), -1).any(
+			axis=1)))
+		raise ValueError("values must be finite or NaN, but {} holds an "
+			"infinite value.".format(describe(j)))
+
+	if block.dtype.itemsize > 4:
+		outside = numpy.abs(block) > _FLT_MAX
+		if outside.any():
+			j = first + int(numpy.argmax(outside.reshape(len(block), -1).any(
+				axis=1)))
+			raise ValueError("{} holds values outside float32's range.".format(
+				describe(j)))
+
+
+def _check_window_values(values, starts, lengths, describe):
+	"""Raise if a window holds an infinite value or one outside float32's
+	range, or a value that is not NaN past the end of its chromosome."""
+
+	for a, b, c0, c1 in _pieces(*values.shape):
+		_check_float32(values[a:b, c0:c1], describe, a)
+
+	width = values.shape[1]
+	for j in numpy.flatnonzero(starts + width > lengths).tolist():
+		past = values[j, max(0, int(lengths[j] - starts[j])):]
+		if past.dtype.kind != 'f' or not numpy.isnan(past).all():
+			raise ValueError("{} runs past the end of its chromosome, at {}, "
+				"where its values must be NaN.".format(describe(j),
+				int(lengths[j])))
+
+
+def _check_interval_values(values, describe):
+	"""Raise if an interval's value is infinite or outside float32's
+	range."""
+
+	for a in range(0, len(values), _BATCH_ITEMS):
+		_check_float32(values[a:a + _BATCH_ITEMS], describe, a)
 
 
 def _layout(runs):
