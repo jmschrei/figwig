@@ -584,6 +584,19 @@ feature lists, whose every line names a different sequence that is not in the
 sizes file: the fast reader returns to Python for each new name, where
 bam2bw's loop skips the line.
 
+The runs were repeated with their memory measured: the peak is the larger of
+the whole process tree's resident set, sampled every 20 ms, and the largest
+single process's exact peak (GNU time's maximum resident set size); the mean
+is the process tree's resident set averaged over the run.
+
+![Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-memory.png)
+
+Where bam2bw's peak was under 250 MB, figwig bam2bw's start-up held about 55
+MB more, numba and its compiled kernels: a median of 98 MB against 43 MB. On
+the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB against
+20.2 GB with `-u -f`; with `--mate_pairs`, read by pysam's loop in both, the
+two were the same (6.6 and 6.7 GB).
+
 ## Origin
 
 figwig began as the bigWig reader inside

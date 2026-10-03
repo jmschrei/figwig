@@ -117,6 +117,20 @@ well above the line are TSV files that are not coordinates, whose every line
 names a different sequence that is not in the sizes file: the fast reader
 returns to Python for each new name, where bam2bw's loop skips the line.
 
+The runs were repeated with their memory measured: the peak is the larger of
+the whole process tree's resident set, sampled every 20 ms, and the largest
+single process's exact peak; the mean is the process tree's resident set
+averaged over the run.
+
+.. image:: figures/bam2bw-memory.png
+   :alt: Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales
+   :width: 750px
+
+Where bam2bw's peak was under 250 MB, ``figwig bam2bw``'s start-up held about
+55 MB more, numba and its compiled kernels: a median of 98 MB against 43 MB.
+On the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB
+against 20.2 GB with ``-u -f``; with ``--mate_pairs`` the two were the same.
+
 How it writes
 -------------
 
