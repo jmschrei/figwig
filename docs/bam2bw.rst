@@ -94,6 +94,29 @@ per file up to ``-p``, while the other files are read on the cores the pool
 leaves. A negative ``-p`` counts back from the number of CPUs, so that ``-1`` is
 all of them, and ``-p 0`` is an error.
 
+Speed
+-----
+
+On every file of a collection of public test data that bam2bw takes (591 BAM,
+SAM, BED and TSV files from 28 assay directories, from 3 records to a 10 GB
+ATAC-seq BAM, each under 5 to 9 sets of flags), ``figwig bam2bw`` gave the same
+exit code, messages and decoded bigWig entries as bam2bw 0.5.1 in all 3,781
+runs that bam2bw completed. Each run was timed once, 16 at a time,
+interpreter start-up included:
+
+.. image:: figures/bam2bw-timings.png
+   :alt: Wall time of figwig bam2bw against bam2bw 0.5.1, log scales
+   :width: 600px
+
+Where bam2bw took a second or more, figwig bam2bw was a median 3.2 times
+faster, and 7 times faster on the 10 GB BAM at ``-p 1``, or 27 times at
+``-p 4``. Where bam2bw took under half a second, figwig bam2bw took a median
+0.12 s longer, most of it importing numba and loading its compiled kernels.
+With ``--mate_pairs`` (hollow points) both read with pysam's loop. The points
+well above the line are TSV files that are not coordinates, whose every line
+names a different sequence that is not in the sizes file: the fast reader
+returns to Python for each new name, where bam2bw's loop skips the line.
+
 How it writes
 -------------
 

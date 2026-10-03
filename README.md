@@ -564,6 +564,26 @@ figwig's bigWigs are 3% larger because they are compressed at level 1
 rather than pyBigWig's level 6. The first call in a new environment also
 compiles figwig's kernels, which took 1.1 s on the tiny input.
 
+Both also ran on every file of a collection of public test data that bam2bw
+takes: 591 BAM, SAM, BED and TSV files from 28 assay directories, from 3
+records to a 10 GB ATAC-seq BAM, each under 5 to 9 sets of flags. Each run was
+timed once, 16 at a time on the machine above, interpreter start-up included.
+In all 3,781 runs that bam2bw completed, figwig bam2bw gave the same exit
+code, messages and decoded bigWig entries.
+
+![Wall time of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-timings.png)
+
+In the 155 runs where bam2bw took a second or more, figwig bam2bw was a median
+3.2 times faster, and 7 times faster on the 10 GB BAM at `-p 1` (40 s against
+282 s), or 27 times at `-p 4`. In the 3,511 runs that bam2bw finished in under
+half a second, it took a median 0.12 s longer, most of it importing numba and
+loading its compiled kernels. With `--mate_pairs` (hollow points) both read
+with pysam's loop and take the same time. The points well above the line are
+TSV files that are not coordinates, such as quantification tables and 10x
+feature lists, whose every line names a different sequence that is not in the
+sizes file: the fast reader returns to Python for each new name, where
+bam2bw's loop skips the line.
+
 ## Origin
 
 figwig began as the bigWig reader inside
