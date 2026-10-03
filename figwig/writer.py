@@ -665,7 +665,6 @@ class BigWigWriter:
 
 		n = len(starts)
 		if ends is None:
-			item = 'window'
 			if values.ndim != 2 or len(values) != n:
 				raise ValueError("values must have one row per start, of shape "
 					"({}, width), not {}; pass ends to write intervals.".format(n,
@@ -673,7 +672,6 @@ class BigWigWriter:
 			if values.shape[1] < 1:
 				raise ValueError("values must have at least one column.")
 		else:
-			item = 'interval'
 			ends = self._positions(ends, 'ends')
 			if ends.shape != starts.shape:
 				raise ValueError("starts and ends must be the same length, not {} "
@@ -683,6 +681,16 @@ class BigWigWriter:
 					"shape ({},), not {}.".format(n, values.shape))
 
 		names, codes = _chrom_codes(chroms, n)
+		self._write_items(names, codes, starts, values, ends, missing)
+
+	def _write_items(self, names, codes, starts, values, ends, missing):
+		"""`write` once its arguments are arrays of the right shapes, with the
+		chromosome of item j given as names[codes[j]]. `bam2bw` calls this
+		with the ids of the chromosomes in `chrom_sizes` as `codes`, rather
+		than with a name per item, which `write` would have to sort."""
+
+		n = len(starts)
+		item = 'window' if ends is None else 'interval'
 		unknown = [name for name in names if name not in self._tids]
 		if len(unknown) > 0:
 			raise ValueError("chromosome {!r} is not one of the writer's "
