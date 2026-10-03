@@ -4,10 +4,11 @@ figwig bam2bw
 ``figwig bam2bw`` turns SAM/BAM files of reads, or BED/tsv files of fragments,
 into bigWigs of per-base counts. It is `bam2bw
 <https://github.com/jmschrei/bam2bw>`_ 0.5.1 with the same arguments, the same
-output files and the same messages, reading files the way the winner of a
-speed search over bam2bw's code reads them, and writing them with
-:class:`~figwig.BigWigWriter`. It needs the ``bam2bw`` extra, which adds
-pysam, pyfaidx, biopython, tqdm, joblib, isal and deflate:
+output files and the same messages, except that ``-p`` is a number of cores.
+It reads files the way the winner of a speed search over bam2bw's code reads
+them, and writes them with :class:`~figwig.BigWigWriter`. It needs the
+``bam2bw`` extra, which adds pysam, pyfaidx, biopython, tqdm, isal and
+deflate:
 
 .. code-block:: bash
 
@@ -62,7 +63,8 @@ chromosome, after a shift, are left out and reported.
       -r, --read_depth      Whether to divide through by total (pre-scaled) read
                             depth.
       -p, --parallel PARALLEL
-                            The number of jobs to use, max of one per input file.
+                            The number of cores to use, or a negative number to
+                            count back from the number of CPUs: -1 is all of them.
       -n, --name NAME
       -z, --zooms ZOOMS     The number of zooms to store in the bigwig.
       -v, --verbose
@@ -75,13 +77,22 @@ its records are walked by a numba kernel rather than through pysam's objects;
 the kernel writes one integer key per counted position, and sorting the keys
 and counting the runs of equal keys gives each chromosome's counts. A BED/tsv
 file is scanned by a numba kernel, on the ``-p`` threads when it is BGZF or not
-compressed. bam2bw gives each file one process, and at most one process per
-file; here the threads ``-p`` leaves over go to each file.
+compressed.
 
 A file these readers would not read exactly as htslib, or bam2bw's own loop
 over lines, would read it is read by bam2bw's pysam or line loop instead, so
 that its result, or its error, is bam2bw's: a SAM file, ``--mate_pairs``, a
 remote file, or a malformed record or line.
+
+``-p`` is a number of cores, where bam2bw takes it as a number of processes,
+one per file at most. Files the fast readers take are read one after another,
+each on every core: three BAMs of 2.4, 1.8 and 0.45 GB took 7.1 s at ``-p 3``,
+against 11.1 s with a process per file on one core each. Files that are read
+on one thread whatever ``-p`` is (SAM, ``--mate_pairs``, remote files, and
+gzipped BED/tsv files that are not BGZF) are read by a pool of processes, one
+per file up to ``-p``, while the other files are read on the cores the pool
+leaves. A negative ``-p`` counts back from the number of CPUs, so that ``-1`` is
+all of them, and ``-p 0`` is an error.
 
 How it writes
 -------------

@@ -56,7 +56,7 @@ pip install ".[fast]"
 ```
 
 `figwig bam2bw` needs the `bam2bw` extra, which adds pysam, pyfaidx,
-biopython, tqdm, joblib, isal and deflate:
+biopython, tqdm, isal and deflate:
 
 ```bash
 pip install ".[bam2bw]"
@@ -300,7 +300,8 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 2  # tes
 ```
 
 `figwig bam2bw` is bam2bw 0.5.1 with the same arguments, the same output
-files and the same messages. By default it counts the 5' end of every mapped
+files and the same messages, except that `-p` is a number of cores rather
+than of processes. By default it counts the 5' end of every mapped
 read at each base, and writes the counts of the two strands to two bigWigs;
 `-u` writes one, `-f` counts both ends of each fragment, `-3p` the 3' ends,
 and `-ps`, `-ns`, `-sf` and `-r` shift and scale the counts. `figwig bam2bw
@@ -308,15 +309,22 @@ and `-ps`, `-ns`, `-sf` and `-r` shift and scale the counts. `figwig bam2bw
 README](https://github.com/jmschrei/bam2bw) has an example of each.
 
 It reads files the way the winner of a speed search over bam2bw's code reads
-them. A BAM file's BGZF blocks are inflated by libdeflate on
-the `-p` threads, and its records are walked by a numba kernel rather than
-through pysam's objects. A BED/tsv file is scanned by a numba kernel, on the
-`-p` threads when it is BGZF or not compressed. bam2bw gives each file one
-process, and at most one process per file; here the threads `-p` leaves over
-go to each file. A file these readers would not read exactly as htslib, or
-bam2bw's own loop over lines, would read it is read by bam2bw's pysam or
-line loop instead, so that its result, or its error, is bam2bw's: a SAM file,
-`--mate_pairs`, a remote file, or a malformed record or line.
+them. A BAM file's BGZF blocks are inflated by libdeflate on `-p` threads,
+and its records are walked by a numba kernel rather than through pysam's
+objects. A BED/tsv file is scanned by a numba kernel, on `-p` threads when it
+is BGZF or not compressed. A file these readers would not read exactly as
+htslib, or bam2bw's own loop over lines, would read it is read by bam2bw's
+pysam or line loop instead, so that its result, or its error, is bam2bw's: a
+SAM file, `--mate_pairs`, a remote file, or a malformed record or line.
+
+bam2bw reads each file in a process of its own, and gives a file at most one
+core. Here files are read one after another, each on every core `-p` gives:
+three BAMs of 2.4, 1.8 and 0.45 GB took 7.1 s at `-p 3`, against 11.1 s with
+a process per file. Files that are read on one thread whatever `-p` is (SAM,
+`--mate_pairs`, remote files, and gzipped BED/tsv files that are not BGZF)
+are read by a pool of processes instead, one per file up to `-p`, while the
+other files are read on the cores the pool leaves. A negative `-p` counts back
+from the number of CPUs, so that `-1` is all of them, and `-p 0` is an error.
 
 The counts are written by `BigWigWriter` with libdeflate at level 1, so the
 bigWigs hold bam2bw's entries, but not its bytes, and `-z` writes figwig's zoom
