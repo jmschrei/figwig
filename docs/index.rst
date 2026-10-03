@@ -19,7 +19,7 @@ refuses and how it lays out the files it writes.
 
     import numpy
     from figwig import BigWig
-    from figwig import read_windows
+    from figwig import read_bigwig
 
     chroms = numpy.array(["chr1", "chr1", "chr2"])
     starts = numpy.array([1_000_000, 2_500_000, 300_000])
@@ -27,7 +27,7 @@ refuses and how it lays out the files it writes.
     bw = BigWig("ENCFF830RWF.bigWig")
     y = bw.read(chroms, starts, width=1000, n_jobs=8)   # (3, 1000) float32
 
-    y = read_windows(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms,
+    y = read_bigwig(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms,
         starts, width=1000)                              # (3, 2, 1000) float32
 
 .. code-block:: python

@@ -23,7 +23,7 @@ import figwig
 import figwig._kernels
 
 from figwig import BigWig
-from figwig import read_windows
+from figwig import read_bigwig
 
 from .writers import write_bigwig
 from .writers import write_raw_bigwig
@@ -410,17 +410,17 @@ def test_window_ending_at_the_largest_position(dense_bw):
 	assert numpy.isnan(X).all()
 
 
-def test_read_windows(sparse_bw):
+def test_read_bigwig(sparse_bw):
 	path, chroms = sparse_bw
 	names, starts = random_windows(numpy.random.default_rng(5), chroms, 2000, 100)
 	X = BigWig(path).read(names, starts, 100)
-	assert_identical(read_windows(path, names, starts, 100, n_jobs=3), X)
-	assert_identical(read_windows(pathlib.Path(path), names, starts, 100), X)
-	assert_identical(read_windows(BigWig(path), names, starts, 100), X)
+	assert_identical(read_bigwig(path, names, starts, 100, n_jobs=3), X)
+	assert_identical(read_bigwig(pathlib.Path(path), names, starts, 100), X)
+	assert_identical(read_bigwig(BigWig(path), names, starts, 100), X)
 
 
 @pytest.mark.parametrize('container', [list, tuple])
-def test_read_windows_several_files(dense_bw, sparse_bw, deep_bw, container,
+def test_read_bigwig_several_files(dense_bw, sparse_bw, deep_bw, container,
 	batching):
 	"""Channel i of a read of several files holds what reading bigwigs[i] on
 	its own gives, with paths and BigWig objects mixed and a file given
@@ -434,7 +434,7 @@ def test_read_windows_several_files(dense_bw, sparse_bw, deep_bw, container,
 	# deep_bw has no chr2, so its channel warns for those windows alone.
 	with pytest.warns(UserWarning, match='100 windows are on chromosomes not in '
 			'.*deep.bw') as record:
-		X = read_windows(container(files), names, starts, 300, n_jobs=4,
+		X = read_bigwig(container(files), names, starts, 300, n_jobs=4,
 			missing=numpy.nan)
 
 	assert len(record) == 1
@@ -443,17 +443,17 @@ def test_read_windows_several_files(dense_bw, sparse_bw, deep_bw, container,
 
 	with pytest.warns(UserWarning, match='deep.bw'):
 		for i, bigwig in enumerate(files):
-			assert_identical(X[:, i], read_windows(bigwig, names, starts, 300,
+			assert_identical(X[:, i], read_bigwig(bigwig, names, starts, 300,
 				missing=numpy.nan))
 
 	assert numpy.isnan(X[400:, 2]).all() and not numpy.isnan(X[:400, 2]).all()
 
 	# A list of one file gives one channel.
-	assert_identical(read_windows([files[0]], names, starts, 300),
-		read_windows(files[0], names, starts, 300)[:, None])
+	assert_identical(read_bigwig([files[0]], names, starts, 300),
+		read_bigwig(files[0], names, starts, 300)[:, None])
 
 
-def test_read_windows_several_files_share_a_pool(dense_bw, sparse_bw,
+def test_read_bigwig_several_files_share_a_pool(dense_bw, sparse_bw,
 	monkeypatch):
 	"""Each file below is one batch, so read one at a time no read could use
 	more than one thread; read together, their batches share one pool."""
@@ -466,7 +466,7 @@ def test_read_windows_several_files_share_a_pool(dense_bw, sparse_bw,
 		return pool(max_workers)
 
 	monkeypatch.setattr(figwig.bigwig, 'ThreadPoolExecutor', recorder)
-	read_windows([dense_bw[0], sparse_bw[0], dense_bw[0]], 'chr1', [0, 5000],
+	read_bigwig([dense_bw[0], sparse_bw[0], dense_bw[0]], 'chr1', [0, 5000],
 		100, n_jobs=8)
 	assert sizes == [3]
 
@@ -502,7 +502,7 @@ def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 
 	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 2)
 	files = [tmp_path / 'False.bw', tmp_path / 'True.bw']
-	X = read_windows(files, 'chr1', numpy.arange(0, 9000, 50), 10, n_jobs=4)
+	X = read_bigwig(files, 'chr1', numpy.arange(0, 9000, 50), 10, n_jobs=4)
 	assert calls['_read_windows'] is threading.main_thread()
 	if figwig._kernels._zlib_uncompress() is not None:
 		assert calls['_inflate_blocks'] is threading.main_thread()
@@ -510,17 +510,17 @@ def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 	assert_identical(X[:, 0], X[:, 1])
 
 
-def test_read_windows_out(dense_bw, sparse_bw):
+def test_read_bigwig_out(dense_bw, sparse_bw):
 	files = [dense_bw[0], sparse_bw[0]]
 	out = numpy.full((2, 2, 30), 7, dtype=numpy.float32)
-	assert read_windows(files, 'chr1', [0, 100], 30, out=out) is out
-	assert_identical(out, read_windows(files, 'chr1', [0, 100], 30))
+	assert read_bigwig(files, 'chr1', [0, 100], 30, out=out) is out
+	assert_identical(out, read_bigwig(files, 'chr1', [0, 100], 30))
 
 	with pytest.raises(ValueError, match=r'of shape \(2, 2, 30\)'):
-		read_windows(files, 'chr1', [0, 100], 30, out=numpy.empty((2, 30),
+		read_bigwig(files, 'chr1', [0, 100], 30, out=numpy.empty((2, 30),
 			dtype=numpy.float32))
 	with pytest.raises(ValueError, match=r'of shape \(2, 30\)'):
-		read_windows(files[0], 'chr1', [0, 100], 30, out=out)
+		read_bigwig(files[0], 'chr1', [0, 100], 30, out=out)
 
 
 @pytest.mark.parametrize('bigwigs, error, match', [
@@ -529,25 +529,25 @@ def test_read_windows_out(dense_bw, sparse_bw):
 	({'a': 1}, TypeError, 'not dict'),
 	(['x.bw', None], TypeError, 'not NoneType'),
 ])
-def test_read_windows_bad_bigwigs(bigwigs, error, match):
+def test_read_bigwig_bad_bigwigs(bigwigs, error, match):
 	with pytest.raises(error, match=match):
-		read_windows(bigwigs, 'chr1', [0], 10)
+		read_bigwig(bigwigs, 'chr1', [0], 10)
 
 
-def test_read_windows_warning_names_the_caller(dense_bw):
+def test_read_bigwig_warning_names_the_caller(dense_bw):
 	with pytest.warns(UserWarning, match='chromosomes not in') as record:
-		read_windows([dense_bw[0], dense_bw[0]], 'chrZ', [0], 10)
+		read_bigwig([dense_bw[0], dense_bw[0]], 'chrZ', [0], 10)
 
 	assert len(record) == 2
 	assert all(warning.filename == __file__ for warning in record)
 
 
-def test_read_windows_failure_names_the_file(tmp_path, dense_bw):
+def test_read_bigwig_failure_names_the_file(tmp_path, dense_bw):
 	path = str(tmp_path / 'corrupt.bw')
 	write_raw_bigwig(path, {'chr1': 1000}, [('chr1', 100, 110, b'not zlib')])
 
 	with pytest.raises(ValueError, match='figwig cannot read in .*corrupt.bw: '):
-		read_windows([dense_bw[0], path], 'chr1', [95], 20)
+		read_bigwig([dense_bw[0], path], 'chr1', [95], 20)
 
 
 def test_file_removed_after_opening(tmp_path, dense_bw):
@@ -562,7 +562,7 @@ def test_file_removed_after_opening(tmp_path, dense_bw):
 	opened = len(os.listdir('/proc/self/fd')) if os.path.exists(
 		'/proc/self/fd') else None
 	with pytest.raises(FileNotFoundError):
-		read_windows([dense_bw[0], removed], 'chr1', [0], 10)
+		read_bigwig([dense_bw[0], removed], 'chr1', [0], 10)
 
 	if opened is not None:
 		assert len(os.listdir('/proc/self/fd')) == opened
@@ -572,8 +572,8 @@ def test_pathlike_and_attributes(dense_bw):
 	path, chroms = dense_bw
 	bw = BigWig(pathlib.Path(path))
 	assert bw.path == path
-	assert bw.chroms == chroms
-	assert list(bw.chroms) == list(pybigtools.open(path).chroms())
+	assert bw.chrom_sizes == chroms
+	assert list(bw.chrom_sizes) == list(pybigtools.open(path).chroms())
 	assert repr(bw) == "BigWig('{}', 3 chromosomes)".format(path)
 
 
@@ -590,8 +590,8 @@ def test_multi_level_chromosome_tree(tmp_path):
 	write_raw_bigwig(path, chroms, sections, chrom_block_size=16)
 
 	bw = BigWig(path)
-	assert list(bw.chroms.items()) == list(chroms.items())
-	assert list(bw.chroms) == list(pybigtools.open(path).chroms())
+	assert list(bw.chrom_sizes.items()) == list(chroms.items())
+	assert list(bw.chrom_sizes) == list(pybigtools.open(path).chroms())
 
 	names, starts = list(chroms), [95] * len(chroms)
 	assert_identical(bw.read(names, starts, 20), reference(path, names, starts,
@@ -619,7 +619,7 @@ def test_pickle(dense_bw, duplicate):
 	assert before._index is None and after._index is not None
 
 	for other in [before, after]:
-		assert other.path == bw.path and other.chroms == bw.chroms
+		assert other.path == bw.path and other.chrom_sizes == bw.chrom_sizes
 		assert_identical(other.read(names, starts, 100, n_jobs=3), X)
 		assert other._index_lock is not bw._index_lock
 
@@ -898,7 +898,7 @@ def test_corrupt_files_raise_only_value_errors(tmp_path):
 		path.write_bytes(bytes(data))
 		try:
 			bw = BigWig(path)
-			present = [name in bw.chroms for name in names]
+			present = [name in bw.chrom_sizes for name in names]
 			if any(present):
 				bw.read([n for n, p in zip(names, present) if p], [s for s, p in
 					zip(starts, present) if p], 500, n_jobs=1)

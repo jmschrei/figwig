@@ -468,7 +468,7 @@ class BigWigWriter:
 
 	chroms: dict or list of (str, int)
 		The chromosomes and their lengths, in the order their values will be
-		added: a dict such as `BigWig.chroms`, or a list of (name, length)
+		added: a dict such as `BigWig.chrom_sizes`, or a list of (name, length)
 		pairs. Chromosomes that get no values are still in the file's header.
 
 	zooms: int, optional
@@ -1286,7 +1286,7 @@ def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
 
 	chroms: dict or list of (str, int)
 		The chromosomes and their lengths, in the order they are written: a
-		dict such as `BigWig.chroms`, or a list of (name, length) pairs. A
+		dict such as `BigWig.chrom_sizes`, or a list of (name, length) pairs. A
 		chromosome without values is still in the file's header.
 
 	data: dict

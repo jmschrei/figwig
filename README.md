@@ -76,7 +76,7 @@ import numpy
 from figwig import BigWig
 
 bw = BigWig("ENCFF830RWF.bigWig")
-print(len(bw.chroms), bw.chroms["chr1"])
+print(len(bw.chrom_sizes), bw.chrom_sizes["chr1"])
 # 149 248956422
 
 chroms = numpy.array(["chr1", "chr1", "chr2"])
@@ -102,11 +102,11 @@ one each time.
 
 ```python
 import numpy
-from figwig import read_windows
+from figwig import read_bigwig
 
 chroms = numpy.array(["chr1", "chr1", "chr2"])
 starts = numpy.array([1_000_000, 2_500_000, 300_000])
-y = read_windows(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms, starts,
+y = read_bigwig(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms, starts,
 	width=1000)
 print(y.shape)
 # (3, 2, 1000)
@@ -123,7 +123,7 @@ that array directly avoids stacking one array per file, which takes time and
 twice the memory. Every file's work shares one pool of threads. A path is
 opened, and its index read, on every call; to read the same files repeatedly,
 pass `BigWig` objects instead, which keep their indexes. With one file,
-`read_windows` gives `(n, width)`, as `BigWig.read` does.
+`read_bigwig` gives `(n, width)`, as `BigWig.read` does.
 
 #### Bases without data
 
@@ -136,7 +136,7 @@ y = bw.read("chr1", [1_000_000], width=1000, missing=numpy.nan)
 print(numpy.isnan(y).sum(), (y == 0).sum())
 # 907 0
 
-end = bw.chroms["chr1"]
+end = bw.chrom_sizes["chr1"]
 print(bw.read("chr1", [end - 3], width=6))
 # [[ 0.  0.  0. nan nan nan]]
 

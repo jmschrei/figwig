@@ -1169,7 +1169,7 @@ def test_write_bigwig_follows_chroms(tmp_path):
 	write_figwig(tmp_path / 'b.bw', CHROMS, [('bases', 'chr1', p, w),
 		('intervals', 'chr2', s, e, v), ('dense', 'chrM', 0, d)], n_jobs=1)
 	assert (tmp_path / 'a.bw').read_bytes() == (tmp_path / 'b.bw').read_bytes()
-	assert figwig.BigWig(str(tmp_path / 'a.bw')).chroms == CHROMS
+	assert figwig.BigWig(str(tmp_path / 'a.bw')).chrom_sizes == CHROMS
 
 
 @pytest.mark.parametrize('data, error, match', [
