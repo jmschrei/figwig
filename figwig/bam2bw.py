@@ -27,8 +27,8 @@ hold the same entries as bam2bw's but not the same bytes, and -z writes the
 zoom levels figwig writes.
 
 The readers need the packages in figwig's `bam2bw` extra: pysam, pyfaidx and
-biopython (a FASTA as the sizes), tqdm (-v), joblib (several files), isal
-and deflate. They are imported where they are used.
+biopython (a FASTA as the sizes), tqdm (-v), isal and deflate. They are
+imported where they are used.
 """
 
 import io
@@ -46,12 +46,13 @@ import threading
 import collections
 import importlib.util
 
+from .bigwig import _cpu_count
 from .writer import BigWigWriter
 
 
 # The packages of figwig's bam2bw extra that every run may need. pyfaidx and
-# biopython, tqdm and joblib are needed only for a FASTA as the sizes, -v and
-# several files, and are imported only then.
+# biopython, and tqdm, are needed only for a FASTA as the sizes and -v, and
+# are imported only then.
 _REQUIRED = 'pysam', 'isal', 'deflate'
 
 
@@ -117,7 +118,8 @@ def _parser(prog):
 	# Misc arguments
 
 	parser.add_argument('-p', '--parallel', default=1, type=int,
-		help="The number of jobs to use, max of one per input file.")
+		help="""The number of cores to use, or a negative number to count back
+		from the number of CPUs: -1 is all of them.""")
 	parser.add_argument('-n', '--name', required=True)
 	parser.add_argument('-z', '--zooms', default=0, type=int,
 		help="""The number of zooms to store in the bigwig.""")
@@ -1130,7 +1132,7 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 	return keys[:state[0]]
 
 def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
-	idx, name):
+	idx, name, threads=1):
 	"""Count the reads of an open BAM file without going through pysam's
 	per-read objects.
 
@@ -1142,7 +1144,9 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	would -- an unusual record, an error, a remote file -- and that nothing
 	has been recorded or printed, so the caller reads it with pysam instead.
 	`bam` is the file as opened by pysam, positioned after the header, which
-	this reader does not move.
+	this reader does not move. `threads` threads inflate the file's blocks and
+	count its keys while the calling thread walks the records; with 1, the
+	calling thread does all three.
 	"""
 
 	if not os.path.isfile(filename):
@@ -1175,10 +1179,6 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	tqdm = _tqdm(args.verbose)
 	kernel = _bam_kernel()
 	progress = tqdm(disable=not args.verbose, position=idx, desc=name)
-
-	# The cores -p gives each of the files being read at the same time.
-	n_files = len(args.filename)
-	threads = args.parallel // min(args.parallel, n_files) if args.parallel > 1 else 1
 
 	# A file the block reader cannot take exactly as htslib would read it goes
 	# to the pysam loop.
@@ -2082,7 +2082,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 
 		if mode == "rb" and not args.mate_pairs:
 			if count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads,
-				args, idx, name):
+				args, idx, name, threads):
 				bam.close()
 				return pos_reads, neg_reads
 
@@ -2254,6 +2254,111 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 
 	return pos_reads, neg_reads
 
+### Which files are read where.
+
+# The readers above inflate and scan a BAM, BGZF or plain text file on as many
+# threads as they are given, so files like these are read one after another
+# in this process, each on every core -p gives. That took 5.1 s for three BAMs
+# of 2.4, 1.8 and 0.45 GB at -p 3, where reading each in a process of its own
+# on one core took 8.9 s, since the largest file then set the time and each
+# result was pickled back. Files that are read on one thread whatever it is
+# given -- SAM, --mate_pairs or a file that is not local, read by pysam's
+# loop, and a gzipped BED/tsv file that is not BGZF, whose members cannot be
+# found without inflating them -- are read by a pool of processes instead,
+# while this process reads the others on the cores the pool leaves.
+
+def _cores(parallel):
+	"""The number of cores -p gives: itself when positive, and counted back
+	from the number of CPUs when negative, as joblib counts its n_jobs: -1 is
+	every CPU and -2 all but one."""
+
+	if parallel == 0:
+		raise ValueError("-p/--parallel must be a number of cores, or negative "
+			"to count back from the number of CPUs, not 0.")
+	if parallel > 0:
+		return parallel
+
+	return max(_cpu_count() + 1 + parallel, 1)
+
+def _reads_on_one_thread(filename, args):
+	"""Whether `filename` is read on one thread, whatever extract_reads is
+	given. A file that cannot be opened here is left to the reader that would
+	read it, so that the error is the one it gives."""
+
+	if args.mate_pairs or filename.endswith('.sam') or not os.path.isfile(filename):
+		return True
+
+	if filename.endswith(('.tsv.gz', '.bed.gz')):
+		try:
+			with open(filename, 'rb') as handle:
+				header = handle.read(16)
+		except OSError:
+			return False
+
+		return header[:4] != _IV_BGZF_HEADER or header[10:16] != _IV_BGZF_EXTRA
+
+	return False
+
+def _plan(args, cores):
+	"""How the files in args.filename are read on `cores` cores, as (threaded,
+	pooled, processes, threads): the files in `threaded` are read one after
+	another in this process, each on `threads` threads, while those in
+	`pooled` are read by a pool of `processes` processes. With one file, one
+	core, or no file read on one thread, there is no pool."""
+
+	n_files = len(args.filename)
+	pooled = [i for i, filename in enumerate(args.filename)
+		if _reads_on_one_thread(filename, args)]
+
+	if n_files == 1 or cores == 1 or len(pooled) == 0:
+		return list(range(n_files)), [], 0, cores
+
+	processes = min(cores, len(pooled))
+	threaded = [i for i in range(n_files) if i not in pooled]
+	return threaded, pooled, processes, max(1, cores - processes)
+
+def read_files(args, chrom_sizes, cores):
+	"""extract_reads' result for each file in args.filename, read as _plan
+	says."""
+
+	threaded, pooled, processes, threads = _plan(args, cores)
+	reads = [None] * len(args.filename)
+
+	if len(pooled) == 0:
+		for i in threaded:
+			reads[i] = extract_reads(args, chrom_sizes, i, threads)
+
+		return reads
+
+	import multiprocessing
+
+	# Each process's progress bar takes the lock of this process's, so that
+	# the bars do not write over each other, under any start method.
+	kwargs = {}
+	if args.verbose:
+		tqdm = _tqdm(args.verbose)
+		kwargs = dict(initializer=tqdm.set_lock, initargs=(tqdm.get_lock(),))
+
+	with multiprocessing.Pool(processes, **kwargs) as pool:
+		pending = pool.starmap_async(extract_reads, [(args, chrom_sizes, i, 1)
+			for i in pooled])
+
+		for i in threaded:
+			reads[i] = extract_reads(args, chrom_sizes, i, threads)
+
+		for i, result in zip(pooled, pending.get()):
+			reads[i] = result
+
+		# The processes then exit as usual, rather than being terminated when
+		# the pool is, so that they release what they hold, such as the
+		# semaphore of tqdm's lock, which the resource tracker of a spawned or
+		# forkserver pool otherwise reports as leaked.
+		pool.close()
+		pool.join()
+
+	return reads
+
+
 ### Collect the reads into a single object.
 
 # Each file's counts for one chromosome and strand are either a dictionary of
@@ -2365,40 +2470,14 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 
 	# Share a single lock across the worker processes so that each file's tqdm
 	# progress bar renders on its own line (via position=idx) instead of the
-	# processes clobbering each other's cursor movements on stdout. The lock is
-	# created before Parallel so it is inherited by the forked workers. Without
-	# -v there is no bar to render.
+	# processes clobbering each other's cursor movements on stdout. Without -v
+	# there is no bar to render.
 	if args.verbose:
 		import multiprocessing
 		tqdm.set_lock(multiprocessing.RLock())
 
-	# One process per file, never more processes than files, and a single job runs
-	# in this process: starting a pool for it would only add the cost of pickling
-	# its result back. The cores -p leaves over go to each file's decompression.
-	# A -p below 1 keeps joblib's own meaning.
-
-	n_files = len(args.filename)
-
-	if args.parallel < 1:
-		from joblib import Parallel, delayed
-
-		f = delayed(extract_reads)
-		reads = Parallel(n_jobs=args.parallel, backend='multiprocessing')(
-			f(args, chrom_sizes, i) for i in range(n_files)
-		)
-	else:
-		n_jobs = min(args.parallel, n_files)
-		threads = args.parallel // n_jobs
-
-		if n_jobs == 1:
-			reads = [extract_reads(args, chrom_sizes, i, threads) for i in range(n_files)]
-		else:
-			from joblib import Parallel, delayed
-
-			f = delayed(extract_reads)
-			reads = Parallel(n_jobs=n_jobs, backend='multiprocessing')(
-				f(args, chrom_sizes, i, threads) for i in range(n_files)
-			)
+	cores = _cores(args.parallel)
+	reads = read_files(args, chrom_sizes, cores)
 
 	# The persistent per-file bars leave the cursor part-way up the screen, so
 	# drop below them before printing anything else.
@@ -2453,13 +2532,13 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 
 	# Here, we open the bigWigs that we will be saving data into. If the data is
 	# stranded, we are saving two bigWigs. If the data is not stranded, we are only
-	# saving one bigWig. Each compresses its blocks on up to -p threads, and the
-	# second is written after the first is closed, so that the two do not
+	# saving one bigWig. Each compresses its blocks on the cores -p gives, and
+	# the second is written after the first is closed, so that the two do not
 	# compress at the same time.
 
 	def open_bigwig(path):
 		return BigWigWriter(path, chrom_sizes, zooms=args.zooms, level=_LEVEL,
-			n_jobs=max(1, args.parallel))
+			n_jobs=cores)
 
 	if args.unstranded:
 		outputs = [(open_bigwig(args.name + ".bw"), pos_reads)]
@@ -2498,7 +2577,7 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 # or when a flush fails.
 
 def _exit_now(args):
-	if args.verbose or 'joblib' in sys.modules or 'multiprocessing' in sys.modules:
+	if args.verbose or 'multiprocessing' in sys.modules:
 		return
 
 	for thread in threading.enumerate():
