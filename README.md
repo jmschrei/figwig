@@ -73,9 +73,9 @@ wget https://www.encodeproject.org/files/ENCFF989SAK/@@download/ENCFF989SAK.bigW
 
 ```python
 import numpy
-from figwig import BigWig
+from figwig import BigWigReader
 
-bw = BigWig("ENCFF830RWF.bigWig")
+bw = BigWigReader("ENCFF830RWF.bigWig")
 print(len(bw.chrom_sizes), bw.chrom_sizes["chr1"])
 # 149 248956422
 
@@ -93,7 +93,7 @@ written into row `j`, whatever order the windows are given in. `chroms` can
 also be a single name for every window. Both can be lists, numpy arrays or
 pandas Series.
 
-`BigWig` reads the file's data index on its first read and keeps it, so
+`BigWigReader` reads the file's data index on its first read and keeps it, so
 reading one file many times, as a data loader does, pays for the index once.
 `read` also takes `out=`, a float32 array to fill rather than allocate a new
 one each time.
@@ -122,16 +122,16 @@ minus strands of a stranded assay, say, or one track per task. Reading into
 that array directly avoids stacking one array per file, which takes time and
 twice the memory. Every file's work shares one pool of threads. A path is
 opened, and its index read, on every call; to read the same files repeatedly,
-pass `BigWig` objects instead, which keep their indexes. With one file,
-`read_bigwig` gives `(n, width)`, as `BigWig.read` does.
+pass `BigWigReader` objects instead, which keep their indexes. With one file,
+`read_bigwig` gives `(n, width)`, as `BigWigReader.read` does.
 
 #### Bases without data
 
 ```python
 import numpy
-from figwig import BigWig
+from figwig import BigWigReader
 
-bw = BigWig("ENCFF830RWF.bigWig")
+bw = BigWigReader("ENCFF830RWF.bigWig")
 y = bw.read("chr1", [1_000_000], width=1000, missing=numpy.nan)
 print(numpy.isnan(y).sum(), (y == 0).sum())
 # 907 0
@@ -156,11 +156,11 @@ data, and a different naming scheme (`1` against `chr1`) looks the same. See
 ```python
 import numpy
 import torch
-from figwig import BigWig
+from figwig import BigWigReader
 
 class Windows(torch.utils.data.Dataset):
 	def __init__(self, path, chroms, starts, width, batch_size):
-		self.bw, self.chroms, self.starts = BigWig(path), chroms, starts
+		self.bw, self.chroms, self.starts = BigWigReader(path), chroms, starts
 		self.width, self.batch_size = width, batch_size
 
 	def __len__(self):
@@ -182,17 +182,17 @@ if __name__ == '__main__':
 	# torch.Size([1000, 1000]) 28857.0
 ```
 
-Each item is a whole batch, read in one call. A `BigWig` can be pickled, so
-it can go to DataLoader workers under any start method. When every window fits
-in memory, reading all of them once is simpler still, and `torch.from_numpy`
-wraps the result without a copy.
+Each item is a whole batch, read in one call. A `BigWigReader` can be pickled,
+so it can go to DataLoader workers under any start method. When every window
+fits in memory, reading all of them once is simpler still, and
+`torch.from_numpy` wraps the result without a copy.
 
 #### Binned values
 
 ```python
-from figwig import BigWig
+from figwig import BigWigReader
 
-bw = BigWig("ENCFF830RWF.bigWig")
+bw = BigWigReader("ENCFF830RWF.bigWig")
 y = bw.read(["chr1", "chr1", "chr2"], [1_000_000, 2_500_000, 300_000],
 	width=1024)
 binned = y.reshape(len(y), -1, 32).mean(axis=-1)
@@ -209,11 +209,11 @@ run past the end of a chromosome.
 ```python
 import numpy
 import pybigtools
-from figwig import BigWig
+from figwig import BigWigReader
 
 def read(path, chroms, starts, width):
 	try:
-		return BigWig(path).read(chroms, starts, width)
+		return BigWigReader(path).read(chroms, starts, width)
 	except ValueError:
 		bw = pybigtools.open(path)
 		return numpy.array([bw.values(chrom, start, start + width) for chrom,
@@ -255,7 +255,7 @@ there.
 #### Writing a batch at a time
 
 ```python
-from figwig import BigWig
+from figwig import BigWigReader
 from figwig import BigWigWriter
 
 chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
@@ -264,7 +264,7 @@ with BigWigWriter("example.bw", chrom_sizes) as writer:
 	writer.write("chr1", [5000, 5003, 5004], [[3], [1], [1]])
 	writer.write("chr2", [10_000], [[0.0, 1.5, 1.5, 0.0, 2.5]])
 
-y = BigWig("example.bw").read(["chr1", "chr2"], [5000, 10_000], width=6)
+y = BigWigReader("example.bw").read(["chr1", "chr2"], [5000, 10_000], width=6)
 print(y)
 # [[3.  0.  0.  1.  1.  0. ]
 #  [0.  1.5 1.5 0.  2.5 0. ]]
@@ -404,8 +404,8 @@ The first read in a new environment compiles figwig's numba kernels, which
 took 0.7 s on the machine below. numba caches them on disk, next to the
 installed package, or in the user's cache directory when the package
 directory cannot be written, and later processes load them in well under a
-second. One `BigWig` can be read from several threads at once, and holds no
-open file between reads.
+second. One `BigWigReader` can be read from several threads at once, and holds
+no open file between reads.
 
 figwig needs a little-endian machine, which every common one is, and Python
 3.10 to 3.14. Its tests run on Linux under each of those versions, and on

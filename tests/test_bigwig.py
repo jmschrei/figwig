@@ -22,7 +22,7 @@ import pybigtools
 import figwig
 import figwig._kernels
 
-from figwig import BigWig
+from figwig import BigWigReader
 from figwig import read_bigwig
 
 from .writers import write_bigwig
@@ -77,7 +77,7 @@ def test_read_matches_pybigtools(request, fixture, width, batching):
 	rng = numpy.random.default_rng(width)
 	names, starts = random_windows(rng, chroms, 3000, width)
 
-	X = BigWig(path).read(names, starts, width)
+	X = BigWigReader(path).read(names, starts, width)
 	assert_identical(X, reference(path, list(names), starts, width))
 
 
@@ -89,14 +89,14 @@ def test_read_matches_pybigtools_at_chromosome_edges(dense_bw, batching):
 			names.append(name)
 			starts.append(max(0, start))
 
-	X = BigWig(path).read(names, starts, 1000)
+	X = BigWigReader(path).read(names, starts, 1000)
 	assert_identical(X, reference(path, names, starts, 1000))
 
 
 def test_past_chromosome_end_is_nan(dense_bw):
 	path, chroms = dense_bw
 	length = chroms['chrM']
-	X = BigWig(path).read('chrM', [length - 10, length + 3], 20)
+	X = BigWigReader(path).read('chrM', [length - 10, length + 3], 20)
 
 	assert not numpy.isnan(X[0, :10]).any()
 	assert numpy.isnan(X[0, 10:]).all()
@@ -108,7 +108,7 @@ def test_uncovered_bases_are_zero(tmp_path):
 	write_bigwig(path, {'chr1': 1000}, [('chr1', 100, 110, 2.5),
 		('chr1', 500, 501, -1.0)])
 
-	X = BigWig(path).read('chr1', [95, 495], 20)
+	X = BigWigReader(path).read('chr1', [95, 495], 20)
 	numpy.testing.assert_array_equal(X[0], [0] * 5 + [2.5] * 10 + [0] * 5)
 	numpy.testing.assert_array_equal(X[1], [0] * 5 + [-1.0] + [0] * 14)
 
@@ -120,12 +120,13 @@ def test_special_values(tmp_path):
 	write_bigwig(path, {'chr1': 1000}, entries)
 
 	starts = numpy.arange(0, 100, 3)
-	X = BigWig(path).read('chr1', starts, 25)
+	X = BigWigReader(path).read('chr1', starts, 25)
 	assert_identical(X, reference(str(path), 'chr1', starts, 25))
 
 	# An interval whose value is NaN covers nothing, so its bases are 0.
-	numpy.testing.assert_array_equal(BigWig(path).read('chr1', [0], 5)[0], 0)
-	assert numpy.signbit(BigWig(path).read('chr1', [30], 1)[0, 0])
+	numpy.testing.assert_array_equal(BigWigReader(path).read('chr1', [0], 5)[0],
+		0)
+	assert numpy.signbit(BigWigReader(path).read('chr1', [30], 1)[0, 0])
 
 
 @pytest.mark.parametrize('kind', [1, 2, 3])
@@ -159,7 +160,7 @@ def test_section_types(tmp_path, kind, compress, batching):
 	write_raw_bigwig(path, chroms, sections, compress=compress)
 
 	names, starts = random_windows(rng, chroms, 2000, 300)
-	X = BigWig(path).read(names, starts, 300)
+	X = BigWigReader(path).read(names, starts, 300)
 	assert_identical(X, reference(path, list(names), starts, 300))
 	assert (X[~numpy.isnan(X)] != 0).any()
 
@@ -171,7 +172,7 @@ def test_section_types(tmp_path, kind, compress, batching):
 def test_n_jobs_does_not_change_output(sparse_bw, batching):
 	path, chroms = sparse_bw
 	names, starts = random_windows(numpy.random.default_rng(3), chroms, 5000, 500)
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 
 	X = bw.read(names, starts, 500, n_jobs=1)
 	for n_jobs in [2, 3, 8, 16, -1]:
@@ -191,7 +192,7 @@ def test_n_jobs_every_cpu(dense_bw, monkeypatch):
 	monkeypatch.setattr(figwig.bigwig, 'ThreadPoolExecutor', recorder)
 	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
 	monkeypatch.setattr(figwig.bigwig, '_cpu_count', lambda: 3)
-	BigWig(dense_bw[0]).read('chr1', numpy.arange(0, 240_000, 1000), 100,
+	BigWigReader(dense_bw[0]).read('chr1', numpy.arange(0, 240_000, 1000), 100,
 		n_jobs=-1)
 	assert sizes == [3]
 
@@ -215,7 +216,7 @@ def test_order_and_repeats(dense_bw, batching):
 	names = numpy.concatenate([names, names[:300]])
 	starts = numpy.concatenate([starts, starts[:300] + 1])
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	X = bw.read(names, starts, 200)
 	order = rng.permutation(len(starts))
 	assert_identical(bw.read(names[order], starts[order], 200), X[order])
@@ -224,7 +225,7 @@ def test_order_and_repeats(dense_bw, batching):
 def test_chroms_forms(dense_bw):
 	path, _ = dense_bw
 	starts = numpy.array([5, 1000, 70_000])
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 
 	X = bw.read('chr2', starts, 50)
 	assert_identical(bw.read(['chr2'] * 3, starts, 50), X)
@@ -237,7 +238,7 @@ def test_chroms_forms(dense_bw):
 
 def test_out(dense_bw):
 	path, _ = dense_bw
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	out = numpy.full((2, 30), 7, dtype=numpy.float32)
 
 	result = bw.read('chr1', [0, 100], 30, out=out)
@@ -264,48 +265,48 @@ def test_no_windows(dense_bw, chroms, starts):
 	"""An empty list of starts is float64 to numpy, and was refused as not
 	being integers."""
 
-	X = BigWig(dense_bw[0]).read(chroms, starts, 10)
+	X = BigWigReader(dense_bw[0]).read(chroms, starts, 10)
 	assert X.shape == (0, 10) and X.dtype == numpy.float32
 
 
 @pytest.mark.parametrize('width', [0, -3])
 def test_width_must_be_positive(dense_bw, width):
 	with pytest.raises(ValueError, match='width must be at least 1'):
-		BigWig(dense_bw[0]).read('chr1', [0], width)
+		BigWigReader(dense_bw[0]).read('chr1', [0], width)
 
 
 @pytest.mark.parametrize('width', [1.5, True, '10'])
 def test_width_must_be_an_integer(dense_bw, width):
 	with pytest.raises(TypeError, match='width must be an integer'):
-		BigWig(dense_bw[0]).read('chr1', [0], width)
+		BigWigReader(dense_bw[0]).read('chr1', [0], width)
 
 
 @pytest.mark.parametrize('n_jobs', [0, -2])
 def test_n_jobs_must_be_positive(dense_bw, n_jobs):
 	with pytest.raises(ValueError, match=r'n_jobs must be at least 1, or -1 '
 			r'for every CPU\.'):
-		BigWig(dense_bw[0]).read('chr1', [0], 10, n_jobs=n_jobs)
+		BigWigReader(dense_bw[0]).read('chr1', [0], 10, n_jobs=n_jobs)
 
 
 @pytest.mark.parametrize('n_jobs', [2.0, True, None])
 def test_n_jobs_must_be_an_integer(dense_bw, n_jobs):
 	with pytest.raises(TypeError, match='n_jobs must be an integer'):
-		BigWig(dense_bw[0]).read('chr1', [0], 10, n_jobs=n_jobs)
+		BigWigReader(dense_bw[0]).read('chr1', [0], 10, n_jobs=n_jobs)
 
 
 def test_starts_must_be_integers(dense_bw):
 	with pytest.raises(TypeError, match='starts must be integers'):
-		BigWig(dense_bw[0]).read('chr1', [0.0, 10.5], 10)
+		BigWigReader(dense_bw[0]).read('chr1', [0.0, 10.5], 10)
 
 
 def test_starts_must_be_one_dimensional(dense_bw):
 	with pytest.raises(ValueError, match='one-dimensional'):
-		BigWig(dense_bw[0]).read('chr1', [[0, 10]], 10)
+		BigWigReader(dense_bw[0]).read('chr1', [[0, 10]], 10)
 
 
 def test_one_chrom_per_start(dense_bw):
 	with pytest.raises(ValueError, match='one name per start'):
-		BigWig(dense_bw[0]).read(['chr1', 'chr2'], [0, 10, 20], 10)
+		BigWigReader(dense_bw[0]).read(['chr1', 'chr2'], [0, 10, 20], 10)
 
 
 @pytest.mark.parametrize('missing', [0.0, -1.0, numpy.nan, 3,
@@ -315,7 +316,7 @@ def test_missing(request, fixture, missing):
 	path, chroms = request.getfixturevalue(fixture)
 	names, starts = random_windows(numpy.random.default_rng(13), chroms, 1000,
 		200)
-	X = BigWig(path).read(names, starts, 200, missing=missing)
+	X = BigWigReader(path).read(names, starts, 200, missing=missing)
 	assert_identical(X, reference(path, list(names), starts, 200, missing))
 
 
@@ -328,7 +329,7 @@ def test_missing_nan_interval(tmp_path, missing):
 	write_raw_bigwig(path, {'chr1': 1000}, [_bedgraph('chr1', 100, [
 		(0, 5, numpy.nan), (5, 10, 2.0)])])
 
-	X = BigWig(path).read('chr1', [98], 14, missing=missing)
+	X = BigWigReader(path).read('chr1', [98], 14, missing=missing)
 	expected = [missing] * 7 + [2.0] * 5 + [missing] * 2
 	assert_identical(X, numpy.array([expected], dtype=numpy.float32))
 	assert_identical(X, reference(path, 'chr1', [98], 14, missing))
@@ -341,7 +342,7 @@ def test_absent_chromosome_is_missing(dense_bw, missing):
 	would end, and a warning names the chromosome."""
 
 	path, _ = dense_bw
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	with pytest.warns(UserWarning, match=r'^3 windows are on chromosomes not in '
 			r".*, and are (0\.0|nan) throughout: 'chr7', 'chrZ'\. Its chromosomes "
 			r"include 'chr1', 'chr2', 'chrM'\.$") as record:
@@ -362,7 +363,7 @@ def test_absent_chromosome_names(dense_bw):
 	with pytest.warns(UserWarning, match=r"^12 windows .*: '1', '10', '11', "
 			r"'12', '2', '3', '4', '5', '6', '7', and 2 more\. Its chromosomes "
 			r"include 'chr1', 'chr2'"):
-		X = BigWig(dense_bw[0]).read(names, [0] * 12, 5)
+		X = BigWigReader(dense_bw[0]).read(names, [0] * 12, 5)
 
 	assert (X == 0).all()
 
@@ -372,20 +373,20 @@ def test_absent_chromosome_names_are_quoted(dense_bw):
 	file with stray spaces, showed as nothing or as the name it resembles."""
 
 	with pytest.warns(UserWarning, match=r"throughout: '', 'chr1 '\."):
-		BigWig(dense_bw[0]).read(['', 'chr1 '], [0, 0], 5)
+		BigWigReader(dense_bw[0]).read(['', 'chr1 '], [0, 0], 5)
 
 
 def test_range_is_checked_before_absent_chromosomes(dense_bw):
 	with warnings.catch_warnings():
 		warnings.simplefilter('error')
 		with pytest.raises(ValueError, match='start before 0'):
-			BigWig(dense_bw[0]).read(['chrZ', 'chr1'], [0, -1], 10)
+			BigWigReader(dense_bw[0]).read(['chrZ', 'chr1'], [0, -1], 10)
 
 
 @pytest.mark.parametrize('missing', ['0', None, True, [0.0]])
 def test_missing_must_be_a_number(dense_bw, missing):
 	with pytest.raises(TypeError, match='missing must be a number'):
-		BigWig(dense_bw[0]).read('chr1', [0], 10, missing=missing)
+		BigWigReader(dense_bw[0]).read('chr1', [0], 10, missing=missing)
 
 
 @pytest.mark.parametrize('start, dtype', [
@@ -402,31 +403,31 @@ def test_out_of_range_window_raises(dense_bw, start, dtype):
 	starts = numpy.array([0, start], dtype=dtype)
 	with pytest.raises(ValueError, match=r'1 windows start before 0 or end '
 			r'past 2\*\*32 - 1, such as chr1:{}-{}\.'.format(start, start + 10)):
-		BigWig(dense_bw[0]).read('chr1', starts, 10)
+		BigWigReader(dense_bw[0]).read('chr1', starts, 10)
 
 
 def test_window_ending_at_the_largest_position(dense_bw):
-	X = BigWig(dense_bw[0]).read('chr1', [2**32 - 11], 10)
+	X = BigWigReader(dense_bw[0]).read('chr1', [2**32 - 11], 10)
 	assert numpy.isnan(X).all()
 
 
 def test_read_bigwig(sparse_bw):
 	path, chroms = sparse_bw
 	names, starts = random_windows(numpy.random.default_rng(5), chroms, 2000, 100)
-	X = BigWig(path).read(names, starts, 100)
+	X = BigWigReader(path).read(names, starts, 100)
 	assert_identical(read_bigwig(path, names, starts, 100, n_jobs=3), X)
 	assert_identical(read_bigwig(pathlib.Path(path), names, starts, 100), X)
-	assert_identical(read_bigwig(BigWig(path), names, starts, 100), X)
+	assert_identical(read_bigwig(BigWigReader(path), names, starts, 100), X)
 
 
 @pytest.mark.parametrize('container', [list, tuple])
 def test_read_bigwig_several_files(dense_bw, sparse_bw, deep_bw, container,
 	batching):
 	"""Channel i of a read of several files holds what reading bigwigs[i] on
-	its own gives, with paths and BigWig objects mixed and a file given
+	its own gives, with paths and BigWigReader objects mixed and a file given
 	twice."""
 
-	files = [dense_bw[0], BigWig(sparse_bw[0]), deep_bw[0], dense_bw[0]]
+	files = [dense_bw[0], BigWigReader(sparse_bw[0]), deep_bw[0], dense_bw[0]]
 	rng = numpy.random.default_rng(14)
 	names = numpy.array(['chr1'] * 400 + ['chr2'] * 100)
 	starts = rng.integers(0, 110_000, size=500)
@@ -555,7 +556,7 @@ def test_file_removed_after_opening(tmp_path, dense_bw):
 	and the files opened before it are closed again."""
 
 	shutil.copy(dense_bw[0], tmp_path / 'copy.bw')
-	removed = BigWig(tmp_path / 'copy.bw')
+	removed = BigWigReader(tmp_path / 'copy.bw')
 	removed.read('chr1', [0], 10)
 	os.remove(tmp_path / 'copy.bw')
 
@@ -570,11 +571,11 @@ def test_file_removed_after_opening(tmp_path, dense_bw):
 
 def test_pathlike_and_attributes(dense_bw):
 	path, chroms = dense_bw
-	bw = BigWig(pathlib.Path(path))
+	bw = BigWigReader(pathlib.Path(path))
 	assert bw.path == path
 	assert bw.chrom_sizes == chroms
 	assert list(bw.chrom_sizes) == list(pybigtools.open(path).chroms())
-	assert repr(bw) == "BigWig('{}', 3 chromosomes)".format(path)
+	assert repr(bw) == "BigWigReader('{}', 3 chromosomes)".format(path)
 
 
 def test_multi_level_chromosome_tree(tmp_path):
@@ -589,7 +590,7 @@ def test_multi_level_chromosome_tree(tmp_path):
 	path = str(tmp_path / 'tree.bw')
 	write_raw_bigwig(path, chroms, sections, chrom_block_size=16)
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	assert list(bw.chrom_sizes.items()) == list(chroms.items())
 	assert list(bw.chrom_sizes) == list(pybigtools.open(path).chroms())
 
@@ -606,13 +607,13 @@ def test_multi_level_chromosome_tree(tmp_path):
 	ids=['pickle', 'deepcopy'])
 def test_pickle(dense_bw, duplicate):
 	"""A PyTorch DataLoader pickles its dataset into each worker under the
-	spawn and forkserver start methods, and BigWig held a lock that cannot
+	spawn and forkserver start methods, and BigWigReader held a lock that cannot
 	be pickled. Copies are taken before and after the index is read."""
 
 	path, chroms = dense_bw
 	names, starts = random_windows(numpy.random.default_rng(10), chroms, 500,
 		100)
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	before = duplicate(bw)
 	X = bw.read(names, starts, 100)
 	after = duplicate(bw)
@@ -640,7 +641,7 @@ def test_short_reads(deep_bw, monkeypatch, function):
 	path, chroms = deep_bw
 	names, starts = random_windows(numpy.random.default_rng(12), chroms, 300,
 		20_000)
-	X = BigWig(path).read(names, starts, 20_000)
+	X = BigWigReader(path).read(names, starts, 20_000)
 
 	if function == 'preadv':
 		preadv = os.preadv
@@ -658,7 +659,8 @@ def test_short_reads(deep_bw, monkeypatch, function):
 		monkeypatch.setattr(os, 'read', lambda fd, n: read(fd, min(n, 1000)))
 		monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 2)
 
-	assert_identical(BigWig(path).read(names, starts, 20_000, n_jobs=6), X)
+	assert_identical(BigWigReader(path).read(names, starts, 20_000, n_jobs=6),
+		X)
 
 
 @pytest.mark.parametrize('failing, expected', [
@@ -727,7 +729,8 @@ def test_numba_disable_jit(dense_bw, tmp_path):
 	numpy.savez(tmp_path / 'windows.npz', names=names, starts=starts)
 
 	code = ("import numpy, figwig; w = numpy.load({!r}); numpy.save({!r}, "
-		"figwig.BigWig({!r}).read(w['names'], w['starts'], 300, n_jobs=2))")
+		"figwig.BigWigReader({!r}).read(w['names'], w['starts'], 300, "
+		"n_jobs=2))")
 	code = code.format(str(tmp_path / 'windows.npz'), str(tmp_path / 'X.npy'),
 		path)
 	env = dict(os.environ, NUMBA_DISABLE_JIT='1')
@@ -735,13 +738,13 @@ def test_numba_disable_jit(dense_bw, tmp_path):
 		capture_output=True, text=True)
 	assert result.returncode == 0, result.stderr
 
-	assert_identical(numpy.load(tmp_path / 'X.npy'), BigWig(path).read(names,
-		starts, 300))
+	assert_identical(numpy.load(tmp_path / 'X.npy'), BigWigReader(path).read(
+		names, starts, 300))
 
 
 def test_concurrent_reads_on_one_object(deep_bw, batching):
 	path, chroms = deep_bw
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	rng = numpy.random.default_rng(6)
 	jobs = [random_windows(rng, chroms, 3000, 1000) for _ in range(6)]
 	expected = [bw.read(names, starts, 1000, n_jobs=1) for names, starts in jobs]
@@ -764,11 +767,11 @@ def test_concurrent_reads_on_one_object(deep_bw, batching):
 def test_zlib_decompress_fallback(sparse_bw, monkeypatch):
 	path, chroms = sparse_bw
 	names, starts = random_windows(numpy.random.default_rng(7), chroms, 3000, 400)
-	X = BigWig(path).read(names, starts, 400)
+	X = BigWigReader(path).read(names, starts, 400)
 
 	monkeypatch.setattr(figwig._kernels, '_ZLIB_UNCOMPRESS', [None])
 	assert figwig._kernels._zlib_uncompress() is None
-	assert_identical(BigWig(path).read(names, starts, 400, n_jobs=4), X)
+	assert_identical(BigWigReader(path).read(names, starts, 400, n_jobs=4), X)
 
 
 ###
@@ -788,7 +791,7 @@ def test_bad_intervals_raise(tmp_path, items, reason):
 	write_raw_bigwig(path, {'chr1': 10_000}, [_bedgraph('chr1', 100, [(0, 5, 1.0)]),
 		_bedgraph('chr1', 5000, items)])
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	numpy.testing.assert_array_equal(bw.read('chr1', [100], 5)[0], 1.0)
 	with pytest.raises(ValueError, match='1 windows overlap data blocks that '
 			'figwig cannot read.*chr1:4990-5010'):
@@ -802,7 +805,7 @@ def test_unknown_section_type_raises(tmp_path):
 	write_raw_bigwig(path, {'chr1': 1000}, [('chr1', 100, 110, block)])
 
 	with pytest.raises(ValueError, match='figwig cannot read'):
-		BigWig(path).read('chr1', [95], 20)
+		BigWigReader(path).read('chr1', [95], 20)
 
 
 def test_corrupt_block_raises(tmp_path):
@@ -810,7 +813,7 @@ def test_corrupt_block_raises(tmp_path):
 	write_raw_bigwig(path, {'chr1': 1000}, [('chr1', 100, 110, b'not zlib')])
 
 	with pytest.raises(ValueError, match='figwig cannot read'):
-		BigWig(path).read('chr1', [95], 20)
+		BigWigReader(path).read('chr1', [95], 20)
 
 
 @pytest.mark.parametrize('raw', [b'', b'abcde'], ids=['empty', 'partial_word'])
@@ -823,7 +826,7 @@ def test_block_not_whole_words_raises(tmp_path, raw, batching):
 	write_raw_bigwig(path, {'chr1': 1000}, [_bedgraph('chr1', 10, [(0, 5, 1.0)]),
 		('chr1', 100, 110, zlib.compress(raw))])
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	numpy.testing.assert_array_equal(bw.read('chr1', [10], 5)[0], 1.0)
 	with pytest.raises(ValueError, match='figwig cannot read.*chr1:95-115'):
 		bw.read('chr1', [10, 95], 20)
@@ -834,7 +837,7 @@ def test_file_truncated_after_its_index_was_read(tmp_path):
 	under a reader, leaves blocks that cannot be read in full."""
 
 	path, _, data_index = _two_chrom_bigwig(tmp_path)
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	bw.read('chr1', [95], 10)
 
 	with open(path, 'r+b') as handle:
@@ -897,7 +900,7 @@ def test_corrupt_files_raise_only_value_errors(tmp_path):
 
 		path.write_bytes(bytes(data))
 		try:
-			bw = BigWig(path)
+			bw = BigWigReader(path)
 			present = [name in bw.chrom_sizes for name in names]
 			if any(present):
 				bw.read([n for n, p in zip(names, present) if p], [s for s, p in
@@ -915,7 +918,7 @@ def test_unsorted_index_raises(tmp_path):
 		_bedgraph('chr1', 100, [(0, 5, 2.0)])])
 
 	with pytest.raises(ValueError, match='its data blocks are unsorted'):
-		BigWig(path).read('chr1', [0], 10)
+		BigWigReader(path).read('chr1', [0], 10)
 
 
 def _fixedstep_block(chrom_id, start, values, end):
@@ -948,7 +951,7 @@ def test_overlapping_index_entries(tmp_path):
 	write_raw_bigwig(path, {'chr1': 5000}, sections)
 
 	starts = numpy.arange(0, start + 10, 7)
-	X = BigWig(path).read('chr1', starts, 50)
+	X = BigWigReader(path).read('chr1', starts, 50)
 	assert_identical(X, reference(path, 'chr1', starts, 50))
 	assert (X != 0).mean() > 0.5
 
@@ -964,7 +967,7 @@ def test_intervals_overlapping_across_blocks_raise(tmp_path):
 		_bedgraph('chr1', 1015, [(0, 10, 3.0)]),
 		_bedgraph('chr1', 3000, [(0, 10, 4.0)])])
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	X = bw.read('chr1', [95, 1005, 2995], 10)
 	numpy.testing.assert_array_equal(X[:, 5:], [[1.0] * 5, [2.0] * 5, [4.0] * 5])
 
@@ -983,18 +986,18 @@ def test_not_a_bigwig_raises(tmp_path, header, match):
 	path = tmp_path / 'bad.bw'
 	path.write_bytes(header)
 	with pytest.raises(ValueError, match=match):
-		BigWig(path)
+		BigWigReader(path)
 
 
 def test_missing_file_raises(tmp_path):
 	with pytest.raises(FileNotFoundError):
-		BigWig(tmp_path / 'absent.bw')
+		BigWigReader(tmp_path / 'absent.bw')
 
 
 def test_big_endian_machine_raises(dense_bw, monkeypatch):
 	monkeypatch.setattr(figwig.bigwig.sys, 'byteorder', 'big')
 	with pytest.raises(ValueError, match='only on little-endian machines'):
-		BigWig(dense_bw[0])
+		BigWigReader(dense_bw[0])
 
 
 def _two_chrom_bigwig(tmp_path):
@@ -1042,7 +1045,7 @@ def test_bad_chromosome_tree_raises(tmp_path, field, match):
 		_patch(path, chrom_tree + 40, '<Q', chrom_tree + 32)
 
 	with pytest.raises(ValueError, match=match):
-		BigWig(path)
+		BigWigReader(path)
 
 
 @pytest.mark.parametrize('field, match', [
@@ -1068,7 +1071,7 @@ def test_bad_data_index_raises(tmp_path, field, match):
 	else:
 		_patch(path, root + 4 + 8, '<I', 1)
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	with pytest.raises(ValueError, match=match):
 		bw.read('chr1', [0], 10)
 
@@ -1089,7 +1092,7 @@ def test_data_index_past_end_of_file_raises(tmp_path, field, value):
 	entry = data_index + 48 + 4
 	_patch(path, entry + (24 if field == 'size' else 16), '<Q', value)
 
-	bw = BigWig(path)
+	bw = BigWigReader(path)
 	with pytest.raises(ValueError, match='data index of .* cannot be read: a '
 			'data block lies past the end of the file'):
 		bw.read('chr1', [95], 10)
@@ -1111,7 +1114,7 @@ def test_chromosome_tree_past_end_of_file_raises(tmp_path, field, value):
 
 	with pytest.raises(ValueError, match='chromosome tree of .* cannot be '
 			'read: the file ends inside it'):
-		BigWig(path)
+		BigWigReader(path)
 
 
 def test_version():

@@ -447,7 +447,7 @@ class BigWigWriter:
 	"""Write a bigWig file, a batch of windows or intervals at a time, on
 	several threads.
 
-	`BigWigWriter` takes values with `write`, as the windows `BigWig.read`
+	`BigWigWriter` takes values with `write`, as the windows `BigWigReader.read`
 	reads or as intervals, and writes them as they come, so that a track
 	larger than memory, such as a model's predictions over a genome, can be
 	written a batch at a time. Each call's items come after the last call's,
@@ -490,7 +490,7 @@ class BigWigWriter:
 
 	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order their values will be
-		written: a dict such as `BigWig.chrom_sizes`, or a list of (name,
+		written: a dict such as `BigWigReader.chrom_sizes`, or a list of (name,
 		length) pairs. Chromosomes that get no values are still in the file's
 		header.
 
@@ -603,7 +603,7 @@ class BigWigWriter:
 
 		Without `ends`, item j is the window [starts[j], starts[j] + width) on
 		chroms[j], and row j of `values`, of shape (n, width), holds the value
-		of each of its bases, as `BigWig.read` returns them for the same
+		of each of its bases, as `BigWigReader.read` returns them for the same
 		windows. With `ends`, item j is the interval [starts[j], ends[j]), and
 		values[j] is the value of every base in it. Positions are 0-based and
 		ends are exclusive, as in BED files.
@@ -616,11 +616,11 @@ class BigWigWriter:
 		as one per batch of a model's predictions.
 
 		A base or interval whose value is `missing`, or NaN, is not written,
-		so that `BigWig.read` with the same `missing` reads the values back. A
-		base whose value is -0.0 is left out where `missing` is 0.0, and so
-		reads back as 0.0. A window may run past the end of its chromosome
-		where its bases are NaN, as `BigWig.read` gives them there. Values are
-		written as float32, and must not be infinite.
+		so that `BigWigReader.read` with the same `missing` reads the values
+		back. A base whose value is -0.0 is left out where `missing` is 0.0,
+		and so reads back as 0.0. A window may run past the end of its
+		chromosome where its bases are NaN, as `BigWigReader.read` gives them
+		there. Values are written as float32, and must not be infinite.
 
 		Each window, or each segment of 65,536 bases of a wider one, is
 		written as whichever section type takes the fewest bytes before
@@ -1495,8 +1495,8 @@ def write_bigwig(paths: str | os.PathLike | list | tuple,
 
 	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order they are written: a
-		dict such as `BigWig.chrom_sizes`, or a list of (name, length) pairs.
-		A chromosome without values is still in each file's header.
+		dict such as `BigWigReader.chrom_sizes`, or a list of (name, length)
+		pairs. A chromosome without values is still in each file's header.
 
 	chroms: str, list of str, or numpy.ndarray of str
 		The chromosome of each window or interval, or one name for all.
