@@ -342,6 +342,97 @@ def _decode_items(words, bounds, tids, starts, ends, values):
 
 
 @numba.njit(nogil=True, cache=True)
+def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
+	costs, starts, ends, values, parts):
+	"""Windows' values as the items of data sections, each segment of them
+	as the section type that takes it in the fewest bytes.
+
+	Row r of `block` holds the values of a window from position firsts[r] on
+	chromosome tids[r], and `bits` holds the same values as uint32. With
+	`by_row`, each row is a segment; otherwise there is one row, and each
+	`segment_bases` columns of it are one. A base is written when it is
+	neither NaN nor `missing`.
+
+	A segment's written bases form runs of consecutive bases and, within
+	runs, stretches of one value, bit for bit. A segment takes costs[0]
+	bytes a base and costs[1] a run as fixedStep (3), costs[2] a base as
+	varStep (2), and costs[3] a stretch as bedGraph (1), and is laid out as
+	the type with the fewest, fixedStep first in a tie, then varStep.
+
+	Item i is written to starts[i], ends[i] and values[i]: a base, or a
+	stretch in bedGraph. Row p of `parts` is (first item, section type,
+	chromosome), and a part starts where the type or chromosome changes, or
+	at a gap in fixedStep, so that each part is one run of
+	`BigWigWriter._append`. Returns the number of items and of parts.
+	"""
+
+	missing_is_nan = missing != missing
+	width = block.shape[1]
+	step = width if by_row else segment_bases
+	n_items, n_parts = 0, 0
+	part_kind, part_tid, part_end = -1, -1, -1
+
+	for r in range(block.shape[0]):
+		tid = tids[r]
+		for c0 in range(0, width, step):
+			c1 = min(width, c0 + step)
+
+			n_bases, n_runs, n_stretches = 0, 0, 0
+			kept, last = False, numpy.uint32(0)
+			for c in range(c0, c1):
+				value = block[r, c]
+				if value != value or (not missing_is_nan and value == missing):
+					kept = False
+					continue
+
+				n_bases += 1
+				if not kept:
+					n_runs += 1
+					n_stretches += 1
+				elif bits[r, c] != last:
+					n_stretches += 1
+
+				kept, last = True, bits[r, c]
+
+			if n_bases == 0:
+				continue
+
+			fixed = n_bases * costs[0] + n_runs * costs[1]
+			var = n_bases * costs[2]
+			bed = n_stretches * costs[3]
+			kind = 3 if fixed <= var and fixed <= bed else 2 if var <= bed else 1
+
+			kept = False
+			for c in range(c0, c1):
+				value = block[r, c]
+				if value != value or (not missing_is_nan and value == missing):
+					kept = False
+					continue
+
+				position = firsts[r] + c
+				if kind == 1 and kept and bits[r, c] == last:
+					ends[n_items - 1] = position + 1
+					continue
+
+				if kind != part_kind or tid != part_tid or (kind == 3 and
+						position != part_end):
+					parts[n_parts, 0] = n_items
+					parts[n_parts, 1] = kind
+					parts[n_parts, 2] = tid
+					n_parts += 1
+					part_kind, part_tid = kind, tid
+
+				starts[n_items] = position
+				ends[n_items] = position + 1
+				values[n_items] = value
+				n_items += 1
+				part_end = position + 1
+				kept, last = True, bits[r, c]
+
+	return n_items, n_parts
+
+
+@numba.njit(nogil=True, cache=True)
 def _zoom_records(size, tids, starts, ends, values, progress, open_ints,
 	open_floats, out_ints, out_floats):
 	"""Summarize items into the records of one zoom level, as libBigWig bins

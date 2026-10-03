@@ -6,7 +6,7 @@ numpy.
 
 It reads the per-base values of tens or hundreds of thousands of windows in
 one call, straight into a float32 numpy array, from one bigWig or from several
-at once, and writes bigWigs from intervals, single bases or dense arrays. The
+at once, and writes bigWigs from the same windows, or from intervals. The
 work runs on several threads, because zlib's ``uncompress()`` and
 ``compress2()`` and the numba kernels all run without the GIL. It depends only
 on numpy and numba; libdeflate, through the optional ``deflate`` package,
@@ -19,7 +19,7 @@ refuses and how it lays out the files it writes.
 
     import numpy
     from figwig import BigWig
-    from figwig import read_windows
+    from figwig import read_bigwig
 
     chroms = numpy.array(["chr1", "chr1", "chr2"])
     starts = numpy.array([1_000_000, 2_500_000, 300_000])
@@ -27,18 +27,26 @@ refuses and how it lays out the files it writes.
     bw = BigWig("ENCFF830RWF.bigWig")
     y = bw.read(chroms, starts, width=1000, n_jobs=8)   # (3, 1000) float32
 
-    y = read_windows(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms,
+    y = read_bigwig(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms,
         starts, width=1000)                              # (3, 2, 1000) float32
 
 .. code-block:: python
 
     import numpy
     from figwig import BigWigWriter
+    from figwig import write_bigwig
 
-    with BigWigWriter("out.bw", {"chr1": 248_956_422, "chr2": 242_193_529}) as bw:
-        bw.add("chr1", [100, 250], [200, 300], [1.5, 2.0])     # intervals
-        bw.add("chr1", numpy.array([1000, 1005]), values=[3, 1])  # single bases
-        bw.add("chr2", 5000, values=numpy.random.rand(2000))      # a dense array
+    chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
+    chroms = numpy.array(["chr1", "chr1", "chr2"])
+    starts = numpy.array([1_000_000, 2_500_000, 300_000])
+    y_hat = numpy.random.default_rng(0).random((3, 2, 1000), dtype=numpy.float32)
+
+    write_bigwig(["plus.bw", "minus.bw"], chrom_sizes, chroms, starts, y_hat)
+
+    with BigWigWriter("out.bw", chrom_sizes) as bw:
+        bw.write("chr1", [100, 250], [1.5, 2.0], ends=[200, 300])  # intervals
+        bw.write("chr1", [1000, 1005], [[3], [1]])                  # single bases
+        bw.write("chr2", [5000], y_hat[:1, 0])                      # a window
 
 Installation
 ============

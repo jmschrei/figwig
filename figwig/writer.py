@@ -6,7 +6,6 @@ from __future__ import annotations
 import os
 import sys
 import zlib
-import numbers
 
 from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +20,7 @@ from ._kernels import _inflate_blocks
 from ._kernels import _libdeflate
 from ._kernels import _pread
 from ._kernels import _update_summary
+from ._kernels import _window_items
 from ._kernels import _zlib_compress
 from ._kernels import _zlib_uncompress
 from ._kernels import _zoom_records
@@ -29,6 +29,7 @@ from .bigwig import _CHROM_TREE_MAGIC
 from .bigwig import _INDEX_MAGIC
 from .bigwig import _check_missing
 from .bigwig import _check_n_jobs
+from .bigwig import _chrom_codes
 
 
 # The layout of a file is libBigWig's (pyBigWig's writer): a data block is at
@@ -48,6 +49,17 @@ _ZOOM_BLOCK_RECORDS = 1023
 # have to be held twice in memory.
 _BATCH_ITEMS = 1 << 20
 
+# Each window, or each segment of this many bases of a wider one, is written
+# as whichever section type is smallest, and a wider window is converted a
+# piece of whole segments at a time. Segments do not depend on the batch
+# size, so neither does the file.
+_SEGMENT_BASES = 1 << 16
+
+# The bytes a data block takes besides its items, for choosing a segment's
+# section type: its 24-byte section header, its 32-byte index entry, and
+# about 8 of zlib's own.
+_BLOCK_BYTES = 64
+
 # The data blocks read back in one task to build the zoom levels, the most
 # of these chunks read past the one the slowest level is on, and the zoom
 # blocks compressed in one task.
@@ -63,6 +75,15 @@ _FLT_MAX = float(numpy.finfo(numpy.float32).max)
 _DBL_MAX = sys.float_info.max
 _DBL_MIN = sys.float_info.min
 
+# The bytes a segment of windows takes as each section type: a fixedStep
+# base, and the block each run of them starts; a varStep base; and a
+# bedGraph stretch. An item's share of its block's bytes is included.
+_COSTS = numpy.array([
+	4 * _ITEM_WORDS[_FIXEDSTEP] + _BLOCK_BYTES / _BLOCK_ITEMS[_FIXEDSTEP],
+	_BLOCK_BYTES,
+	4 * _ITEM_WORDS[_VARSTEP] + _BLOCK_BYTES / _BLOCK_ITEMS[_VARSTEP],
+	4 * _ITEM_WORDS[_BEDGRAPH] + _BLOCK_BYTES / _BLOCK_ITEMS[_BEDGRAPH]])
+
 _ENGINES = ('auto', 'zlib', 'libdeflate', 'isal')
 _LEVELS = {'zlib': (0, 9), 'libdeflate': (0, 12), 'isal': (0, 3)}
 
@@ -76,20 +97,21 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'),
 	('extension', '<u8')])
 
 
-def _check_chroms(chroms):
-	"""The `chroms` argument as a list of (name, length) pairs, in order."""
+def _check_chrom_sizes(chrom_sizes):
+	"""The `chrom_sizes` argument as a list of (name, length) pairs, in
+	order."""
 
-	if isinstance(chroms, dict):
-		pairs = list(chroms.items())
+	if isinstance(chrom_sizes, dict):
+		pairs = list(chrom_sizes.items())
 	else:
 		try:
-			pairs = [tuple(pair) for pair in chroms]
+			pairs = [tuple(pair) for pair in chrom_sizes]
 		except TypeError:
-			raise TypeError("chroms must be a dict of chromosome lengths, or a "
-				"list of (name, length) pairs.")
+			raise TypeError("chrom_sizes must be a dict of chromosome lengths, or "
+				"a list of (name, length) pairs.")
 
 	if len(pairs) == 0:
-		raise ValueError("chroms must name at least one chromosome.")
+		raise ValueError("chrom_sizes must name at least one chromosome.")
 	if len(pairs) > 1073676289:
 		raise ValueError("a bigWig can hold at most 1,073,676,289 chromosomes.")
 
@@ -422,32 +444,32 @@ class _Run:
 
 
 class BigWigWriter:
-	"""Write a bigWig file, chromosome by chromosome, on several threads.
+	"""Write a bigWig file, a batch of windows or intervals at a time, on
+	several threads.
 
-	`BigWigWriter` takes the values of one chromosome at a time, in the order
-	the chromosomes are given, and writes them as they come, so that a track
-	larger than memory can be written a chromosome, or a part of one, at a
-	time. Use it as a context manager, or call `close` when every value has
-	been added; the header and the index are written there.
+	`BigWigWriter` takes values with `write`, as the windows `BigWig.read`
+	reads or as intervals, and writes them as they come, so that a track
+	larger than memory, such as a model's predictions over a genome, can be
+	written a batch at a time. Each call's items come after the last call's,
+	in the order of the chromosomes in `chrom_sizes`. Use it as a context
+	manager, or call `close` when every value has been written; the header,
+	the index and the zoom levels are written there.
 
-	Values can be added three ways, each with `add`:
-
-	- intervals, each a start, an end and a value, written as bedGraph
-	  sections;
-	- single bases, each a position and a value, written as varStep sections
-	  of span 1, which is what per-base counts, such as those of reads'
-	  5' ends, are;
-	- a dense array of values from one start, written as fixedStep sections
-	  of span 1, leaving out the bases equal to `missing` or NaN, which is
-	  what a model's predictions along a region are.
+	Each window, or each segment of 65,536 bases of a wider one, is written
+	as whichever section type takes it in the fewest bytes: fixedStep for
+	runs of bases, such as a model's predictions; varStep for scattered
+	bases, such as per-base counts of reads' 5' ends; or bedGraph for
+	stretches of one value. Intervals are written as bedGraph sections, as
+	they are given.
 
 	The file is laid out the way libBigWig, pyBigWig's writer, lays it out:
 	its header, chromosome tree, data blocks of at most 32768 bytes before
 	compression, the R-tree index over them, and the zoom levels and their
-	indexes. A file of intervals or single bases written without zoom levels,
-	with engine='zlib' and level 6, is byte for byte the file pyBigWig writes
-	from the same calls, given the same zlib, unless libBigWig gets one of
-	the values below wrong. Where it does, the correct ones are written: the
+	indexes. A file of intervals, or of single bases written as windows of
+	width 1, written with missing=numpy.nan, without zoom levels, and with
+	engine='zlib' at level 6, is byte for byte the file pyBigWig writes from
+	the same values, given the same zlib, unless libBigWig gets one of the
+	values below wrong. Where it does, the correct ones are written: the
 	maximum in the header, which libBigWig misses when the first value is the
 	largest, and leaves at the smallest positive double when no value is
 	positive; the end of the last block of each fixedStep call, which
@@ -466,10 +488,11 @@ class BigWigWriter:
 	path: str or os.PathLike
 		The file to write. It is created, or emptied, when the writer is made.
 
-	chroms: dict or list of (str, int)
+	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order their values will be
-		added: a dict such as `BigWig.chroms`, or a list of (name, length)
-		pairs. Chromosomes that get no values are still in the file's header.
+		written: a dict such as `BigWig.chrom_sizes`, or a list of (name,
+		length) pairs. Chromosomes that get no values are still in the file's
+		header.
 
 	zooms: int, optional
 		The most zoom levels to write. Genome browsers draw zoomed-out views
@@ -504,14 +527,16 @@ class BigWigWriter:
 		thread, or -1 for one per CPU. Default is 8.
 	"""
 
-	def __init__(self, path: str | os.PathLike, chroms: dict | list,
+	def __init__(self, path: str | os.PathLike, chrom_sizes: dict | list,
 		zooms: int = 10, level: int = 6, engine: str = 'auto', n_jobs: int = 8):
 		self._file = None
 		self._pool = None
 
-		self.chroms = dict(_check_chroms(chroms))
-		self._chrom_list = list(self.chroms.items())
-		self._tids = {name: i for i, name in enumerate(self.chroms)}
+		self.chrom_sizes = dict(_check_chrom_sizes(chrom_sizes))
+		self._chrom_list = list(self.chrom_sizes.items())
+		self._tids = {name: i for i, name in enumerate(self.chrom_sizes)}
+		self._lengths = numpy.array(list(self.chrom_sizes.values()),
+			dtype=numpy.int64)
 
 		if isinstance(zooms, bool) or not isinstance(zooms, (int, numpy.integer)):
 			raise TypeError("zooms must be an integer.")
@@ -571,110 +596,287 @@ class BigWigWriter:
 			self._file.close()
 			self._file = None
 
-	def add(self, chrom: str, starts, ends=None, values=None,
+	def write(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
+		numpy.ndarray, values, ends: list[int] | numpy.ndarray | None = None,
 		missing: float = 0.0):
-		"""Add values on one chromosome.
+		"""Write the values of windows, or of intervals.
 
-		Chromosomes are added in the order of `chroms`, and within one, every
-		call starts at or after the end of the last; a chromosome may be added
-		over several calls. Positions are 0-based and ends are exclusive, as in
-		BED files, and must lie within the chromosome. Values are written as
-		float32, and must be finite.
+		Without `ends`, item j is the window [starts[j], starts[j] + width) on
+		chroms[j], and row j of `values`, of shape (n, width), holds the value
+		of each of its bases, as `BigWig.read` returns them for the same
+		windows. With `ends`, item j is the interval [starts[j], ends[j]), and
+		values[j] is the value of every base in it. Positions are 0-based and
+		ends are exclusive, as in BED files.
+
+		Items may be given in any order, and are sorted by chromosome, in the
+		order of `chrom_sizes`, and by start, but must not overlap. The items
+		of a call come after those of the last call: on a chromosome later in
+		`chrom_sizes`, or on the same one at or after the end of the last
+		call's last item. A chromosome may be written over many calls, such
+		as one per batch of a model's predictions.
+
+		A base or interval whose value is `missing`, or NaN, is not written,
+		so that `BigWig.read` with the same `missing` reads the values back. A
+		base whose value is -0.0 is left out where `missing` is 0.0, and so
+		reads back as 0.0. A window may run past the end of its chromosome
+		where its bases are NaN, as `BigWig.read` gives them there. Values are
+		written as float32, and must not be infinite.
+
+		Each window, or each segment of 65,536 bases of a wider one, is
+		written as whichever section type takes the fewest bytes before
+		compression, counting each data block's header and index entry:
+		fixedStep for runs of bases, which start a new block at each gap;
+		varStep for scattered bases; or bedGraph for stretches of one value.
+		Intervals are written as bedGraph sections, as they are given.
+
+		A call that raises writes nothing.
+
 
 		Parameters
 		----------
-		chrom: str
-			The chromosome the values are on.
+		chroms: str, list of str, or numpy.ndarray of str
+			The chromosome of each item, or one name for every item. Each must
+			be one of `chrom_sizes`.
 
-		starts: int or array-like of ints
-			With `ends`, the starts of intervals; without, the positions of
-			single bases. A single integer means that `values` is a dense array
-			of the values of the bases from that position on.
+		starts: list of int or numpy.ndarray of int, shape=(n,)
+			The start of each window or interval, at 0 or later.
 
-		ends: array-like of ints or None, optional
-			The ends of the intervals, each after its start and at or before
-			the start of the next. Default is None.
+		values: array-like of numbers, shape=(n, width) or (n,)
+			The value of every base of each window, or with `ends`, the value
+			of each interval.
 
-		values: array-like of numbers
-			The value of each interval, base, or base of the dense array.
+		ends: list of int or numpy.ndarray of int, shape=(n,), or None, optional
+			The end of each interval, after its start and at most the length
+			of its chromosome. If None, the items are windows. Default is None.
 
 		missing: float, optional
-			Only for a dense array: bases whose value is `missing`, or NaN, are
-			not written, so that `BigWig.read` with the same `missing` reads
-			the array back. A base whose value is -0.0 is left out where
-			`missing` is 0.0, and so reads back as 0.0. Default is 0.0.
+			The value of the bases and intervals that are not written. Default
+			is 0.0.
 		"""
 
 		if self._file is None:
 			raise ValueError("this BigWigWriter has been closed.")
 
-		if not isinstance(chrom, str):
-			raise TypeError("chrom must be a string, not {}.".format(
-				type(chrom).__name__))
-		if chrom not in self._tids:
-			raise ValueError("chromosome {!r} is not one of the writer's "
-				"chromosomes.".format(chrom))
-		if values is None:
-			raise TypeError("add needs values.")
+		missing = _check_missing(missing)
+		starts = self._positions(starts, 'starts')
+		values = numpy.asarray(values)
+		if values.dtype.kind not in 'biuf':
+			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 
-		tid = self._tids[chrom]
-		length = self.chroms[chrom]
-
-		dense = isinstance(starts, (numbers.Integral, numpy.integer)) and \
-			not isinstance(starts, bool)
-		if dense:
-			if ends is not None:
-				raise ValueError("a dense array takes a single start and no ends.")
-
-			runs = self._dense(chrom, int(starts), values, missing, length)
+		n = len(starts)
+		if ends is None:
+			item = 'window'
+			if values.ndim != 2 or len(values) != n:
+				raise ValueError("values must have one row per start, of shape "
+					"({}, width), not {}; pass ends to write intervals.".format(n,
+					values.shape))
+			if values.shape[1] < 1:
+				raise ValueError("values must have at least one column.")
 		else:
-			runs = self._intervals(chrom, starts, ends, values, length)
+			item = 'interval'
+			ends = self._positions(ends, 'ends')
+			if ends.shape != starts.shape:
+				raise ValueError("starts and ends must be the same length, not {} "
+					"and {}.".format(n, len(ends)))
+			if values.shape != starts.shape:
+				raise ValueError("values must hold one value per interval, of "
+					"shape ({},), not {}.".format(n, values.shape))
 
-		if len(runs) == 0:
+		names, codes = _chrom_codes(chroms, n)
+		unknown = [name for name in names if name not in self._tids]
+		if len(unknown) > 0:
+			raise ValueError("chromosome {!r} is not one of the writer's "
+				"chromosomes.".format(unknown[0]))
+		if n == 0:
 			return
 
-		if tid < self._last_tid:
-			raise ValueError("chromosome {!r} is added after {!r}, but comes "
-				"before it in chroms.".format(chrom, self._chrom_list[
-				self._last_tid][0]))
-		if tid == self._last_tid and runs[0][1] < self._last_end:
-			raise ValueError("values on {!r} start at {}, before the end of the "
-				"values already added on it, {}.".format(chrom, runs[0][1],
+		# One chromosome for every item is common, and its id and length are
+		# broadcast rather than repeated for each item.
+		ids = numpy.array([self._tids[name] for name in names],
+			dtype=numpy.int64)
+		if len(names) == 1:
+			tids = numpy.broadcast_to(ids[0], (n,))
+			lengths = numpy.broadcast_to(self._lengths[ids[0]], (n,))
+		else:
+			tids, lengths = ids[codes], self._lengths[ids][codes]
+
+		def describe(j):
+			return "{} {} on {!r}".format(item, j, names[codes[j]])
+
+		if starts.min() < 0:
+			j = int(numpy.argmax(starts < 0))
+			raise ValueError("{} starts before 0, at {}.".format(describe(j),
+				starts[j]))
+
+		if ends is None:
+			width = values.shape[1]
+			# Compared with 2**32 - 1 - width, so that a start near 2**63 does
+			# not overflow into one that passes.
+			if starts.max() > 2**32 - 1 - width:
+				j = int(numpy.argmax(starts > 2**32 - 1 - width))
+				raise ValueError("{} ends at {}, past 2**32 - 1.".format(
+					describe(j), int(starts[j]) + width))
+
+			_check_window_values(values, starts, lengths, describe)
+		else:
+			if (ends <= starts).any():
+				j = int(numpy.argmax(ends <= starts))
+				raise ValueError("{} ends at {}, at or before its start, {}."
+					.format(describe(j), ends[j], starts[j]))
+			if (ends > lengths).any():
+				j = int(numpy.argmax(ends > lengths))
+				raise ValueError("{} ends at {}, past its length, {}.".format(
+					describe(j), ends[j], lengths[j]))
+
+			_check_interval_values(values, describe)
+
+		# Windows whose keys are each at least `width` past the last are
+		# sorted and do not overlap: on one chromosome the keys are starts,
+		# and on the next the key is more than any start plus `width`.
+		keys = starts if len(names) == 1 else (tids << 32) | starts
+		gaps = numpy.diff(keys)
+		apart = ends is None and bool((gaps >= width).all())
+
+		order = None
+		if not apart and (gaps < 0).any():
+			order = numpy.argsort(keys, kind='stable')
+			tids, starts = tids[order], starts[order]
+			ends = None if ends is None else ends[order]
+
+		if tids[0] < self._last_tid:
+			raise ValueError("chromosome {!r} is written after {!r}, but comes "
+				"before it in chrom_sizes.".format(self._chrom_list[tids[0]][0],
+				self._chrom_list[self._last_tid][0]))
+		if tids[0] == self._last_tid and starts[0] < self._last_end:
+			j = 0 if order is None else int(order[0])
+			raise ValueError("{} starts at {}, before the end of what was "
+				"written on it before, {}.".format(describe(j), starts[0],
 				self._last_end))
 
-		for kind, first, run_starts, run_ends, run_values in runs:
-			self._append(kind, tid, first, run_starts, run_ends, run_values)
+		if not apart:
+			stops = starts + width if ends is None else ends
+			overlap = (tids[1:] == tids[:-1]) & (starts[1:] < stops[:-1])
+			if overlap.any():
+				k = int(numpy.argmax(overlap)) + 1
+				j = k if order is None else int(order[k])
+				i = k - 1 if order is None else int(order[k - 1])
+				raise ValueError("{}, at {}, starts before {} {} ends, at {}; they "
+					"must not overlap.".format(describe(j), starts[k], item, i,
+					stops[k - 1]))
 
-		kind, first, _, run_ends, run_values = runs[-1]
-		self._last_tid = tid
-		self._last_end = first + len(run_values) if kind == _FIXEDSTEP else \
-			int(run_ends[-1])
+		if ends is None:
+			self._write_windows(tids, starts, values, order, missing)
+		else:
+			self._write_intervals(tids, starts, ends, values, order, missing)
+
+		self._last_tid = int(tids[-1])
+		self._last_end = int(starts[-1]) + width if ends is None else int(
+			ends[-1])
+
+	def _write_windows(self, tids, starts, values, order, missing):
+		"""Write windows' values a piece at a time, in sorted order, leaving
+		out the bases that are `missing` or NaN, and laying each window, or
+		segment of a wider one, out as the section type that takes it in the
+		fewest bytes."""
+
+		width = values.shape[1]
+		for a, b, c0, c1 in _pieces(*values.shape):
+			rows = slice(a, b) if order is None else order[a:b]
+			block = numpy.ascontiguousarray(values[rows, c0:c1],
+				dtype=numpy.float32)
+
+			# A window of one base is smallest as varStep, whatever its value,
+			# so single bases are written as they are, without the kernel.
+			if width == 1:
+				self._append_items(_VARSTEP, tids[a:b], starts[a:b], None,
+					block[:, 0], missing)
+				self._flush_if_full()
+				continue
+
+			n = block.size
+			item_starts = numpy.empty(n, dtype=numpy.int64)
+			item_ends = numpy.empty(n, dtype=numpy.int64)
+			item_values = numpy.empty(n, dtype=numpy.float32)
+			parts = numpy.empty((n, 3), dtype=numpy.int64)
+			n_items, n_parts = _window_items(block, block.view(numpy.uint32),
+				starts[a:b] + c0, numpy.ascontiguousarray(tids[a:b]), missing,
+				width <= _SEGMENT_BASES, _SEGMENT_BASES, _COSTS,
+				item_starts, item_ends, item_values, parts)
+
+			# The runs keep views of these until they are laid out, so a piece
+			# with few items keeps only those.
+			if n_items < n // 2:
+				item_starts = item_starts[:n_items].copy()
+				item_ends = item_ends[:n_items].copy()
+				item_values = item_values[:n_items].copy()
+
+			bounds = parts[:n_parts, 0].tolist() + [n_items]
+			for p in range(n_parts):
+				i0, i1 = bounds[p], bounds[p + 1]
+				kind, tid = int(parts[p, 1]), int(parts[p, 2])
+				if kind == _FIXEDSTEP:
+					self._append(kind, tid, int(item_starts[i0]), None, None,
+						item_values[i0:i1])
+				else:
+					self._append(kind, tid, int(item_starts[i0]), item_starts[i0:i1],
+						item_ends[i0:i1], item_values[i0:i1])
+
+			self._flush_if_full()
+
+	def _write_intervals(self, tids, starts, ends, values, order, missing):
+		"""Write intervals a batch at a time, in sorted order, leaving out
+		those whose value is `missing` or NaN."""
+
+		n = len(starts)
+		for a in range(0, n, _BATCH_ITEMS):
+			b = min(n, a + _BATCH_ITEMS)
+			rows = slice(a, b) if order is None else order[a:b]
+			self._append_items(_BEDGRAPH, tids[a:b], starts[a:b], ends[a:b],
+				numpy.ascontiguousarray(values[rows], dtype=numpy.float32), missing)
+			self._flush_if_full()
+
+	def _append_items(self, kind, tids, starts, ends, values, missing):
+		"""Append items of one section type, in file order, as one run for
+		each chromosome, leaving out those whose value is `missing` or NaN.
+		Without `ends`, each item is one base."""
+
+		keep = ~numpy.isnan(values)
+		if not numpy.isnan(missing):
+			keep &= values != missing
+
+		# The runs hold these until they are laid out, so they are copies
+		# rather than views of what the caller may change.
+		every = bool(keep.all())
+		s = starts.copy() if every else starts[keep]
+		v = values.copy() if every else values[keep]
+		e = s + 1 if ends is None else ends.copy() if every else ends[keep]
+		if len(s) == 0:
+			return
+
+		# Where every item is on one chromosome, `tids` is that id broadcast,
+		# with a stride of 0, and is one run.
+		if tids.strides[0] == 0:
+			bounds, run_tids = [0, len(s)], [int(tids[0])]
+		else:
+			t = tids if every else tids[keep]
+			bounds = [0] + (numpy.flatnonzero(t[1:] != t[:-1]) + 1).tolist() + [
+				len(s)]
+			run_tids = t[bounds[:-1]].tolist()
+
+		for tid, r0, r1 in zip(run_tids, bounds[:-1], bounds[1:]):
+			self._append(kind, tid, int(s[r0]), s[r0:r1], e[r0:r1], v[r0:r1])
+
+	def _flush_if_full(self):
+		"""Lay out and compress what has been added once it is a batch."""
 
 		if self._pending_n + (self._run.n if self._run is not None else 0) >= \
 				_BATCH_ITEMS:
 			self._flush(final=False)
 
-	def _values(self, values, name):
-		"""`values` as a 1-D float32 array, from any real numbers within
-		float32's range."""
-
-		values = numpy.asarray(values)
-		if values.ndim != 1:
-			raise ValueError("{} must be one-dimensional, not of shape {}.".format(
-				name, values.shape))
-		if values.dtype.kind not in 'biuf':
-			raise TypeError("{} must be numbers, not {}.".format(name,
-				values.dtype))
-
-		if values.dtype.kind == 'f' and values.dtype.itemsize > 4:
-			finite = values[numpy.isfinite(values)]
-			if finite.size and (finite.max() > _FLT_MAX or finite.min() < -_FLT_MAX):
-				raise ValueError("{} holds values outside float32's range.".format(
-					name))
-
-		return values.astype(numpy.float32)
-
 	def _positions(self, positions, name):
+		"""`positions` as a 1-D int64 array, without a copy where it is
+		one."""
+
 		positions = numpy.asarray(positions)
 		if positions.ndim != 1:
 			raise ValueError("{} must be one-dimensional, not of shape {}.".format(
@@ -683,75 +885,7 @@ class BigWigWriter:
 			raise TypeError("{} must be integers, not {}.".format(name,
 				positions.dtype))
 
-		return positions.astype(numpy.int64)
-
-	def _intervals(self, chrom, starts, ends, values, length):
-		"""Intervals or single bases as one run, after checking them."""
-
-		starts = self._positions(starts, 'starts')
-		values = self._values(values, 'values')
-		if starts.shape != values.shape:
-			raise ValueError("starts and values must be the same length, not {} "
-				"and {}.".format(starts.size, values.size))
-
-		if ends is None:
-			kind = _VARSTEP
-			ends = starts + 1
-		else:
-			kind = _BEDGRAPH
-			ends = self._positions(ends, 'ends')
-			if ends.shape != starts.shape:
-				raise ValueError("starts and ends must be the same length, not {} "
-					"and {}.".format(starts.size, ends.size))
-
-		if starts.size == 0:
-			return []
-
-		if not numpy.isfinite(values).all():
-			raise ValueError("values on {!r} must be finite; leave out the bases "
-				"or intervals without a value.".format(chrom))
-		if starts[0] < 0:
-			raise ValueError("values on {!r} start before 0, at {}.".format(chrom,
-				starts[0]))
-		if (ends <= starts).any():
-			j = int(numpy.argmax(ends <= starts))
-			raise ValueError("interval {} on {!r} ends at {}, at or before its "
-				"start, {}.".format(j, chrom, ends[j], starts[j]))
-		if (starts[1:] < ends[:-1]).any():
-			j = int(numpy.argmax(starts[1:] < ends[:-1])) + 1
-			raise ValueError("{} {} on {!r}, at {}, starts before the end of the "
-				"one before it, {}; they must be sorted and must not overlap."
-				.format('interval' if kind == _BEDGRAPH else 'position', j, chrom,
-				starts[j], ends[j - 1]))
-		if ends[-1] > length:
-			raise ValueError("values on {!r} end at {}, past its length, {}."
-				.format(chrom, ends[-1], length))
-
-		return [(kind, int(starts[0]), starts, ends, values)]
-
-	def _dense(self, chrom, start, values, missing, length):
-		"""The runs of a dense array's bases that are not `missing` or NaN."""
-
-		values = self._values(values, 'values')
-		missing = _check_missing(missing)
-
-		if start < 0:
-			raise ValueError("values on {!r} start before 0, at {}.".format(chrom,
-				start))
-		if start + values.size > length:
-			raise ValueError("values on {!r} end at {}, past its length, {}."
-				.format(chrom, start + values.size, length))
-		if numpy.isinf(values).any():
-			raise ValueError("values on {!r} must be finite or NaN.".format(chrom))
-
-		keep = ~numpy.isnan(values)
-		if not numpy.isnan(missing):
-			keep &= values != missing
-
-		edges = numpy.flatnonzero(numpy.diff(keep.astype(numpy.int8), prepend=0,
-			append=0))
-		return [(_FIXEDSTEP, start + int(a), None, None, values[a:b]) for a, b in
-			zip(edges[::2], edges[1::2])]
+		return positions.astype(numpy.int64, copy=False)
 
 	def _append(self, kind, tid, first, starts, ends, values):
 		"""Add one run of items, continuing the open run where libBigWig
@@ -1056,6 +1190,72 @@ class _Done:
 		return True
 
 
+def _pieces(n, width):
+	"""Windows' values in pieces of about _BATCH_ITEMS values, as (first
+	window, end window, first column, end column): several whole windows at
+	a time, or one window wider than _SEGMENT_BASES in whole segments."""
+
+	if width <= _SEGMENT_BASES:
+		step = max(1, _BATCH_ITEMS // width)
+		for a in range(0, n, step):
+			yield a, min(n, a + step), 0, width
+	else:
+		step = max(1, _BATCH_ITEMS // _SEGMENT_BASES) * _SEGMENT_BASES
+		for j in range(n):
+			for c in range(0, width, step):
+				yield j, j + 1, c, min(width, c + step)
+
+
+def _check_float32(block, describe, first):
+	"""Raise if a piece of values, whose first item is `first`, holds an
+	infinite value or one outside float32's range."""
+
+	if block.dtype.kind != 'f':
+		return
+
+	infinite = numpy.isinf(block)
+	if infinite.any():
+		j = first + int(numpy.argmax(infinite.reshape(len(block), -1).any(
+			axis=1)))
+		raise ValueError("values must be finite or NaN, but {} holds an "
+			"infinite value.".format(describe(j)))
+
+	if block.dtype.itemsize > 4:
+		outside = numpy.abs(block) > _FLT_MAX
+		if outside.any():
+			j = first + int(numpy.argmax(outside.reshape(len(block), -1).any(
+				axis=1)))
+			raise ValueError("{} holds values outside float32's range.".format(
+				describe(j)))
+
+
+def _check_window_values(values, starts, lengths, describe):
+	"""Raise if a window holds an infinite value or one outside float32's
+	range, or a value that is not NaN past the end of its chromosome."""
+
+	for a, b, c0, c1 in _pieces(*values.shape):
+		_check_float32(values[a:b, c0:c1], describe, a)
+
+	width = values.shape[1]
+	if starts.max() + width <= lengths.min():
+		return
+
+	for j in numpy.flatnonzero(starts + width > lengths).tolist():
+		past = values[j, max(0, int(lengths[j] - starts[j])):]
+		if past.dtype.kind != 'f' or not numpy.isnan(past).all():
+			raise ValueError("{} runs past the end of its chromosome, at {}, "
+				"where its values must be NaN.".format(describe(j),
+				int(lengths[j])))
+
+
+def _check_interval_values(values, describe):
+	"""Raise if an interval's value is infinite or outside float32's
+	range."""
+
+	for a in range(0, len(values), _BATCH_ITEMS):
+		_check_float32(values[a:a + _BATCH_ITEMS], describe, a)
+
+
 def _layout(runs):
 	"""Lay runs of items out as data blocks, each one section.
 
@@ -1262,35 +1462,60 @@ def _compress_zoom_blocks(engine, level, ints, floats):
 		last, offset, size in zip(firsts, lasts, offsets, sizes)]
 
 
-def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
-	zooms: int = 10, level: int = 6, engine: str = 'auto', n_jobs: int = 8,
-	missing: float = 0.0):
-	"""Write a bigWig file from values held in memory, in one call.
+def write_bigwig(paths: str | os.PathLike | list | tuple,
+	chrom_sizes: dict | list, chroms: str | list[str] | numpy.ndarray,
+	starts: list[int] | numpy.ndarray, values, ends: list[int] | numpy.ndarray |
+	None = None, missing: float = 0.0, zooms: int = 10, level: int = 6,
+	engine: str = 'auto', n_jobs: int = 8):
+	"""Write the values of windows, or of intervals, to one bigWig or several.
 
-	`write_bigwig` writes every chromosome of `data` with one
-	`BigWigWriter`, in the order of `chroms`, whatever order `data` is in.
-	Each chromosome's values are given the way `BigWigWriter.add` takes them:
-	a tuple of (starts, ends, values) for intervals, a tuple of (positions,
-	values) for single bases, and anything else, such as a numpy array or a
-	list, for a dense array of the values of every base from the start of the
-	chromosome. A dense array may be shorter than its chromosome, and its
-	bases equal to `missing`, or NaN, are left out of the file.
+	Given one path, this writes the windows or intervals as
+	`BigWigWriter.write` does, from values of shape (n, width), or (n,) with
+	`ends`. Given a list of paths, `values` has a channel for each path, of
+	shape (n, len(paths), width), or (n, len(paths)) with `ends`, and
+	channel i is written to paths[i]. That is the (batch, channels, length)
+	layout that `read_bigwig` gives for a list of files, and that sequence
+	models predict, so that
 
-	If writing fails part way, the file is left without a header, which no
-	reader takes for a bigWig.
+		write_bigwig(paths, chrom_sizes, chroms, starts, y)
+
+	writes back what `read_bigwig(paths, chroms, starts, width)` read, or a
+	model's predictions for the same windows.
+
+	The files are written one after another, each on up to `n_jobs` threads.
+	If writing one fails part way, it is left without a header, which no
+	reader takes for a bigWig, and the files after it are not written.
+
 
 	Parameters
 	----------
-	path: str or os.PathLike
-		The file to write. It is created, or emptied.
+	paths: str, os.PathLike, or list or tuple of these
+		The file to write, or one file for each channel of `values`. Each is
+		created, or emptied.
 
-	chroms: dict or list of (str, int)
+	chrom_sizes: dict or list of (str, int)
 		The chromosomes and their lengths, in the order they are written: a
-		dict such as `BigWig.chroms`, or a list of (name, length) pairs. A
-		chromosome without values is still in the file's header.
+		dict such as `BigWig.chrom_sizes`, or a list of (name, length) pairs.
+		A chromosome without values is still in each file's header.
 
-	data: dict
-		The values of each chromosome that has any, keyed by name.
+	chroms: str, list of str, or numpy.ndarray of str
+		The chromosome of each window or interval, or one name for all.
+
+	starts: list of int or numpy.ndarray of int, shape=(n,)
+		The start of each window or interval.
+
+	values: array-like of numbers
+		The value of every base of each window, of shape (n, width) for one
+		path and (n, len(paths), width) for a list; or with `ends`, the
+		value of each interval, of shape (n,) or (n, len(paths)).
+
+	ends: list of int or numpy.ndarray of int, shape=(n,), or None, optional
+		The end of each interval. If None, the items are windows. Default is
+		None.
+
+	missing: float, optional
+		The value of the bases and intervals that are not written. Default
+		is 0.0.
 
 	zooms: int, optional
 		The most zoom levels to write; see `BigWigWriter`. Default is 10.
@@ -1305,36 +1530,28 @@ def write_bigwig(path: str | os.PathLike, chroms: dict | list, data: dict,
 	n_jobs: int, optional
 		The most threads that compress blocks at once, besides the calling
 		thread, or -1 for one per CPU. Default is 8.
-
-	missing: float, optional
-		The value of the bases of dense arrays that are not written. Default
-		is 0.0.
 	"""
 
-	if not isinstance(data, dict):
-		raise TypeError("data must be a dict of each chromosome's values, not "
-			"{}.".format(type(data).__name__))
+	single = not isinstance(paths, (list, tuple))
+	files = [paths] if single else list(paths)
+	if len(files) == 0:
+		raise ValueError("paths must hold at least one path.")
 
-	with BigWigWriter(path, chroms, zooms=zooms, level=level, engine=engine,
-			n_jobs=n_jobs) as writer:
-		unknown = [chrom for chrom in data if chrom not in writer.chroms]
-		if len(unknown) > 0:
-			raise ValueError("data has chromosomes that are not in chroms: {}."
-				.format(', '.join(map(repr, unknown))))
+	for path in files:
+		if not isinstance(path, (str, os.PathLike)):
+			raise TypeError("paths must be a path, or a list or tuple of them, "
+				"not {}.".format(type(path).__name__))
 
-		for chrom in writer.chroms:
-			if chrom not in data:
-				continue
+	values = numpy.asarray(values)
+	if not single:
+		ndim = 2 if ends is not None else 3
+		if values.ndim != ndim or values.shape[1] != len(files):
+			raise ValueError("values must have one channel per path, of shape "
+				"(n, {}{}), not {}.".format(len(files), '' if ends is not None else
+				', width', values.shape))
 
-			values = data[chrom]
-			if isinstance(values, tuple):
-				if len(values) == 3:
-					writer.add(chrom, values[0], values[1], values[2])
-				elif len(values) == 2:
-					writer.add(chrom, values[0], values=values[1])
-				else:
-					raise ValueError("the values of {!r} are a tuple of {} arrays; "
-						"give (starts, ends, values) or (positions, values)."
-						.format(chrom, len(values)))
-			else:
-				writer.add(chrom, 0, values=values, missing=missing)
+	for i, path in enumerate(files):
+		with BigWigWriter(path, chrom_sizes, zooms=zooms, level=level,
+				engine=engine, n_jobs=n_jobs) as writer:
+			writer.write(chroms, starts, values if single else values[:, i],
+				ends=ends, missing=missing)

@@ -107,7 +107,7 @@ class BigWig:
 	path: str
 		The path the file was opened from.
 
-	chroms: dict
+	chrom_sizes: dict
 		The length of each chromosome, keyed by its name, in the order of the
 		file's chromosome tree.
 	"""
@@ -139,12 +139,14 @@ class BigWig:
 			self._data_index = data_index
 			self._chroms = self._read_chrom_tree(handle, chrom_tree)
 
-		self.chroms = {name: length for name, (_, length) in self._chroms.items()}
+		self.chrom_sizes = {name: length for name, (_, length) in
+			self._chroms.items()}
 		self._index = None
 		self._index_lock = threading.Lock()
 
 	def __repr__(self):
-		return "BigWig('{}', {} chromosomes)".format(self.path, len(self.chroms))
+		return "BigWig('{}', {} chromosomes)".format(self.path,
+			len(self.chrom_sizes))
 
 	def __getstate__(self):
 		# The lock cannot be pickled, and a copy needs its own. The index, if
@@ -314,7 +316,7 @@ class BigWig:
 		----------
 		chroms: str, list of str, or numpy.ndarray of str
 			The chromosome of each window, or one name for every window. A
-			window on a chromosome that is not one of `self.chroms` is
+			window on a chromosome that is not one of `self.chrom_sizes` is
 			`missing` throughout, with a warning.
 
 		starts: list of int or numpy.ndarray of int, shape=(n,)
@@ -378,7 +380,7 @@ class BigWig:
 		warnings.warn("{} windows are on chromosomes not in {}, and are {} "
 			"throughout: {}. Its chromosomes include {}.".format(n, self.path,
 			float(missing), shown, ", ".join(repr(name) for name in
-			list(self.chroms)[:3])),
+			list(self.chrom_sizes)[:3])),
 			stacklevel=stacklevel + 1)
 
 	def _read_blocks(self, fd, leaves, index, uncompress=None):
@@ -484,6 +486,22 @@ def _check_missing(missing):
 	return numpy.float32(missing)
 
 
+def _chrom_codes(chroms, n):
+	"""The `chroms` argument, one name per start or one for all n, as the
+	names it holds and the position of each start's name among them."""
+
+	if isinstance(chroms, str):
+		return [chroms], numpy.zeros(n, dtype=numpy.int64)
+
+	chroms = numpy.asarray(chroms, dtype=str)
+	if chroms.shape != (n,):
+		raise ValueError("chroms must have one name per start, or be a single "
+			"name.")
+
+	names, codes = numpy.unique(chroms, return_inverse=True)
+	return names.tolist(), codes
+
+
 class _Windows:
 	"""The windows of a read, with their arguments checked.
 
@@ -515,17 +533,7 @@ class _Windows:
 			limit >= 0 else numpy.arange(n)
 		self._given = starts
 
-		if isinstance(chroms, str):
-			names, codes = [chroms], numpy.zeros(n, dtype=numpy.int64)
-		else:
-			chroms = numpy.asarray(chroms, dtype=str)
-			if chroms.shape != (n,):
-				raise ValueError("chroms must have one name per start, or be a "
-					"single name.")
-
-			names, codes = numpy.unique(chroms, return_inverse=True)
-			names = names.tolist()
-
+		names, codes = _chrom_codes(chroms, n)
 		self.n, self.width = n, width
 		self.names, self.codes = names, codes
 		self.starts = starts.astype(numpy.int64)
@@ -641,7 +649,7 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
 	With `single`, `bigwigs` holds one BigWig and the output has shape
 	(n, width); otherwise it has shape (n, len(bigwigs), width), and channel
 	i holds the values from bigwigs[i]. Every file's batches run on one
-	pool of threads. This is called by `BigWig.read` and `read_windows`, and
+	pool of threads. This is called by `BigWig.read` and `read_bigwig`, and
 	the warnings it raises name the line that called them.
 	"""
 
@@ -716,7 +724,7 @@ def _run(reads, n_jobs):
 		read.finish()
 
 
-def read_windows(bigwigs: str | os.PathLike | BigWig | list | tuple,
+def read_bigwig(bigwigs: str | os.PathLike | BigWig | list | tuple,
 	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
 	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
 	missing: float = 0.0) -> numpy.ndarray:

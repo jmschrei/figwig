@@ -19,13 +19,13 @@ so adding threads does not help them. figwig decompresses with zlib's own
 run in parallel. It sorts the windows by position itself, so they can be given
 in any order.
 
-figwig also writes bigWigs, from intervals, single bases or dense arrays such
-as a model's predictions. It lays the file out the way pyBigWig does, and
-compresses its data blocks on several threads, with zlib or, when the optional
-`deflate` package is installed, with libdeflate, both without the GIL. On the
-two tracks timed below, on 8 threads with libdeflate, it wrote the same files
-23 and 26 times faster than pyBigWig without zoom levels, and 16 and 17 times
-faster with them.
+figwig also writes bigWigs, from the same windows it reads, such as a model's
+predictions for them, or from intervals. It lays the file out the way pyBigWig
+does, and compresses its data blocks on several threads, with zlib or, when
+the optional `deflate` package is installed, with libdeflate, both without the
+GIL. On the two tracks timed below, on 8 threads with libdeflate, it wrote the
+same files 23 and 25 times faster than pyBigWig without zoom levels, and 17
+and 19 times faster with them.
 
 figwig depends only on numpy and numba. A file it cannot read with certainty
 raises a `ValueError` that says what it found, rather than being guessed at,
@@ -76,7 +76,7 @@ import numpy
 from figwig import BigWig
 
 bw = BigWig("ENCFF830RWF.bigWig")
-print(len(bw.chroms), bw.chroms["chr1"])
+print(len(bw.chrom_sizes), bw.chrom_sizes["chr1"])
 # 149 248956422
 
 chroms = numpy.array(["chr1", "chr1", "chr2"])
@@ -102,11 +102,11 @@ one each time.
 
 ```python
 import numpy
-from figwig import read_windows
+from figwig import read_bigwig
 
 chroms = numpy.array(["chr1", "chr1", "chr2"])
 starts = numpy.array([1_000_000, 2_500_000, 300_000])
-y = read_windows(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms, starts,
+y = read_bigwig(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms, starts,
 	width=1000)
 print(y.shape)
 # (3, 2, 1000)
@@ -123,7 +123,7 @@ that array directly avoids stacking one array per file, which takes time and
 twice the memory. Every file's work shares one pool of threads. A path is
 opened, and its index read, on every call; to read the same files repeatedly,
 pass `BigWig` objects instead, which keep their indexes. With one file,
-`read_windows` gives `(n, width)`, as `BigWig.read` does.
+`read_bigwig` gives `(n, width)`, as `BigWig.read` does.
 
 #### Bases without data
 
@@ -136,7 +136,7 @@ y = bw.read("chr1", [1_000_000], width=1000, missing=numpy.nan)
 print(numpy.isnan(y).sum(), (y == 0).sum())
 # 907 0
 
-end = bw.chroms["chr1"]
+end = bw.chrom_sizes["chr1"]
 print(bw.read("chr1", [end - 3], width=6))
 # [[ 0.  0.  0. nan nan nan]]
 
@@ -224,17 +224,45 @@ figwig's tests compare it against pybigtools' `values()`, bit for bit, which
 makes pybigtools a natural fallback for the files figwig refuses. Where
 intervals overlap, pybigtools sums them.
 
-#### Writing a bigWig
+#### Writing windows
+
+```python
+import numpy
+from figwig import read_bigwig
+from figwig import write_bigwig
+
+chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
+chroms = numpy.array(["chr2", "chr1", "chr1"])
+starts = numpy.array([300_000, 2_500_000, 1_000_000])
+y_hat = numpy.random.default_rng(0).random((3, 2, 1000), dtype=numpy.float32)
+
+write_bigwig(["plus.bw", "minus.bw"], chrom_sizes, chroms, starts, y_hat)
+y = read_bigwig(["plus.bw", "minus.bw"], chroms, starts, width=1000)
+print(numpy.array_equal(y, y_hat))
+# True
+```
+
+`write_bigwig` takes what `read_bigwig` gives: windows on any chromosomes, in
+any order, and their values, of shape `(n, width)` for one file or
+`(n, len(paths), width)` for several, channel `i` going to the `i`-th file.
+That is the layout of a model's predictions for the windows, here for the two
+strands of a stranded assay. Windows must not overlap. A base whose value is
+`missing`, 0.0 unless given, or NaN is left out of the file, so that reading
+with the same `missing` gives the values back, and a window may run past the
+end of its chromosome where its values are NaN, as `read_bigwig` gives them
+there.
+
+#### Writing a batch at a time
 
 ```python
 from figwig import BigWig
 from figwig import BigWigWriter
 
-chroms = {"chr1": 248_956_422, "chr2": 242_193_529}
-with BigWigWriter("example.bw", chroms) as bw:
-	bw.add("chr1", [1000, 2000], [1500, 2100], [0.5, 2.0])
-	bw.add("chr1", [5000, 5003, 5004], values=[3, 1, 1])
-	bw.add("chr2", 10_000, values=[0.0, 1.5, 1.5, 0.0, 2.5])
+chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
+with BigWigWriter("example.bw", chrom_sizes) as writer:
+	writer.write("chr1", [1000, 2000], [0.5, 2.0], ends=[1500, 2100])
+	writer.write("chr1", [5000, 5003, 5004], [[3], [1], [1]])
+	writer.write("chr2", [10_000], [[0.0, 1.5, 1.5, 0.0, 2.5]])
 
 y = BigWig("example.bw").read(["chr1", "chr2"], [5000, 10_000], width=6)
 print(y)
@@ -242,43 +270,14 @@ print(y)
 #  [0.  1.5 1.5 0.  2.5 0. ]]
 ```
 
-`add` takes values three ways: intervals, as starts, ends and values; single
-bases, as positions and values, which is what per-base counts are; and a dense
-array of the values of every base from one start, which is what a model's
-predictions along a region are. In a dense array, the bases equal to
-`missing`, 0.0 unless given, and NaN are left out of the file, so that
-`BigWig.read` with the same `missing` reads the array back. Chromosomes are
-added in the order of `chroms`, and within one, each call starts at or after
-the end of the last, so a long chromosome can be written a part at a time.
-The header, the index and the zoom levels are written when the writer is
-closed, at the end of the `with` block.
-
-#### Writing values held in memory
-
-```python
-import numpy
-from figwig import BigWig
-from figwig import write_bigwig
-
-rng = numpy.random.default_rng(0)
-predictions = rng.random(1_000_000, dtype=numpy.float32)
-positions = numpy.array([150, 870, 871, 2_000_000])
-counts = numpy.array([2, 1, 4, 1])
-
-write_bigwig("tracks.bw", {"chr1": 248_956_422, "chr2": 242_193_529},
-	{"chr2": (positions, counts), "chr1": predictions}, n_jobs=8)
-
-bw = BigWig("tracks.bw")
-print(numpy.array_equal(bw.read("chr1", [0], width=1_000_000)[0], predictions))
-# True
-print(bw.read("chr2", [868], width=5))
-# [[0. 0. 1. 4. 0.]]
-```
-
-`write_bigwig` takes each chromosome's values as a tuple of (starts, ends,
-values) for intervals, a tuple of (positions, values) for single bases, or an
-array for a dense array from the start of the chromosome, and writes the
-chromosomes in the order of `chroms`.
+`BigWigWriter` writes values as they come, so that a track larger than
+memory, such as a model's predictions over a genome, can be written a batch
+of windows at a time. With `ends`, `write` takes intervals and one value for
+each, here two intervals; single bases, such as per-base counts, are windows
+of width 1. Each call's windows or intervals come after the last call's: on a
+chromosome later in `chrom_sizes`, or on the same one at or after the end of
+the last call's last item. The header, the index and the zoom levels are
+written when the writer is closed, at the end of the `with` block.
 
 ## Values and coordinates
 
@@ -328,11 +327,18 @@ return binned summaries, or use the zoom levels when it reads.
 figwig lays a bigWig out the way libBigWig, the C library inside pyBigWig,
 does: the header, the chromosome tree, data blocks of at most 32,768 bytes
 before compression, the R-tree index over them, and the zoom levels with their
-indexes. Intervals become bedGraph sections, single bases varStep sections of
-span 1, and dense arrays fixedStep sections of span 1. A file of intervals or
-single bases written without zoom levels, with `engine='zlib'` at level 6, is
-byte for byte the file pyBigWig writes from the same calls, and the tests
-check that it is.
+indexes. Intervals become bedGraph sections, as they are given. Each window,
+or each 65,536 bases of a wider one, becomes whichever section type takes it
+in the fewest bytes before compression, counting each data block's header and
+index entry: fixedStep of span 1 for runs of bases, which start a new block at
+every gap; varStep of span 1 for scattered bases; or bedGraph for stretches of
+one value. A track of 10 million bases, 7% of them covered in stretches of 10
+to 30 bases of one value, took 0.2 MB this way, against 2.0 MB as fixedStep
+alone and 1.1 MB as varStep alone. A file of intervals, or of single bases
+written as windows of width 1, written with `missing=numpy.nan` so that none
+is left out, without zoom levels, and with `engine='zlib'` at level 6, is byte
+for byte the file pyBigWig writes from the same values, and the tests check
+that it is.
 
 Where libBigWig writes a wrong value, figwig writes the right one, so those
 files differ from pyBigWig's there:
@@ -369,6 +375,10 @@ their values are.
 
 Values are laid out in batches of about a million items, which are compressed
 on up to `n_jobs` threads while the calling thread lays out the next batch.
+`write` converts the values of one call a batch at a time as well, so its
+working memory does not grow with the call: on 8 threads without zoom levels,
+writing windows of 25 million and of 100 million float32 values in one call
+took 166 and 173 MB above the values themselves, as tracemalloc counted it.
 The zoom levels are built when the writer is closed, from the data blocks read
 back from the file. The finest level's blocks are written as they are
 compressed. The other levels' are kept compressed in memory until every level
@@ -444,8 +454,9 @@ The writers wrote the values of two tracks again, held in memory as numpy
 arrays: the 5' ends of the reads of ENCODE ATAC-seq BAM ENCFF877LRY on the
 plus strand, as counts at 15,875,960 single bases, and the fold-change signal
 of ENCODE snATAC-seq pseudobulk ENCSR206UWN, ENCFF932UQM, as 21,212,477
-intervals. figwig and pyBigWig wrote one call per
-chromosome, and pybigtools one `write()` from an iterator of tuples. Every
+intervals. figwig wrote one `BigWigWriter.write` per chromosome, single bases
+as windows of width 1, pyBigWig one `addEntries` per chromosome, and
+pybigtools one `write()` from an iterator of tuples. Every
 write, opening the file and closing it included, ran in its own process
 after a warm-up write of the first 1,000 values of each chromosome, three
 times, onto tmpfs, and the table gives the median, at compression level 6. pybigtools 0.2.5's `write()` takes no option for zoom levels and writes
@@ -458,20 +469,20 @@ on 2,000 windows of 1,000 bases read back with figwig.
 
 | writer | counts | counts, zoom levels | signal | signal, zoom levels |
 |---|---|---|---|---|
-| pyBigWig 0.3.26 | 4.20 s | 12.81 s | 7.42 s | 10.41 s |
-| pybigtools 0.2.5 | | 4.25 s | | 5.27 s |
-| figwig, zlib, 1 thread | 4.22 s | 12.20 s | 6.17 s | 8.24 s |
-| figwig, zlib, 8 threads | 0.53 s | 1.68 s | 0.79 s | 1.16 s |
-| figwig, libdeflate, 1 thread | 1.07 s | 4.93 s | 1.75 s | 3.37 s |
-| figwig, libdeflate, 8 threads | **0.18 s** | **0.81 s** | **0.29 s** | **0.62 s** |
+| pyBigWig 0.3.26 | 4.20 s | 12.80 s | 7.41 s | 10.48 s |
+| pybigtools 0.2.5 | | 4.45 s | | 5.47 s |
+| figwig, zlib, 1 thread | 4.25 s | 12.09 s | 6.21 s | 8.10 s |
+| figwig, zlib, 8 threads | 0.53 s | 1.63 s | 0.78 s | 1.09 s |
+| figwig, libdeflate, 1 thread | 1.07 s | 4.85 s | 1.80 s | 3.27 s |
+| figwig, libdeflate, 8 threads | **0.18 s** | **0.75 s** | **0.30 s** | **0.55 s** |
 
 figwig's files were the size of pyBigWig's: 35.7 and 107.1 MB without zoom
 levels, against 35.8 and 108.0 MB, and 214.0 and 126.5 MB with them, against
 213.9 and 127.4 MB. pybigtools chooses its zoom levels differently, and wrote
 96.4 and 162.2 MB. With zoom levels most of figwig's time is spent building
-them. Its peak memory was above pyBigWig's: 565 MB against 355 MB for the
-counts without zoom levels on one thread, of which the arrays of values held
-318 MB, and 1,502 MB against 1,090 MB with zoom levels on 8 threads.
+them. Its peak memory was above pyBigWig's without zoom levels, 554 MB against
+354 MB for the counts on one thread, of which the arrays of values held 318
+MB, and below it with them, 739 MB on 8 threads against 1,089 MB.
 
 ## Origin
 

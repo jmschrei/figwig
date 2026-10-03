@@ -12,8 +12,10 @@ read once with pyBigWig's intervals() and cached as a .npz in --scratch.
 A bigWig whose intervals are all one base long is written as single bases
 (varStep), and any other as intervals (bedGraph):
 
-	- figwig: one BigWigWriter.add per chromosome, at level 6, with zlib or
-	  libdeflate, on `threads` threads.
+	- figwig: one BigWigWriter.write per chromosome, single bases as windows
+	  of width 1 and intervals with ends, with missing=NaN so that every
+	  item is written, at level 6, with zlib or libdeflate, on `threads`
+	  threads.
 	- pyBigWig: one addEntries per chromosome, which compresses with zlib at
 	  level 6, on one thread.
 	- pybigtools: one write() from an iterator of (chrom, start, end, value)
@@ -99,9 +101,9 @@ def write_figwig(path, chroms, entries, single, engine, threads, zooms):
 			n_jobs=threads) as writer:
 		for chrom, (starts, ends, values) in entries.items():
 			if single:
-				writer.add(chrom, starts, values=values)
+				writer.write(chrom, starts, values[:, None], missing=numpy.nan)
 			else:
-				writer.add(chrom, starts, ends, values)
+				writer.write(chrom, starts, values, ends=ends, missing=numpy.nan)
 
 
 def write_pybigwig(path, chroms, entries, single, engine, threads, zooms):
