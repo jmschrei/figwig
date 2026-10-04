@@ -508,12 +508,19 @@ def _bam_kernel():
 # one core (see _read_bam_keys_threaded). In a
 # coordinate-sorted file each chromosome's keys are one run, so a group of runs
 # holds every key of its chromosomes and is counted on its own. The kernel
-# flags a file where a chromosome comes back after its run has ended; its keys
-# are then sorted and counted all at once after the reading, as they always
-# were. A group is never smaller than _GROUP_KEYS keys, so that a file of many
-# small contigs costs a few numpy calls rather than one per contig.
+# flags a file where a chromosome comes back after its run has ended; the keys
+# after the groups counted until then are sorted and counted all at once after
+# the reading, and a chromosome found in a group and again in those keys gets
+# the sum of the two. A group is never smaller than _GROUP_KEYS keys, so that a
+# file of many small contigs costs a few numpy calls rather than one per contig.
+#
+# The keys array starts at _INITIAL_KEYS keys. Before it would grow, the keys
+# of the groups counted so far are dropped from it (_KeyCounter.compact), and
+# it grows only if that leaves too little room, so that in a coordinate-sorted
+# file its size follows the largest chromosome rather than the whole file.
 
 _GROUP_KEYS = 1 << 18
+_INITIAL_KEYS = 1 << 20
 
 def _count_keys(keys, outs):
 	"""Sort keys in place and count its runs of equal keys. Returns the sorted
@@ -542,9 +549,10 @@ class _KeyCounter:
 	"""Counts the keys of the chromosomes the kernel has finished with, in
 	groups, on a pool of `threads` threads when `threads` > 1 and inline
 	otherwise. The threaded BAM reader inflates on the same pool, so that the
-	two share the file's cores. `advance` is called after every kernel call and
-	`wait` before the keys array is replaced; `finish` returns the counts of
-	every key, and `close` shuts the pool down."""
+	two share the file's cores. `advance` is called after every kernel call,
+	`compact` before the keys array would grow and `wait` before it is
+	replaced; `finish` returns the counts of every key, and `close` shuts the
+	pool down."""
 
 	def __init__(self, arrays, stranded, threads):
 		self.state, self.run_starts, self.run_buckets = arrays[4], arrays[5], arrays[6]
@@ -593,23 +601,43 @@ class _KeyCounter:
 		self.pending = [part if isinstance(part, tuple) else part.result()
 			for part in self.pending]
 
+	def compact(self, keys):
+		"""Move the keys not yet handed to a count to the start of keys, once
+		the counts in flight are done, and return how many keys were dropped
+		before them. The key count and the run starts move back by as many."""
+
+		self.wait()
+		shift = self.start
+		if shift == 0:
+			return 0
+
+		n = int(self.state[0])
+		keys[:n - shift] = keys[shift:n]
+		self.state[0] = n - shift
+		if self.state[6] == 0:
+			self.run_starts[self.first_run:int(self.state[5])] -= shift
+
+		self.start = 0
+		return shift
+
 	def close(self):
 		if self.pool is not None:
 			self.pool.shutdown(wait=True, cancel_futures=True)
 			self.pool = None
 
 	def finish(self, keys, n_outs):
-		"""The counts of keys, every key the kernel wrote: a list of
-		(positions, counts, outs, lo, hi) from _count_keys."""
+		"""The counts of keys, every key the kernel wrote that compact has not
+		dropped, and of the groups counted before: a list of (positions,
+		counts, outs, lo, hi) from _count_keys. In a mixed file an output can
+		be in two of them."""
 
 		try:
 			n_keys = len(keys)
 			if self.state[6] != 0:
 				self.wait()
-				self.pending = []
-				if n_keys > 0:
-					self.pending.append(_count_keys(keys, numpy.arange(n_outs,
-						dtype='int64')))
+				if n_keys > self.start:
+					self.pending.append(_count_keys(keys[self.start:],
+						numpy.arange(n_outs, dtype='int64')))
 			elif n_keys > self.start:
 				last = int(self.state[5])
 				self._submit(keys[self.start:], self.run_buckets[self.first_run:last].copy())
@@ -982,7 +1010,8 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 	counter):
 	"""Inflate a BAM file's BGZF blocks, on the `threads` threads of counter's
 	pool when there is more than one, which also counts the keys, and run the
-	kernel over its records. Returns the array of keys, or None when the file
+	kernel over its records. Returns the keys that counter has not dropped
+	(_KeyCounter.compact), or None when the file
 	has to be read by pysam instead, or raises _NotBGZF, _BadBGZFBlock or the
 	OSError that stopped the reading, when it also has to be read by pysam. The
 	caller closes counter, which cancels or waits for the runs still being
@@ -993,7 +1022,7 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 
 	tid_bucket, missing_seen, missing_order, options, state = arrays[:5]
 	scan = _bgzf_kernel()
-	keys = numpy.empty(1 << 20, dtype='int64')
+	keys = numpy.empty(_INITIAL_KEYS, dtype='int64')
 	spare = _BGZF_SPARE
 
 	def batches(f):
@@ -1081,6 +1110,8 @@ def _read_bam_keys_threaded(filename, n_ref, kernel, arrays, progress, threads,
 		n = len(buf)
 		needed = state[0] + 2 * (n // 36) + 2
 		if needed > len(keys):
+			needed -= counter.compact(keys)
+		if needed > len(keys):
 			counter.wait()
 			grown = numpy.empty(max(needed, 2 * len(keys)), dtype='int64')
 			grown[:state[0]] = keys[:state[0]]
@@ -1141,7 +1172,7 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 	On success, the entry of every chromosome and strand that has reads is
 	replaced by a tuple (positions, counts, start, end): its sorted positions
 	and their counts are positions[start:end] and counts[start:end], two int64
-	arrays shared by every entry, and True is returned. False means that the
+	arrays that other entries may share, and True is returned. False means that the
 	file holds something this reader does not handle exactly as the pysam loop
 	would -- an unusual record, an error, a remote file -- and that nothing
 	has been recorded or printed, so the caller reads it with pysam instead.
@@ -1204,6 +1235,7 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 
 	# Runs of equal keys are one position's count.
 	n_outs = len(chroms) if args.unstranded else 2 * len(chroms)
+	seen = set()
 	for positions, counts, outs, lo, hi in counter.finish(keys, n_outs):
 		# Each entry names its group's arrays and its slice of them rather
 		# than holding its own views, so that pickling the result back from a
@@ -1213,11 +1245,20 @@ def count_bam_reads(bam, filename, chrom_sizes, pos_reads, neg_reads, args,
 			hi[used].tolist()):
 			entry = positions, counts, a, b
 			if args.unstranded:
-				pos_reads[chroms[out]] = entry
+				reads, chrom = pos_reads, chroms[out]
 			elif out % 2 == 0:
-				pos_reads[chroms[out // 2]] = entry
+				reads, chrom = pos_reads, chroms[out // 2]
 			else:
-				neg_reads[chroms[out // 2]] = entry
+				reads, chrom = neg_reads, chroms[out // 2]
+
+			# Only in a mixed file: counted in a group before a chromosome
+			# came back, and again at the end.
+			if out in seen:
+				merged = merge_counts([as_arrays(reads[chrom]), as_arrays(entry)])
+				entry = merged[0], merged[1], 0, len(merged[0])
+
+			seen.add(out)
+			reads[chrom] = entry
 
 	del keys
 
