@@ -2199,6 +2199,140 @@ def test_zero_parallel_is_rejected(run, bam, sizes):
 	assert "-p/--parallel" in process.stderr
 
 
+## The BAM reader's keys array
+#
+# The BAM reader drops the keys of the chromosome groups it has counted from
+# its keys array before the array would grow. These tests shrink the groups,
+# the array and the runs of blocks walked at a time, so that a small file is
+# compacted several times, and check that it counts what a reader that keeps
+# every key counts. Each chromosome is followed by two contigs whose few keys
+# do not fill a group on their own, so that the reader compacts while runs
+# that have ended are still waiting for a group.
+
+KEY_CHROMS = [(name, size) for i in range(1, 7) for name, size in (
+	("chr{}".format(i), 100000), ("chr{}_a".format(i), 1000),
+	("chr{}_b".format(i), 1000))]
+
+
+def many_reads(chroms, seed):
+	"""For each (chrom, n) of chroms, in that order, n reads of 50 bases at
+	random positions and on random strands."""
+
+	rng = numpy.random.default_rng(seed)
+	sizes = dict(KEY_CHROMS)
+	reads = []
+	for chrom, n in chroms:
+		starts = numpy.sort(rng.integers(0, sizes[chrom] - 100, n)).tolist()
+		for start, reverse in zip(starts, rng.integers(0, 2, n).tolist()):
+			reads.append((chrom, start, 50, bool(reverse)))
+
+	return reads
+
+
+@pytest.fixture(scope="session")
+def key_bams(data_dir):
+	"""A BAM sorted by chromosome, with 3000 reads on each chromosome and 5 on
+	each contig, and a mixed one in which chr1 and chr3 come back at the end
+	with 1500 reads each."""
+
+	reads = many_reads([(chrom, 5 if "_" in chrom else 3000)
+		for chrom, _ in KEY_CHROMS], 0)
+	mixed = reads + many_reads([("chr1", 1500), ("chr3", 1500)], 1)
+
+	return {
+		"sizes": write_chrom_sizes(data_dir / "keys.chrom.sizes", KEY_CHROMS),
+		"sorted": (write_bam(data_dir / "keys-sorted.bam", KEY_CHROMS, reads), reads),
+		"mixed": (write_bam(data_dir / "keys-mixed.bam", KEY_CHROMS, mixed), mixed),
+	}
+
+
+def counted(path, sizes, flags, threads):
+	"""The counts extract_reads gives, as lists, by strand and chromosome."""
+
+	args = parse(path, "-s", sizes, *flags)
+	pos_reads, neg_reads = figwig.bam2bw.extract_reads(args, KEY_CHROMS, 0,
+		threads=threads)
+
+	return {strand: {chrom: [a.tolist() for a in figwig.bam2bw.as_arrays(
+		reads[chrom])] for chrom, _ in KEY_CHROMS}
+		for strand, reads in (("+", pos_reads), ("-", neg_reads))}
+
+
+def compact_often(monkeypatch, group, initial):
+	"""Groups of `group` keys, a keys array of `initial` keys to start with
+	(None leaves it as it is, too large for these files to need compacting)
+	and one block walked at a time; returns the lists of keys compact dropped
+	and of merge_counts calls, which fill as the reader runs.
+
+	Groups of 64 keys hold one chromosome and its contigs, and an array of 16
+	keys compacts as soon as one has been counted. Groups of 8192 keys hold
+	three, and an array of 17000 keys first compacts in chr5, when chr4 and
+	its contigs have ended but are not yet a group."""
+
+	dropped, merged = [], []
+	counter, merge = figwig.bam2bw._KeyCounter, figwig.bam2bw.merge_counts
+
+	class Recorder(counter):
+		def compact(self, keys):
+			dropped.append(super().compact(keys))
+			return dropped[-1]
+
+	def recorded(parts):
+		merged.append(len(parts))
+		return merge(parts)
+
+	monkeypatch.setattr(figwig.bam2bw, "_KeyCounter", Recorder)
+	monkeypatch.setattr(figwig.bam2bw, "merge_counts", recorded)
+	monkeypatch.setattr(figwig.bam2bw, "_GROUP_KEYS", group)
+	if initial is not None:
+		monkeypatch.setattr(figwig.bam2bw, "_INITIAL_KEYS", initial)
+	monkeypatch.setattr(figwig.bam2bw, "_BGZF_BATCH", 1)
+	return dropped, merged
+
+
+@pytest.mark.parametrize("kind", ["sorted", "mixed"])
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("group,initial", [(64, 16), (8192, 17000), (64, None)])
+def test_compacted_keys_are_the_five_prime_ends(key_bams, monkeypatch, kind,
+	threads, group, initial):
+	"""Also without compacting: in a mixed file the groups counted before a
+	chromosome came back are kept, and the keys after them counted once."""
+
+	path, reads = key_bams[kind]
+	dropped, merged = compact_often(monkeypatch, group, initial)
+
+	expected = {"+": {chrom: {} for chrom, _ in KEY_CHROMS},
+		"-": {chrom: {} for chrom, _ in KEY_CHROMS}}
+	for chrom, start, length, reverse in reads:
+		strand, end = ("-", start + length - 1) if reverse else ("+", start)
+		expected[strand][chrom][end] = expected[strand][chrom].get(end, 0) + 1
+
+	result = counted(path, key_bams["sizes"], [], threads)
+
+	for strand in "+-":
+		for chrom, _ in KEY_CHROMS:
+			ends = sorted(expected[strand][chrom].items())
+			assert result[strand][chrom] == [[e for e, _ in ends], [c for _, c in ends]]
+
+	assert (sum(dropped) > 0) == (initial is not None)
+	assert len(merged) == (4 if kind == "mixed" else 0)
+
+
+@pytest.mark.parametrize("kind", ["sorted", "mixed"])
+@pytest.mark.parametrize("flags", [["-u", "-f"], ["-3p"], ["-f"],
+	["-ps", "4", "-ns", "-5", "-u"]])
+@pytest.mark.parametrize("threads", [1, 3])
+@pytest.mark.parametrize("group,initial", [(64, 16), (8192, 17000)])
+def test_compacted_keys_count_what_every_key_counts(key_bams, monkeypatch,
+	kind, flags, threads, group, initial):
+	path, sizes = key_bams[kind][0], key_bams["sizes"]
+	expected = counted(path, sizes, flags, threads)
+
+	dropped, _ = compact_often(monkeypatch, group, initial)
+	assert counted(path, sizes, flags, threads) == expected
+	assert sum(dropped) > 0
+
+
 ## Known bugs
 #
 # These describe how the tool should behave. They are skipped rather than
