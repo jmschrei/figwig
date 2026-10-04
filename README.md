@@ -125,7 +125,8 @@ pip install .
 It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
 The `fast` extra adds the `deflate` package, which makes writing several
 times faster, and `figwig bam2bw` needs the `bam2bw` extra, which adds pysam,
-pyfaidx, biopython, tqdm, isal and deflate:
+pyfaidx, biopython, tqdm, isal and deflate. `figwig bam2bw` runs on Linux and
+macOS, since pysam does not support Windows:
 
 ```bash
 pip install ".[fast]"

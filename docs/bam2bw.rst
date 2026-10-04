@@ -6,9 +6,9 @@ into bigWigs of per-base counts. It is `bam2bw
 <https://github.com/jmschrei/bam2bw>`_ 0.5.1 with the same arguments, the same
 output files and the same messages, except that ``-p`` is a number of cores.
 It reads files the way the winner of a speed search over bam2bw's code reads
-them, and writes them with :class:`~figwig.BigWigWriter`. It needs the
-``bam2bw`` extra, which adds pysam, pyfaidx, biopython, tqdm, isal and
-deflate:
+them, and writes them with :class:`~figwig.BigWigWriter`. It runs on Linux
+and macOS, since pysam does not support Windows, and needs the ``bam2bw``
+extra, which adds pysam, pyfaidx, biopython, tqdm, isal and deflate:
 
 .. code-block:: bash
 

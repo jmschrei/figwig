@@ -75,7 +75,8 @@ figwig is not on PyPI yet. Install it from a clone:
 It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
 To write faster with libdeflate, install the ``fast`` extra, which adds the
 ``deflate`` package, and for ``figwig bam2bw``, the ``bam2bw`` extra, which
-adds pysam, pyfaidx, biopython, tqdm, isal and deflate:
+adds pysam, pyfaidx, biopython, tqdm, isal and deflate. ``figwig bam2bw`` runs
+on Linux and macOS, since pysam does not support Windows:
 
 .. code-block:: bash
 

@@ -376,6 +376,14 @@ def test_absent_chromosome_names_are_quoted(dense_bw):
 		BigWigReader(dense_bw[0]).read(['', 'chr1 '], [0, 0], 5)
 
 
+def test_one_numpy_name_is_quoted_as_a_name(dense_bw):
+	"""A single name given as a numpy string, such as one element of an array
+	of names, showed as np.str_('chrUn') in the warning."""
+
+	with pytest.warns(UserWarning, match=r"throughout: 'chrUn'\. Its"):
+		BigWigReader(dense_bw[0]).read(numpy.array(['chrUn'])[0], [0], 5)
+
+
 def test_range_is_checked_before_absent_chromosomes(dense_bw):
 	with warnings.catch_warnings():
 		warnings.simplefilter('error')

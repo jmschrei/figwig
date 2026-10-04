@@ -490,8 +490,10 @@ def _chrom_codes(chroms, n):
 	"""The `chroms` argument, one name per start or one for all n, as the
 	names it holds and the position of each start's name among them."""
 
+	# str(), so that a numpy string, such as one element of an array of
+	# names, is quoted as a name in messages rather than as np.str_('chr1').
 	if isinstance(chroms, str):
-		return [chroms], numpy.zeros(n, dtype=numpy.int64)
+		return [str(chroms)], numpy.zeros(n, dtype=numpy.int64)
 
 	chroms = numpy.asarray(chroms, dtype=str)
 	if chroms.shape != (n,):
