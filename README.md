@@ -5,7 +5,7 @@
 [[docs](https://figwig.readthedocs.io/en/latest/index.html)][[release notes](https://figwig.readthedocs.io/en/latest/whats_new.html)]
 
 A fast, multithreaded reader and writer of bigWig files, into and out of
-numpy.
+numpy. Built on work from Nezar Abdennur and Jack Huey.
 
 Loading training data for a genomics model means reading the signal under tens
 or hundreds of thousands of windows: 1,000 bp around every peak and background
