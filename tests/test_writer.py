@@ -862,6 +862,15 @@ def test_bad_write(tmp_path, call, error, match):
 			call(writer)
 
 
+def test_one_numpy_name_is_quoted_as_a_name(tmp_path):
+	"""A single chromosome given as a numpy string, such as one element of an
+	array of names, showed as np.str_('chr1') in error messages."""
+
+	with figwig.BigWigWriter(tmp_path / 'a.bw', CHROMS) as writer:
+		with pytest.raises(ValueError, match=r"^window 1 on 'chr1', at 4,"):
+			writer.write(numpy.array(['chr1'])[0], [0, 4], [[1] * 5, [2] * 5])
+
+
 @pytest.mark.parametrize('first, second', [
 	(('chr1', [100], [1], [200]), ('chr1', [150], [2], [300])),
 	(('chr1', [100], [[1, 2]], None), ('chr1', [101], [[3]], None)),
