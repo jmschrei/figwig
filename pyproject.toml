@@ -41,12 +41,24 @@ dependencies = [
 fast = [
     "deflate>=0.9",
 ]
+bam2bw = [
+    "pysam>=0.22",
+    "pyfaidx>=0.8",
+    "biopython>=1.73",
+    "tqdm>=4.60",
+    "isal>=1.0",
+    "deflate>=0.9",
+]
 dev = [
     "pytest>=7.0",
     "pybigtools>=0.2.5,<0.3",
     "pyBigWig>=0.3.26; sys_platform != 'win32'",
     "deflate>=0.9",
     "isal>=1.0",
+    "pysam>=0.22; sys_platform != 'win32'",
+    "pyfaidx>=0.8",
+    "biopython>=1.73",
+    "tqdm>=4.60",
     "ruff>=0.4",
     "build>=1.0",
     "twine>=4.0",
@@ -55,6 +67,9 @@ docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",
 ]
+
+[project.scripts]
+figwig = "figwig.__main__:main"
 
 [project.urls]
 Homepage      = "https://github.com/jmschrei/figwig"

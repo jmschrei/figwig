@@ -13,7 +13,9 @@ on numpy and numba; libdeflate, through the optional ``deflate`` package,
 makes writing faster. The README on `GitHub <https://github.com/jmschrei/figwig>`_
 has examples for data loaders and the comparisons with other readers and
 writers, and the API pages describe every value figwig gives, every file it
-refuses and how it lays out the files it writes.
+refuses and how it lays out the files it writes. Its command,
+:doc:`figwig bam2bw <bam2bw>`, turns SAM/BAM files of reads, or BED/tsv files
+of fragments, into bigWigs of per-base counts.
 
 .. code-block:: python
 
@@ -75,6 +77,12 @@ Development install
    :caption: Getting Started
 
    whats_new
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Command line
+
+   bam2bw
 
 .. toctree::
    :maxdepth: 1
