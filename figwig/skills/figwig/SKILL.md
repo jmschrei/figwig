@@ -53,12 +53,12 @@ from figwig import write_bigwig
 
 ## Install
 
-figwig is not on PyPI yet. Install it from a clone of
-<https://github.com/jmschrei/figwig> with `pip install ".[fast]"`. The
-`fast` extra adds libdeflate, which compresses several times faster than
-zlib. `figwig bam2bw` needs the `bam2bw` extra, which adds pysam, pyfaidx,
-biopython, tqdm, isal and deflate, and runs on Linux and macOS only, since
-pysam does not support Windows. Python 3.10 or later.
+`pip install "figwig[fast]"`, or `uv add "figwig[fast]"`. The `fast` extra
+adds libdeflate, which compresses several times faster than zlib.
+`figwig bam2bw` needs the `bam2bw` extra (`pip install "figwig[bam2bw]"`),
+which adds pysam, pyfaidx, biopython, tqdm, isal and deflate, and runs on
+Linux and macOS only, since pysam does not support Windows. Python 3.10 or
+later.
 
 ## Task → reference
 

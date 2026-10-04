@@ -12,7 +12,7 @@ extra, which adds pysam, pyfaidx, biopython, tqdm, isal and deflate:
 
 .. code-block:: bash
 
-    pip install ".[bam2bw]"
+    pip install "figwig[bam2bw]"
 
     figwig bam2bw my.bam -s hg38.chrom.sizes -n test-run -p 2                  # test-run.+.bw, test-run.-.bw
     figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 2  # test-run.bw

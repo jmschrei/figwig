@@ -1,6 +1,6 @@
 # figwig
 
-[![Unit Tests](https://github.com/jmschrei/figwig/actions/workflows/python-package.yml/badge.svg)](https://github.com/jmschrei/figwig/actions/workflows/python-package.yml) [![Documentation Status](https://readthedocs.org/projects/figwig/badge/?version=latest)](https://figwig.readthedocs.io/en/latest/?badge=latest)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/figwig?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=ORANGE&left_text=downloads)](https://pepy.tech/projects/figwig) [![Unit Tests](https://github.com/jmschrei/figwig/actions/workflows/python-package.yml/badge.svg)](https://github.com/jmschrei/figwig/actions/workflows/python-package.yml) [![Documentation Status](https://readthedocs.org/projects/figwig/badge/?version=latest)](https://figwig.readthedocs.io/en/latest/?badge=latest)
 
 [[docs](https://figwig.readthedocs.io/en/latest/index.html)][[release notes](https://figwig.readthedocs.io/en/latest/whats_new.html)]
 
@@ -114,23 +114,28 @@ to 8 or 16, and figwig bam2bw up to about 8.
 
 ## Installation
 
-figwig is not on PyPI yet. Install it from a clone:
+```bash
+pip install figwig
+```
+
+Or, with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/jmschrei/figwig.git
-cd figwig
-pip install .
+uv add figwig
 ```
 
 It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
-The `fast` extra adds the `deflate` package, which makes writing several
-times faster, and `figwig bam2bw` needs the `bam2bw` extra, which adds pysam,
-pyfaidx, biopython, tqdm, isal and deflate. `figwig bam2bw` runs on Linux and
-macOS, since pysam does not support Windows:
+Optional extras:
+
+- `figwig[fast]` adds the `deflate` package, which makes writing several times
+  faster.
+- `figwig[bam2bw]` adds pysam, pyfaidx, biopython, tqdm, isal and deflate,
+  which `figwig bam2bw` needs. `figwig bam2bw` runs on Linux and macOS, since
+  pysam does not support Windows.
 
 ```bash
-pip install ".[fast]"
-pip install ".[bam2bw]"
+pip install "figwig[fast]"
+pip install "figwig[bam2bw]"
 ```
 
 ### Development install
