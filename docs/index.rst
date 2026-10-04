@@ -64,13 +64,15 @@ setup, every comparison, and how the times fall with threads.
 Installation
 ============
 
-figwig is not on PyPI yet. Install it from a clone:
+.. code-block:: bash
+
+    pip install figwig
+
+Or, with `uv <https://docs.astral.sh/uv/>`_:
 
 .. code-block:: bash
 
-    git clone https://github.com/jmschrei/figwig.git
-    cd figwig
-    pip install .
+    uv add figwig
 
 It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
 To write faster with libdeflate, install the ``fast`` extra, which adds the
@@ -80,8 +82,8 @@ on Linux and macOS, since pysam does not support Windows:
 
 .. code-block:: bash
 
-    pip install ".[fast]"
-    pip install ".[bam2bw]"
+    pip install "figwig[fast]"
+    pip install "figwig[bam2bw]"
 
 Development install
 -------------------
