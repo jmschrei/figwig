@@ -10,32 +10,107 @@ numpy.
 Loading training data for a genomics model means reading the signal under tens
 or hundreds of thousands of windows: 1,000 bp around every peak and background
 region of an experiment, say. figwig reads all of them in one call, straight
-into a float32 array, from one bigWig or from several at once, on as many
-threads as you give it.
+into a float32 array, from one bigWig or from several at once, and writes
+bigWigs from the same windows, such as a model's predictions, or from
+intervals. The common readers make one call per window, and each call holds
+Python's GIL, so adding threads does not help them. figwig decompresses and
+compresses with zlib or libdeflate and decodes with numba, all without the
+GIL, so its threads run in parallel.
 
-The common readers make one call per window, and each call holds Python's GIL,
-so adding threads does not help them. figwig decompresses with zlib's own
-`uncompress()` and decodes with numba, both without the GIL, so its threads
-run in parallel. It sorts the windows by position itself, so they can be given
-in any order.
+Its command, `figwig bam2bw`, turns SAM/BAM files of reads, or BED/tsv files
+of fragments, into bigWigs of per-base counts. It is
+[bam2bw](https://github.com/jmschrei/bam2bw) with the same arguments, outputs
+and messages, with faster readers. figwig depends only on numpy and numba.
 
-figwig also writes bigWigs, from the same windows it reads, such as a model's
-predictions for them, or from intervals. It lays the file out the way pyBigWig
-does, and compresses its data blocks on several threads, with zlib or, when
-the optional `deflate` package is installed, with libdeflate, both without the
-GIL. On the two tracks timed below, on 8 threads with libdeflate, it wrote the
-same files 23 and 25 times faster than pyBigWig without zoom levels, and 17
-and 19 times faster with them.
+| | figwig | fastest other tool |
+|---|---|---|
+| Read 167,750 windows of 1,000 bp from an ATAC-seq bigWig | **0.135 s** on 8 threads | 1.25 s, pybigtools |
+| Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
+| Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
+| Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
 
-figwig also has a command, `figwig bam2bw`, which turns SAM/BAM files of
-reads, or BED/tsv files of fragments, into bigWigs of per-base counts. It is
-[bam2bw](https://github.com/jmschrei/bam2bw), with the same arguments, outputs
-and messages, reading files as a speed search over bam2bw left it and writing
-them with figwig.
+Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
+[benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
+the full setup.
 
-figwig depends only on numpy and numba. A file it cannot read with certainty
-raises a `ValueError` that says what it found, rather than being guessed at,
-so that a pipeline can fall back to another reader.
+<details>
+<summary><b>More numbers and plots</b></summary>
+
+#### Reading
+
+167,750 windows of 1,000 bp centred on the fold-0 training peaks and negatives
+of ENCODE ATAC-seq experiment ENCSR123WME, read from the ATAC-seq bigWig
+ENCFF830RWF (238 MB) and the DNase-seq bigWig ENCFF989SAK (645 MB) on tmpfs,
+sorted by position, file opening included; median of three runs. The other
+libraries' 8-thread runs split the windows into 8 chunks on a thread pool.
+Every library returned the same values, once pyBigWig's NaN for bases without
+an interval was set to 0.
+
+| library | ATAC, 1 thread | ATAC, 8 threads | DNase, 1 thread | DNase, 8 threads |
+|---|---|---|---|---|
+| pybigtools 0.2.5, `values()` per window | 1.25 s | 1.42 s | 1.98 s | 2.21 s |
+| pyBigWig 0.3.26, `values()` per window | 3.95 s | 4.08 s | 4.50 s | 4.64 s |
+| pybbi 0.4.2, `stackup` | 9.61 s | 9.48 s | 10.75 s | 10.63 s |
+| figwig 0.1.0 | 0.81 s | **0.135 s** | 1.85 s | **0.277 s** |
+
+#### Writing
+
+The plus-strand 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, as counts at
+15,875,960 single bases, and the fold-change signal ENCFF932UQM, as 21,212,477
+intervals, written from memory onto tmpfs at compression level 6, opening and
+closing included; median of three runs. pybigtools always writes zoom levels.
+
+| writer | counts | counts, zoom levels | signal | signal, zoom levels |
+|---|---|---|---|---|
+| pyBigWig 0.3.26 | 4.20 s | 12.80 s | 7.41 s | 10.48 s |
+| pybigtools 0.2.5 | | 4.45 s | | 5.47 s |
+| figwig, zlib, 1 thread | 4.25 s | 12.09 s | 6.21 s | 8.10 s |
+| figwig, zlib, 8 threads | 0.53 s | 1.63 s | 0.78 s | 1.09 s |
+| figwig, libdeflate, 1 thread | 1.07 s | 4.85 s | 1.80 s | 3.27 s |
+| figwig, libdeflate, 8 threads | **0.18 s** | **0.75 s** | **0.30 s** | **0.55 s** |
+
+figwig's files were the size of pyBigWig's. For the counts, its peak memory
+was above pyBigWig's without zoom levels, 554 MB against 354 MB on one thread,
+and below it with them, 739 MB on 8 threads against 1,089 MB.
+
+#### figwig bam2bw
+
+ENCODE ATAC-seq BAM ENCFF877LRY (2.4 GB) at default flags, and 18.9 million
+scATAC-seq fragments with `-f -u`, from the page cache; figwig's median of
+five runs at `-p 2` and one at `-p 8`, and one run of bam2bw, which reads one
+file in one process whatever `-p` is.
+
+| | BAM | fragments | peak memory, BAM | peak memory, fragments |
+|---|---|---|---|---|
+| bam2bw 0.5.1, `-p 2` | 58.48 s | 28.45 s | 3,039 MB | 2,866 MB |
+| figwig bam2bw, `-p 2` | **4.65 s** | **1.73 s** | 910 MB | 1,061 MB |
+| figwig bam2bw, `-p 8` | **1.82 s** | **1.31 s** | 949 MB | 1,180 MB |
+
+Both also ran on every one of 591 public BAM, SAM, BED and TSV test files that
+bam2bw takes, from 3 records to a 10 GB ATAC-seq BAM, under 5 to 9 sets of
+flags each, timed once, 16 at a time. In all 3,781 runs that bam2bw
+completed, figwig bam2bw gave the same exit code, messages and decoded
+entries. Where bam2bw took a second or more, figwig bam2bw was a median 3.2
+times faster; where bam2bw took under half a second, figwig bam2bw took a
+median 0.12 s longer, mostly importing numba.
+
+![Wall time of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-timings.png)
+
+![Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-memory.png)
+
+The memory runs were made before figwig bam2bw dropped the keys it had
+counted while still reading a BAM. On the 10 GB BAM at `-p 1` its peak is now
+2.9 GB, against bam2bw's 11.6 GB, and 4.9 GB with `-u -f`, against 20.2 GB.
+
+#### Threads
+
+The same reads, writes and conversions at 1 to 32 threads, one run at a time,
+median of three. Reading gained up to 32 threads, writing with libdeflate up
+to 8 or 16, and figwig bam2bw up to about 8.
+
+![Wall time against threads for reading, writing and figwig bam2bw, log scales](docs/figures/thread-scaling.png)
+
+</details>
 
 ## Installation
 
@@ -48,17 +123,12 @@ pip install .
 ```
 
 It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
-To write faster with libdeflate, install the `fast` extra, which adds the
-`deflate` package:
+The `fast` extra adds the `deflate` package, which makes writing several
+times faster, and `figwig bam2bw` needs the `bam2bw` extra, which adds pysam,
+pyfaidx, biopython, tqdm, isal and deflate:
 
 ```bash
 pip install ".[fast]"
-```
-
-`figwig bam2bw` needs the `bam2bw` extra, which adds pysam, pyfaidx,
-biopython, tqdm, isal and deflate:
-
-```bash
 pip install ".[bam2bw]"
 ```
 
@@ -71,7 +141,24 @@ uv sync --extra dev
 uv run pytest
 ```
 
-## Usage
+## Claude Code Skill
+
+figwig ships a [Claude Code](https://claude.com/claude-code) skill that
+teaches a coding agent to use figwig in any project: reading windows,
+writing predictions, intervals and counts, converting reads with
+`figwig bam2bw`, the rules a write follows, what each error means, and how
+much threads gain. Install it into `~/.claude/skills/figwig` with:
+
+```bash
+figwig install-skill
+```
+
+After upgrading figwig, run `figwig install-skill --force` to replace the
+installed copy, which otherwise raises `FileExistsError`. `-d DIRECTORY`
+installs into another skills directory, and `--symlink` links to the copy
+inside the installed package instead of copying it.
+
+## Python API
 
 The examples read two public ENCODE bigWigs: the ATAC-seq signal of HG02943
 (ENCFF830RWF, 238 MB) and the DNase-seq signal of dorsolateral prefrontal
@@ -89,9 +176,6 @@ import numpy
 from figwig import BigWigReader
 
 bw = BigWigReader("ENCFF830RWF.bigWig")
-print(len(bw.chrom_sizes), bw.chrom_sizes["chr1"])
-# 149 248956422
-
 chroms = numpy.array(["chr1", "chr1", "chr2"])
 starts = numpy.array([1_000_000, 2_500_000, 300_000])
 y = bw.read(chroms, starts, width=1000, n_jobs=8)
@@ -101,15 +185,11 @@ print(y.sum(axis=1))
 # [116.  43.  10.]
 ```
 
-Window `j` covers `[starts[j], starts[j] + width)` on `chroms[j]` and is
-written into row `j`, whatever order the windows are given in. `chroms` can
-also be a single name for every window. Both can be lists, numpy arrays or
-pandas Series.
-
-`BigWigReader` reads the file's data index on its first read and keeps it, so
-reading one file many times, as a data loader does, pays for the index once.
-`read` also takes `out=`, a float32 array to fill rather than allocate a new
-one each time.
+Window `j` covers `[starts[j], starts[j] + width)` on `chroms[j]`, 0-based as
+in BED files, and is written into row `j`, whatever order the windows are
+given in. A base that no interval covers is `missing`, 0 unless given, and a
+base past the end of its chromosome is NaN. A `BigWigReader` reads the file's
+index once and keeps it, and can be pickled to DataLoader workers.
 
 #### Reading several bigWigs into one array
 
@@ -123,119 +203,11 @@ y = read_bigwig(["ENCFF830RWF.bigWig", "ENCFF989SAK.bigWig"], chroms, starts,
 	width=1000)
 print(y.shape)
 # (3, 2, 1000)
-print(y.sum(axis=2))
-# [[116. 351.]
-#  [ 43. 240.]
-#  [ 10.  63.]]
 ```
 
 Channel `i` holds the values from the `i`-th file, in the
-`(batch, channels, length)` layout that sequence models take: the plus and
-minus strands of a stranded assay, say, or one track per task. Reading into
-that array directly avoids stacking one array per file, which takes time and
-twice the memory. Every file's work shares one pool of threads. A path is
-opened, and its index read, on every call; to read the same files repeatedly,
-pass `BigWigReader` objects instead, which keep their indexes. With one file,
-`read_bigwig` gives `(n, width)`, as `BigWigReader.read` does.
-
-#### Bases without data
-
-```python
-import numpy
-from figwig import BigWigReader
-
-bw = BigWigReader("ENCFF830RWF.bigWig")
-y = bw.read("chr1", [1_000_000], width=1000, missing=numpy.nan)
-print(numpy.isnan(y).sum(), (y == 0).sum())
-# 907 0
-
-end = bw.chrom_sizes["chr1"]
-print(bw.read("chr1", [end - 3], width=6))
-# [[ 0.  0.  0. nan nan nan]]
-
-y = bw.read(["1", "2"], [1_000_000, 300_000], width=1000)
-# UserWarning: 2 windows are on chromosomes not in ENCFF830RWF.bigWig, and are
-# 0.0 throughout: '1', '2'. Its chromosomes include 'chr1', 'chr10', 'chr11'.
-```
-
-A base that no interval covers is `missing`, 0 unless given. A base past the
-end of its chromosome is NaN. A window on a chromosome the file does not have
-is `missing` throughout, with a warning: writers leave out chromosomes without
-data, and a different naming scheme (`1` against `chr1`) looks the same. See
-[Values and coordinates](#values-and-coordinates).
-
-#### Training with PyTorch
-
-```python
-import numpy
-import torch
-from figwig import BigWigReader
-
-class Windows(torch.utils.data.Dataset):
-	def __init__(self, path, chroms, starts, width, batch_size):
-		self.bw, self.chroms, self.starts = BigWigReader(path), chroms, starts
-		self.width, self.batch_size = width, batch_size
-
-	def __len__(self):
-		return -(-len(self.starts) // self.batch_size)
-
-	def __getitem__(self, i):
-		batch = slice(i * self.batch_size, (i + 1) * self.batch_size)
-		return torch.from_numpy(self.bw.read(self.chroms[batch],
-			self.starts[batch], self.width, n_jobs=1))
-
-if __name__ == '__main__':
-	starts = numpy.arange(1_000_000, 2_000_000, 1000)
-	chroms = numpy.full(len(starts), "chr1")
-	data = Windows("ENCFF830RWF.bigWig", chroms, starts, 1000, batch_size=64)
-	loader = torch.utils.data.DataLoader(data, batch_size=None, num_workers=2,
-		multiprocessing_context="spawn")
-	y = torch.cat(list(loader))
-	print(y.shape, float(y.sum()))
-	# torch.Size([1000, 1000]) 28857.0
-```
-
-Each item is a whole batch, read in one call. A `BigWigReader` can be pickled,
-so it can go to DataLoader workers under any start method. When every window
-fits in memory, reading all of them once is simpler still, and
-`torch.from_numpy` wraps the result without a copy.
-
-#### Binned values
-
-```python
-from figwig import BigWigReader
-
-bw = BigWigReader("ENCFF830RWF.bigWig")
-y = bw.read(["chr1", "chr1", "chr2"], [1_000_000, 2_500_000, 300_000],
-	width=1024)
-binned = y.reshape(len(y), -1, 32).mean(axis=-1)
-print(binned.shape)
-# (3, 32)
-```
-
-figwig reads every base and does not use a file's zoom levels. A mean over
-bins of bases, as above, gives binned targets; use `numpy.nanmean` if windows
-run past the end of a chromosome.
-
-#### Falling back to another reader
-
-```python
-import numpy
-import pybigtools
-from figwig import BigWigReader
-
-def read(path, chroms, starts, width):
-	try:
-		return BigWigReader(path).read(chroms, starts, width)
-	except ValueError:
-		bw = pybigtools.open(path)
-		return numpy.array([bw.values(chrom, start, start + width) for chrom,
-			start in zip(chroms, starts)], dtype=numpy.float32)
-```
-
-figwig's tests compare it against pybigtools' `values()`, bit for bit, which
-makes pybigtools a natural fallback for the files figwig refuses. Where
-intervals overlap, pybigtools sums them.
+`(batch, channels, length)` layout that sequence models take, and every
+file's work shares one pool of threads.
 
 #### Writing windows
 
@@ -255,15 +227,10 @@ print(numpy.array_equal(y, y_hat))
 # True
 ```
 
-`write_bigwig` takes what `read_bigwig` gives: windows on any chromosomes, in
-any order, and their values, of shape `(n, width)` for one file or
-`(n, len(paths), width)` for several, channel `i` going to the `i`-th file.
-That is the layout of a model's predictions for the windows, here for the two
-strands of a stranded assay. Windows must not overlap. A base whose value is
-`missing`, 0.0 unless given, or NaN is left out of the file, so that reading
-with the same `missing` gives the values back, and a window may run past the
-end of its chromosome where its values are NaN, as `read_bigwig` gives them
-there.
+`write_bigwig` takes what `read_bigwig` gives, such as a model's predictions
+for the same windows. A base whose value is `missing`, 0.0 unless given, or
+NaN is left out of the file, so that reading with the same `missing` gives
+the values back.
 
 #### Writing a batch at a time
 
@@ -283,327 +250,47 @@ print(y)
 #  [0.  1.5 1.5 0.  2.5 0. ]]
 ```
 
-`BigWigWriter` writes values as they come, so that a track larger than
-memory, such as a model's predictions over a genome, can be written a batch
-of windows at a time. With `ends`, `write` takes intervals and one value for
-each, here two intervals; single bases, such as per-base counts, are windows
-of width 1. Each call's windows or intervals come after the last call's: on a
-chromosome later in `chrom_sizes`, or on the same one at or after the end of
-the last call's last item. The header, the index and the zoom levels are
-written when the writer is closed, at the end of the `with` block.
+`BigWigWriter` writes intervals (with `ends`), single bases (windows of width
+1) and windows as they come, so a track larger than memory can be written a
+batch at a time. Each call's items come after the last call's, in the order
+of `chrom_sizes`. The header, index and zoom levels are written when the
+writer is closed.
 
-## figwig bam2bw
+The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
+and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides
+cover the rest: values and coordinates, chromosomes a file does not have,
+PyTorch data loaders, binned values, the files figwig refuses and falling back
+to another reader, compression, zoom levels, and files identical to
+pyBigWig's.
+
+## Command line
+
+#### figwig bam2bw
 
 ```bash
-figwig bam2bw my.bam -s hg38.chrom.sizes -n test-run -p 2                  # test-run.+.bw, test-run.-.bw
-figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 2  # test-run.bw
+figwig bam2bw my.bam -s hg38.chrom.sizes -n test-run -p 8                  # test-run.+.bw, test-run.-.bw
+figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 8  # test-run.bw
 ```
 
-`figwig bam2bw` is bam2bw 0.5.1 with the same arguments, the same output
-files and the same messages, except that `-p` is a number of cores rather
-than of processes. By default it counts the 5' end of every mapped
-read at each base, and writes the counts of the two strands to two bigWigs;
-`-u` writes one, `-f` counts both ends of each fragment, `-3p` the 3' ends,
-and `-ps`, `-ns`, `-sf` and `-r` shift and scale the counts. `figwig bam2bw
--h` lists the arguments, and [bam2bw's
-README](https://github.com/jmschrei/bam2bw) has an example of each.
+`figwig bam2bw` is bam2bw 0.5.1 with the same arguments, output files and
+messages, except that `-p` is a number of cores, 1 unless given. By default
+it counts the 5' end of every mapped read at each base, and writes the counts
+of the two strands to two bigWigs; `-u` writes one, `-f` counts both ends of
+each fragment, `-3p` the 3' ends, `-ps`, `-ns`, `-sf` and `-r` shift and scale
+the counts, and `-z` writes zoom levels. A BAM file is inflated by libdeflate
+and walked by a numba kernel on `-p` threads, and a BED/tsv file is scanned
+by a numba kernel; SAM files, `--mate_pairs`, remote files and malformed
+records go through bam2bw's own pysam or line loop, so that their result, or
+their error, is bam2bw's. The bigWigs hold bam2bw's entries but not its bytes,
+since figwig compresses them with libdeflate at level 1. `figwig bam2bw -h`
+lists the arguments, [bam2bw's README](https://github.com/jmschrei/bam2bw)
+has an example of each, and the
+[documentation](https://figwig.readthedocs.io/en/latest/bam2bw.html) says how
+files are read and shared across cores.
 
-It reads files the way the winner of a speed search over bam2bw's code reads
-them. A BAM file's BGZF blocks are inflated by libdeflate on `-p` threads,
-and its records are walked by a numba kernel rather than through pysam's
-objects. The kernel writes one key per counted read end, and the keys are
-counted a group of chromosomes at a time while the file is still being read;
-unlike the search's reader, figwig then drops the keys it has counted, so that
-for a coordinate-sorted BAM the array that holds them is the size of its
-largest chromosome's rather than the whole file's. A BED/tsv file is scanned by
-a numba kernel, on `-p` threads when it is BGZF or not compressed. A file these
-readers would not read exactly as htslib, or bam2bw's own loop over lines,
-would read it is read by bam2bw's pysam or line loop instead, so that its
-result, or its error, is bam2bw's: a SAM file, `--mate_pairs`, a remote file,
-or a malformed record or line.
+#### figwig install-skill
 
-bam2bw reads each file in a process of its own, and gives a file at most one
-core. Here files are read one after another, each on every core `-p` gives:
-three BAMs of 2.4, 1.8 and 0.45 GB took 7.1 s at `-p 3`, against 11.1 s with
-a process per file. Files that are read on one thread whatever `-p` is (SAM,
-`--mate_pairs`, remote files, and gzipped BED/tsv files that are not BGZF)
-are read by a pool of processes instead, one per file up to `-p`, while the
-other files are read on the cores the pool leaves. A negative `-p` counts back
-from the number of CPUs, so that `-1` is all of them, and `-p 0` is an error.
-
-The counts are written by `BigWigWriter` with libdeflate at level 1, so the
-bigWigs hold bam2bw's entries, but not its bytes, and `-z` writes figwig's zoom
-levels rather than pyBigWig's. The entries and messages were checked against
-bam2bw 0.5.1's on the speed search's own cases: the two files timed below,
-four synthetic BAM and SAM files, nine other real invocations covering
-`--mate_pairs`, `-3p`, `-z`, shifts, scaling, three BAMs at once and a FASTA
-as the sizes, and 51 malformed BAMs, each at six settings of `-p`, `-v`, `-f`
-and `-u`.
-
-## Values and coordinates
-
-Coordinates are 0-based and half-open, as in BED files: window `j` covers the
-bases `starts[j]` to `starts[j] + width - 1`. Every value is copied from the
-file's float32, not computed.
-
-| base | value |
-|---|---|
-| covered by an interval | the interval's value |
-| covered by no interval | `missing`, 0.0 unless given |
-| covered by an interval whose value is NaN | `missing` |
-| past the end of its chromosome | NaN |
-| on a chromosome the file does not have | `missing`, with a warning |
-
-The first four rows are what pybigtools' `values(chrom, start, end,
-missing=missing)` gives, cast to float32, and the tests check figwig against
-it bit for bit. pybigtools raises for a chromosome the file does not have.
-pyBigWig's `values()` gives NaN for a base that no interval covers, which
-`missing=numpy.nan` matches, and raises for a window that runs past the end
-of its chromosome or is on a chromosome the file does not have.
-
-## What it reads, and what it refuses
-
-figwig reads bigWig files with bedGraph, varStep or fixedStep sections,
-compressed or not, at base-pair resolution. Everything else raises a
-`ValueError` saying what was found, rather than being guessed at:
-
-- a file that is not a little-endian bigWig, such as a bigBed or a big-endian
-  bigWig;
-- a chromosome tree or data index that is corrupt, or cut short by a
-  truncated file;
-- a data index whose entries are unsorted or span two chromosomes;
-- a window that starts before 0 or ends past 2**32 - 1;
-- a window overlapping a data block that cannot be decompressed, holds a
-  section of another type, or has intervals that are unsorted, overlap each
-  other or those of a neighbouring block, or lie outside the block's index
-  entry. Overlapping intervals give a base two values, and readers disagree
-  on which to report: pybigtools sums them.
-
-A read that raises because a data block cannot be read may already have
-written other windows into `out`. figwig does not read bigWigs over HTTP,
-return binned summaries, or use the zoom levels when it reads.
-
-## What it writes
-
-figwig lays a bigWig out the way libBigWig, the C library inside pyBigWig,
-does: the header, the chromosome tree, data blocks of at most 32,768 bytes
-before compression, the R-tree index over them, and the zoom levels with their
-indexes. Intervals become bedGraph sections, as they are given. Each window,
-or each 65,536 bases of a wider one, becomes whichever section type takes it
-in the fewest bytes before compression, counting each data block's header and
-index entry: fixedStep of span 1 for runs of bases, which start a new block at
-every gap; varStep of span 1 for scattered bases; or bedGraph for stretches of
-one value. A track of 10 million bases, 7% of them covered in stretches of 10
-to 30 bases of one value, took 0.2 MB this way, against 2.0 MB as fixedStep
-alone and 1.1 MB as varStep alone. A file of intervals, or of single bases
-written as windows of width 1, written with `missing=numpy.nan` so that none
-is left out, without zoom levels, and with `engine='zlib'` at level 6, is byte
-for byte the file pyBigWig writes from the same values, and the tests check
-that it is.
-
-Where libBigWig writes a wrong value, figwig writes the right one, so those
-files differ from pyBigWig's there:
-
-- the maximum in the header, which libBigWig misses when the first value is
-  the largest, and leaves at the smallest positive double, about 2.2e-308,
-  when no value is positive;
-- the end of the last data block of each fixedStep call, which libBigWig puts
-  6 bases past its last item;
-- the sum and sum of squares of the last zoom record of each zoom block,
-  which libBigWig leaves at 0. pyBigWig's mean over a whole chromosome, which
-  it takes from the zoom levels, then drifts from the exact one: by 2.2% on
-  one chromosome of a test file.
-
-libBigWig also writes an empty data block where it changes section type,
-which figwig leaves out, and stops making zoom levels at the first level that
-needs as many zoom blocks as the one before it, which can leave a sparse track
-with only its finest level. figwig skips a level that has no fewer records
-than the last one it kept, and goes on to the coarser ones. The levels'
-sizes are libBigWig's: 16 times the mean width of an item, or 10 bases if that
-is more, then 4 times larger at each level, up to the longest chromosome, for
-at most `zooms` levels, 10 by default.
-
-Blocks are compressed with zlib, or with libdeflate when the `deflate`
-package is installed and `engine` is `'auto'`, its default, except on
-Windows, where libdeflate's functions cannot be loaded. Both write zlib
-streams that any bigWig reader can read, and both write the same file
-whatever `n_jobs` is. libdeflate is faster: on the data blocks of the counts
-track below, at level 6 on one thread, it compressed 142 MB/s to zlib's
-32 MB/s, into blocks 0.4% smaller. `engine='isal'` uses ISA-L, faster still
-at levels 1 to 3, but at levels 1 and 2 its output can differ from one run to
-the next on the same input, so its files are not reproducible byte for byte;
-their values are.
-
-Values are laid out in batches of about a million items, which are compressed
-on up to `n_jobs` threads while the calling thread lays out the next batch.
-`write` converts the values of one call a batch at a time as well, so its
-working memory does not grow with the call: on 8 threads without zoom levels,
-writing windows of 25 million and of 100 million float32 values in one call
-took 166 and 173 MB above the values themselves, as tracemalloc counted it.
-The zoom levels are built when the writer is closed, from the data blocks read
-back from the file. The finest level's blocks are written as they are
-compressed. The other levels' are kept compressed in memory until every level
-is built, since whether a level is written depends on how many records it
-has, and so are the finest level's where Python has no `os.pread`, as on
-Windows.
-
-## Threads, memory and the first call
-
-`n_jobs` is the most threads a read uses, 8 by default, and -1 gives one per
-CPU the process may run on. A read is split into batches by the file's data
-blocks, 256 blocks to a batch, and each batch runs on one thread, so a read
-uses more threads only when its windows span more batches. In a DataLoader
-the workers already read in parallel, so each can read its batch on one
-thread, as above.
-
-The output takes `n * width * 4` bytes for one file, times the number of
-files for several. Each thread also holds the decompressed blocks of the
-batch it is reading: 256 blocks and any more that its windows run into, each
-at most the file's `uncompressBufSize`, which is 32 KB in ENCODE's files.
-
-The first read in a new environment compiles figwig's numba kernels, which
-took 0.7 s on the machine below. numba caches them on disk, next to the
-installed package, or in the user's cache directory when the package
-directory cannot be written, and later processes load them in well under a
-second. One `BigWigReader` can be read from several threads at once, and holds
-no open file between reads.
-
-figwig needs a little-endian machine, which every common one is, and Python
-3.10 to 3.14. Its tests run on Linux under each of those versions, and on
-macOS and Windows under 3.10 and 3.13. On Windows, Python has no `os.pread`,
-so blocks are read by seeking the file under a lock. Where zlib's library
-cannot be loaded, as on Windows, blocks are decompressed and compressed by
-Python's zlib module instead, with the same values. libdeflate's functions
-cannot be loaded from the `deflate` package on Windows either, so there
-`engine='auto'` is zlib and `engine='libdeflate'` raises a `ValueError`.
-pyBigWig, which the writer's tests compare files with byte for byte, does not
-build on Windows, so those comparisons run on Linux and macOS.
-
-## Speed
-
-The test read 167,750 windows of 1,000 bp, centred on the fold-0 training
-peaks and negatives of ENCODE ATAC-seq experiment ENCSR123WME, from the two
-bigWigs above, held on tmpfs. Of the 167.75 million bases, 11.9 million are
-nonzero in the ATAC file and 19.0 million in the DNase file.
-
-Each configuration ran in its own process, three times, and the table gives
-the median. To give the other libraries more threads, the windows were split
-into 8 chunks read on a thread pool, each chunk with its own file handle.
-The table gives every library the windows sorted by position, which helps
-the others' caching. figwig sorts them itself: given unsorted, it took
-0.144 s and 0.292 s on 8 threads.
-
-The machine was 2x AMD EPYC 9575F, with Python 3.13.5, numpy 2.5.3 and numba
-0.68. Every library returned the same values on every window, once pyBigWig's
-NaN for bases without an interval was set to 0. `benchmarks/compare_readers.py`
-runs the comparison on any bigWigs and BED files.
-
-| library | ATAC, 1 thread | ATAC, 8 threads | DNase, 1 thread | DNase, 8 threads |
-|---|---|---|---|---|
-| pybigtools 0.2.5, `values()` per window | 1.25 s | 1.42 s | 1.98 s | 2.21 s |
-| pyBigWig 0.3.26, `values()` per window | 3.95 s | 4.08 s | 4.50 s | 4.64 s |
-| pybbi 0.4.2, `stackup` | 9.61 s | 9.48 s | 10.75 s | 10.63 s |
-| figwig 0.1.0 | 0.81 s | **0.135 s** | 1.85 s | **0.277 s** |
-
-On one thread figwig took 0.81 s to pybigtools' 1.25 s on the ATAC file, and
-1.85 s to 1.98 s on the denser DNase file. Its advantage is that its threads
-run in parallel.
-
-### Writing
-
-The writers wrote the values of two tracks again, held in memory as numpy
-arrays: the 5' ends of the reads of ENCODE ATAC-seq BAM ENCFF877LRY on the
-plus strand, as counts at 15,875,960 single bases, and the fold-change signal
-of ENCODE snATAC-seq pseudobulk ENCSR206UWN, ENCFF932UQM, as 21,212,477
-intervals. figwig wrote one `BigWigWriter.write` per chromosome, single bases
-as windows of width 1, pyBigWig one `addEntries` per chromosome, and
-pybigtools one `write()` from an iterator of tuples. Every
-write, opening the file and closing it included, ran in its own process
-after a warm-up write of the first 1,000 values of each chromosome, three
-times, onto tmpfs, and the table gives the median, at compression level 6. pybigtools 0.2.5's `write()` takes no option for zoom levels and writes
-them, so it was timed with them only.
-
-The machine, Python and numpy were those above, with pyBigWig 0.3.26,
-pybigtools 0.2.5 and deflate 0.9.0. Every writer's file gave the same values
-on 2,000 windows of 1,000 bases read back with figwig.
-`benchmarks/compare_writers.py` runs the comparison on any bigWigs.
-
-| writer | counts | counts, zoom levels | signal | signal, zoom levels |
-|---|---|---|---|---|
-| pyBigWig 0.3.26 | 4.20 s | 12.80 s | 7.41 s | 10.48 s |
-| pybigtools 0.2.5 | | 4.45 s | | 5.47 s |
-| figwig, zlib, 1 thread | 4.25 s | 12.09 s | 6.21 s | 8.10 s |
-| figwig, zlib, 8 threads | 0.53 s | 1.63 s | 0.78 s | 1.09 s |
-| figwig, libdeflate, 1 thread | 1.07 s | 4.85 s | 1.80 s | 3.27 s |
-| figwig, libdeflate, 8 threads | **0.18 s** | **0.75 s** | **0.30 s** | **0.55 s** |
-
-figwig's files were the size of pyBigWig's: 35.7 and 107.1 MB without zoom
-levels, against 35.8 and 108.0 MB, and 214.0 and 126.5 MB with them, against
-213.9 and 127.4 MB. pybigtools chooses its zoom levels differently, and wrote
-96.4 and 162.2 MB. With zoom levels most of figwig's time is spent building
-them. Its peak memory was above pyBigWig's without zoom levels, 554 MB against
-354 MB for the counts on one thread, of which the arrays of values held 318
-MB, and below it with them, 739 MB on 8 threads against 1,089 MB.
-
-### figwig bam2bw
-
-`figwig bam2bw` and bam2bw 0.5.1 converted the reads of ENCODE ATAC-seq BAM
-ENCFF877LRY (2.4 GB) with default flags, to two stranded bigWigs, and the
-18.9 million scATAC-seq fragments of `Alpha_unt.fragments.tsv.gz` with `-f
--u`, to one bigWig. Each call ran in its own process after a warm-up call on
-a tiny input and with the input in the page cache, with
-`OPENBLAS_NUM_THREADS` set to `-p`, and its peak memory is that of the
-process and its children, sampled every 50 ms. The table gives figwig's
-median of five runs at `-p 2` and one run at `-p 8`, and one run of bam2bw,
-which reads one file in one process whatever `-p` is. The machine, Python and
-numpy were those above, with numba 0.68 and pysam 0.24.1, on a disk rather
-than tmpfs.
-
-| | BAM | fragments | peak memory, BAM | peak memory, fragments | bigWigs, both calls |
-|---|---|---|---|---|---|
-| bam2bw 0.5.1, `-p 2` | 58.48 s | 28.45 s | 3,039 MB | 2,866 MB | 135.5 MB |
-| figwig bam2bw, `-p 2` | **4.65 s** | **1.73 s** | 910 MB | 1,061 MB | 139.8 MB |
-| figwig bam2bw, `-p 8` | **1.82 s** | **1.31 s** | 949 MB | 1,180 MB | 139.8 MB |
-
-figwig's bigWigs are 3% larger because they are compressed at level 1
-rather than pyBigWig's level 6. The first call in a new environment also
-compiles figwig's kernels, which took 1.1 s on the tiny input.
-
-Both also ran on every file of a collection of public test data that bam2bw
-takes: 591 BAM, SAM, BED and TSV files from 28 assay directories, from 3
-records to a 10 GB ATAC-seq BAM, each under 5 to 9 sets of flags. Each run was
-timed once, 16 at a time on the machine above, interpreter start-up included.
-In all 3,781 runs that bam2bw completed, figwig bam2bw gave the same exit
-code, messages and decoded bigWig entries.
-
-![Wall time of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-timings.png)
-
-In the 155 runs where bam2bw took a second or more, figwig bam2bw was a median
-3.2 times faster, and 7 times faster on the 10 GB BAM at `-p 1` (40 s against
-282 s), or 27 times at `-p 4`. In the 3,511 runs that bam2bw finished in under
-half a second, it took a median 0.12 s longer, most of it importing numba and
-loading its compiled kernels. With `--mate_pairs` (hollow points) both read
-with pysam's loop and take the same time. The points well above the line are
-TSV files that are not coordinates, such as quantification tables and 10x
-feature lists, whose every line names a different sequence that is not in the
-sizes file: the fast reader returns to Python for each new name, where
-bam2bw's loop skips the line.
-
-The runs were repeated with their memory measured: the peak is the larger of
-the whole process tree's resident set, sampled every 20 ms, and the largest
-single process's exact peak (GNU time's maximum resident set size); the mean
-is the process tree's resident set averaged over the run.
-
-![Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-memory.png)
-
-Where bam2bw's peak was under 250 MB, figwig bam2bw's start-up held about 55
-MB more, numba and its compiled kernels: a median of 98 MB against 43 MB. On
-the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB against
-20.2 GB with `-u -f`; with `--mate_pairs`, read by pysam's loop in both, the
-two were the same (6.6 and 6.7 GB). These runs were made before figwig bam2bw
-dropped the keys it had counted while still reading a BAM, which lowers its
-peak on BAM files: on the 10 GB BAM at `-p 1`, run one at a time, it is now 2.9
-GB, and 4.9 GB with `-u -f`, in the same time.
+Installs the Claude Code skill; see [above](#claude-code-skill).
 
 ## Origin
 

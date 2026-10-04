@@ -19,9 +19,13 @@ deflate:
 
 By default it counts the 5' end of every mapped read at each base, and writes
 the counts of the two strands to two bigWigs, ``<name>.+.bw`` and
-``<name>.-.bw``. Several input files are pooled. Reads on chromosomes that
+``<name>.-.bw``. A BED/tsv file is read as a chromosome, a start and an end,
+with no strand, so its counts all go to ``<name>.+.bw`` unless ``-u`` is
+given. Several input files are pooled. Reads on chromosomes that
 the sizes file does not list are left out, and counts that fall outside a
-chromosome, after a shift, are left out and reported.
+chromosome, after a shift, are left out and reported. No zoom levels are
+written unless ``-z`` is given, so a bigWig meant for a genome browser needs
+``-z 10``, say.
 
 .. code-block:: text
 
@@ -100,43 +104,15 @@ all of them, and ``-p 0`` is an error.
 Speed
 -----
 
-On every file of a collection of public test data that bam2bw takes (591 BAM,
-SAM, BED and TSV files from 28 assay directories, from 3 records to a 10 GB
-ATAC-seq BAM, each under 5 to 9 sets of flags), ``figwig bam2bw`` gave the same
-exit code, messages and decoded bigWig entries as bam2bw 0.5.1 in all 3,781
-runs that bam2bw completed. Each run was timed once, 16 at a time,
-interpreter start-up included:
-
-.. image:: figures/bam2bw-timings.png
-   :alt: Wall time of figwig bam2bw against bam2bw 0.5.1, log scales
-   :width: 600px
-
-Where bam2bw took a second or more, figwig bam2bw was a median 3.2 times
-faster, and 7 times faster on the 10 GB BAM at ``-p 1``, or 27 times at
-``-p 4``. Where bam2bw took under half a second, figwig bam2bw took a median
-0.12 s longer, most of it importing numba and loading its compiled kernels.
-With ``--mate_pairs`` (hollow points) both read with pysam's loop. The points
-well above the line are TSV files that are not coordinates, whose every line
-names a different sequence that is not in the sizes file: the fast reader
-returns to Python for each new name, where bam2bw's loop skips the line.
-
-The runs were repeated with their memory measured: the peak is the larger of
-the whole process tree's resident set, sampled every 20 ms, and the largest
-single process's exact peak; the mean is the process tree's resident set
-averaged over the run.
-
-.. image:: figures/bam2bw-memory.png
-   :alt: Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales
-   :width: 750px
-
-Where bam2bw's peak was under 250 MB, ``figwig bam2bw``'s start-up held about
-55 MB more, numba and its compiled kernels: a median of 98 MB against 43 MB.
-On the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB
-against 20.2 GB with ``-u -f``; with ``--mate_pairs`` the two were the same.
-These runs were made before ``figwig bam2bw`` dropped the keys it had counted
-while still reading a BAM, which lowers its peak on BAM files: on the 10 GB BAM
-at ``-p 1``, run one at a time, it is now 2.9 GB, and 4.9 GB with ``-u -f``,
-in the same time.
+On a 2.4 GB ATAC-seq BAM, ``figwig bam2bw`` took 4.65 s at ``-p 2``, against
+bam2bw 0.5.1's 58.48 s, and held 910 MB at its peak, against 3,039 MB.
+``-p`` is 1 unless given; on that BAM the time fell to 1.74 s at ``-p 8``, and
+no further at ``-p 16`` or ``-p 32``. On a collection of 591 public test
+files, in the runs where bam2bw took a second or more, ``figwig bam2bw`` was a
+median 3.2 times faster, and it gave the same exit code, messages and decoded
+entries in all 3,781 runs that bam2bw completed. :doc:`benchmarks` has the
+setup, the plots of every run and the memory, and :doc:`threads` how ``-p`` is
+used.
 
 How it writes
 -------------
