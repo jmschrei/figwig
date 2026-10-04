@@ -2001,6 +2001,68 @@ def test_write_counts_in_batches(tmp_path, monkeypatch, batch):
 		assert values[chrom] == dict(zip(positions.tolist(), expected))
 
 
+# The BAM reader's inflate kernel, called on 8 threads at once in a process
+# whose threads share one malloc arena (MALLOC_ARENA_MAX=1 on glibc; macOS's
+# allocator shares freed memory between threads without it), so that memory a
+# call has freed while still using it would soon be handed to another call.
+# Prints how many calls gave something other than zlib's output.
+INFLATE_ON_THREADS = """
+import sys, zlib, threading
+import numpy
+import figwig.bam2bw as b
+
+data = numpy.fromfile(sys.argv[1], dtype="uint8")
+n = len(data) // 26 + 1
+offsets, sizes, lengths = (numpy.empty(n, dtype="int64") for _ in range(3))
+scanned = numpy.zeros(3, dtype="int64")
+b._bgzf_kernel()(data, len(data), offsets, sizes, lengths, scanned)
+n = int(scanned[0])
+truth = [zlib.decompress(bytes(data[o:o + s]), 31)
+	for o, s in zip(offsets[:n].tolist(), sizes[:n].tolist())]
+
+kernel = b._inflate_kernel()
+assert kernel is not None
+wrong = []
+
+def work(seed):
+	out = numpy.empty(b._BGZF_SPARE + 8 * (1 << 16), dtype="uint8")
+	rng = numpy.random.default_rng(seed)
+	for _ in range(50):
+		i = int(rng.integers(0, n - 8))
+		end = kernel(data, offsets[i:i + 8], sizes[i:i + 8], lengths[i:i + 8],
+			out, b._BGZF_SPARE)
+		if end < 0 or bytes(out[b._BGZF_SPARE:end]) != b"".join(truth[i:i + 8]):
+			wrong.append(i)
+
+threads = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+for thread in threads:
+	thread.start()
+for thread in threads:
+	thread.join()
+print(n, len(wrong))
+"""
+
+
+def test_inflate_kernel_on_threads_sharing_memory(data_dir):
+	"""The kernel inflates into memory it holds for the whole call: 400 calls
+	on 8 threads give zlib's output. A scratch buffer whose pointer outlived
+	it (numba frees an array after its last use) failed most of them here."""
+
+	rng = numpy.random.default_rng(0)
+	starts = numpy.sort(rng.integers(0, 990000, 40000)).tolist()
+	reads = [("chr1", start, 50, bool(reverse)) for start, reverse in
+		zip(starts, rng.integers(0, 2, 40000).tolist())]
+	path = write_bam(data_dir / "many-blocks.bam", [("chr1", 1000000)], reads)
+
+	process = subprocess.run([sys.executable, "-c", INFLATE_ON_THREADS, str(path)],
+		capture_output=True, text=True, env=dict(ENV, MALLOC_ARENA_MAX="1"))
+
+	assert process.returncode == 0, process.stderr
+	n_blocks, n_wrong = map(int, process.stdout.split())
+	assert n_blocks > 50
+	assert n_wrong == 0
+
+
 ## Which files are read where
 #
 # Files the fast readers take are read one after another in the main process,

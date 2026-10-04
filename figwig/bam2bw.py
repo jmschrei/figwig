@@ -737,6 +737,9 @@ def _inflate_bgzf_blocks(data, offsets, sizes, lengths, out, start):
 	also registers the libdeflate functions it calls.
 	"""
 
+	# numba frees an array after its last use, so the address of `scratch` is
+	# taken in each call that uses it: one taken once before the loop would
+	# point to memory already freed, which another thread may be given.
 	decompressor = _libdeflate_alloc_decompressor()
 	if decompressor == 0:
 		return numpy.int64(-1)
@@ -745,7 +748,6 @@ def _inflate_bgzf_blocks(data, offsets, sizes, lengths, out, start):
 	used_in = used.ctypes.data
 	used_out = used_in + 8
 	scratch = numpy.empty(1 << 16, dtype=numpy.uint8)
-	tmp = scratch.ctypes.data
 	src = data.ctypes.data
 	dst = out.ctypes.data
 	n_data = numpy.uint64(len(data))
@@ -762,11 +764,11 @@ def _inflate_bgzf_blocks(data, offsets, sizes, lengths, out, start):
 			break
 
 		result = _libdeflate_gzip_decompress_ex(decompressor, src + at, size,
-			tmp, length, used_in, used_out)
+			scratch.ctypes.data, length, used_in, used_out)
 		if result != 0 or used[0] != size or used[1] != length:
 			good = False
 			break
-		_memcpy(dst + at_out, tmp, length)
+		_memcpy(dst + at_out, scratch.ctypes.data, length)
 		at_out += length
 
 	_libdeflate_free_decompressor(decompressor)
