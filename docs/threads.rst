@@ -72,10 +72,15 @@ inflated by libdeflate on ``-p`` threads, and its records walked by a numba
 kernel, and a BED/tsv file that is BGZF or not compressed is scanned on
 ``-p`` threads. On a 2.4 GB ATAC-seq BAM, ``figwig bam2bw`` took 9.35 s at
 ``-p 1``, 1.74 s at ``-p 8``, and no less at ``-p 16`` or ``-p 32``. Peak
-memory grew a little with ``-p``, from 831 MB to 1,032 MB. Files read by
-pysam's or bam2bw's own loop (SAM files, ``--mate_pairs``, remote files and
-gzipped BED/tsv files that are not BGZF) take one core each, whatever ``-p``
-is; :doc:`bam2bw` says how files are shared out.
+memory grew a little with ``-p``, from 831 MB to 1,032 MB. Some files take
+one core each, whatever ``-p`` is: SAM files, ``--mate_pairs`` and remote
+files, which pysam's loop reads, and gzipped BED/tsv files that are not BGZF,
+which must be inflated in order before the numba kernel scans them.
+:doc:`bam2bw` says how files are shared out. For many files, several
+processes at a low ``-p`` use the cores better than one at a time at a high
+``-p``, and each should run with ``OPENBLAS_NUM_THREADS=1``: numpy's OpenBLAS
+otherwise starts a thread per CPU when it is imported, which costs several
+CPU-seconds per process on a many-core machine.
 
 Memory of a read
 ----------------

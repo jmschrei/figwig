@@ -30,7 +30,8 @@ chromosomes, in any order, and their values, of shape ``(n, width)`` for one
 file or ``(n, len(paths), width)`` for several, channel ``i`` going to the
 ``i``-th file. That is the layout of a model's predictions for the windows,
 here for the two strands of a stranded assay. A list of one path still takes
-values of shape ``(n, 1, width)``. Windows must not overlap.
+values of shape ``(n, 1, width)``. Windows must not overlap, counting their
+full width even where their values are ``missing`` or NaN.
 ``chrom_sizes`` is a dict of chromosome lengths, or a list of ``(name,
 length)`` pairs; ``BigWigReader(path).chrom_sizes`` copies a file's.
 
@@ -104,10 +105,10 @@ order. Each call's items come after the last call's: on a chromosome later in
 ``chrom_sizes``, or on the same one at or after the end of the last call's
 last item. A chromosome may be written over many calls.
 
-The order of ``chrom_sizes`` is the order the calls must follow. A
-``BigWigReader``'s ``chrom_sizes`` is usually sorted by name (``chr1``,
+The order of ``chrom_sizes`` is the order the calls must follow. The
+``chrom_sizes`` of an ENCODE or UCSC file is sorted by name (``chr1``,
 ``chr10``, ..., ``chr19``, ``chr2``), so writing ``chr1``, ``chr2``, ... in
-one call each raises at ``chr10``. Loop over ``writer.chrom_sizes``, or build
+one call each, with those sizes, raises at ``chr10``. Loop over ``writer.chrom_sizes``, or build
 ``chrom_sizes`` in the order the values come in.
 
 A call that raises writes nothing, and the writer can still be used. The
