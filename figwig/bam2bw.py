@@ -2301,10 +2301,9 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 
 # The readers above inflate and scan a BAM, BGZF or plain text file on as many
 # threads as they are given, so files like these are read one after another
-# in this process, each on every core -p gives. That took 5.1 s for three BAMs
-# of 2.4, 1.8 and 0.45 GB at -p 3, where reading each in a process of its own
-# on one core took 8.9 s, since the largest file then set the time and each
-# result was pickled back. Files that are read on one thread whatever it is
+# in this process, each on every core -p gives, rather than each in a process
+# of its own on one core, where the largest file sets the time and each result
+# is pickled back. Files that are read on one thread whatever it is
 # given -- SAM, --mate_pairs or a file that is not local, read by pysam's
 # loop, and a gzipped BED/tsv file that is not BGZF, whose members cannot be
 # found without inflating them -- are read by a pool of processes instead,
