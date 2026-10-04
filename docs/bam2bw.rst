@@ -75,9 +75,12 @@ How it reads
 A BAM file's BGZF blocks are inflated by libdeflate on the ``-p`` threads, and
 its records are walked by a numba kernel rather than through pysam's objects;
 the kernel writes one integer key per counted position, and sorting the keys
-and counting the runs of equal keys gives each chromosome's counts. A BED/tsv
-file is scanned by a numba kernel, on the ``-p`` threads when it is BGZF or not
-compressed.
+and counting the runs of equal keys gives each chromosome's counts. The keys
+are counted a group of chromosomes at a time while the file is still being
+read, and dropped once counted, so that for a coordinate-sorted BAM the array
+that holds them is the size of its largest chromosome's rather than the whole
+file's. A BED/tsv file is scanned by a numba kernel, on the ``-p`` threads when
+it is BGZF or not compressed.
 
 A file these readers would not read exactly as htslib, or bam2bw's own loop
 over lines, would read it is read by bam2bw's pysam or line loop instead, so
@@ -130,6 +133,10 @@ Where bam2bw's peak was under 250 MB, ``figwig bam2bw``'s start-up held about
 55 MB more, numba and its compiled kernels: a median of 98 MB against 43 MB.
 On the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB
 against 20.2 GB with ``-u -f``; with ``--mate_pairs`` the two were the same.
+These runs were made before ``figwig bam2bw`` dropped the keys it had counted
+while still reading a BAM, which lowers its peak on BAM files: on the 10 GB BAM
+at ``-p 1``, run one at a time, it is now 2.9 GB, and 4.9 GB with ``-u -f``,
+in the same time.
 
 How it writes
 -------------

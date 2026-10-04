@@ -311,11 +311,16 @@ README](https://github.com/jmschrei/bam2bw) has an example of each.
 It reads files the way the winner of a speed search over bam2bw's code reads
 them. A BAM file's BGZF blocks are inflated by libdeflate on `-p` threads,
 and its records are walked by a numba kernel rather than through pysam's
-objects. A BED/tsv file is scanned by a numba kernel, on `-p` threads when it
-is BGZF or not compressed. A file these readers would not read exactly as
-htslib, or bam2bw's own loop over lines, would read it is read by bam2bw's
-pysam or line loop instead, so that its result, or its error, is bam2bw's: a
-SAM file, `--mate_pairs`, a remote file, or a malformed record or line.
+objects. The kernel writes one key per counted read end, and the keys are
+counted a group of chromosomes at a time while the file is still being read;
+unlike the search's reader, figwig then drops the keys it has counted, so that
+for a coordinate-sorted BAM the array that holds them is the size of its
+largest chromosome's rather than the whole file's. A BED/tsv file is scanned by
+a numba kernel, on `-p` threads when it is BGZF or not compressed. A file these
+readers would not read exactly as htslib, or bam2bw's own loop over lines,
+would read it is read by bam2bw's pysam or line loop instead, so that its
+result, or its error, is bam2bw's: a SAM file, `--mate_pairs`, a remote file,
+or a malformed record or line.
 
 bam2bw reads each file in a process of its own, and gives a file at most one
 core. Here files are read one after another, each on every core `-p` gives:
@@ -557,8 +562,8 @@ than tmpfs.
 | | BAM | fragments | peak memory, BAM | peak memory, fragments | bigWigs, both calls |
 |---|---|---|---|---|---|
 | bam2bw 0.5.1, `-p 2` | 58.48 s | 28.45 s | 3,039 MB | 2,866 MB | 135.5 MB |
-| figwig bam2bw, `-p 2` | **4.60 s** | **1.71 s** | 1,039 MB | 1,099 MB | 139.8 MB |
-| figwig bam2bw, `-p 8` | **1.70 s** | **1.21 s** | 1,162 MB | 1,152 MB | 139.8 MB |
+| figwig bam2bw, `-p 2` | **4.65 s** | **1.73 s** | 910 MB | 1,061 MB | 139.8 MB |
+| figwig bam2bw, `-p 8` | **1.82 s** | **1.31 s** | 949 MB | 1,180 MB | 139.8 MB |
 
 figwig's bigWigs are 3% larger because they are compressed at level 1
 rather than pyBigWig's level 6. The first call in a new environment also
@@ -595,7 +600,10 @@ Where bam2bw's peak was under 250 MB, figwig bam2bw's start-up held about 55
 MB more, numba and its compiled kernels: a median of 98 MB against 43 MB. On
 the 10 GB BAM its peak was 4.3 GB against bam2bw's 11.6 GB, and 7.5 GB against
 20.2 GB with `-u -f`; with `--mate_pairs`, read by pysam's loop in both, the
-two were the same (6.6 and 6.7 GB).
+two were the same (6.6 and 6.7 GB). These runs were made before figwig bam2bw
+dropped the keys it had counted while still reading a BAM, which lowers its
+peak on BAM files: on the 10 GB BAM at `-p 1`, run one at a time, it is now 2.9
+GB, and 4.9 GB with `-u -f`, in the same time.
 
 ## Origin
 
