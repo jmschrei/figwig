@@ -23,9 +23,18 @@ the counts of the two strands to two bigWigs, ``<name>.+.bw`` and
 with no strand, so its counts all go to ``<name>.+.bw`` unless ``-u`` is
 given. Several input files are pooled. Reads on chromosomes that
 the sizes file does not list are left out, and counts that fall outside a
-chromosome, after a shift, are left out and reported. No zoom levels are
-written unless ``-z`` is given, so a bigWig meant for a genome browser needs
-``-z 10``, say.
+chromosome, after a shift, are left out and reported. Every mapped record
+counts, including duplicates, secondary and supplementary alignments and QC
+failures, at any mapping quality, so a BAM should be filtered first if they
+should not (``samtools view -b -F 0xF04 -q 30``, say). ``-ps`` is added to
+each read's or interval's start and ``-ns`` to its end, so when 5' ends are
+counted they shift the plus and minus strands; ATAC-seq's Tn5 correction is
+usually ``-ps 4 -ns -5``.
+
+No zoom levels are written unless ``-z`` is given, so a bigWig meant for a
+genome browser needs ``-z 10``, say. They cost space on sparse count tracks:
+on the per-base counts of 401,000 ATAC-seq fragments, ``-z 10`` made the
+bigWig 10 times larger, 20.4 MB against 2.0 MB.
 
 .. code-block:: text
 

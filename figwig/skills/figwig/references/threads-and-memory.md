@@ -7,11 +7,13 @@ on the target machine before promising one (last section).
 
 ## Reading
 
-`n_jobs` is the most threads one read uses: 8 by default, and -1 for every
-CPU the process may run on. A read sorts its windows, finds the data blocks
+`n_jobs` is the most threads one read uses, counting every thread that does
+work while the calling thread waits: 8 by default, and -1 for every CPU the
+process may run on. A read sorts its windows, finds the data blocks
 they overlap, and splits those blocks into batches of 256, one batch per
 thread. A read whose windows touch few blocks gets few threads, whatever
-`n_jobs` is.
+`n_jobs` is: it starts at most one thread per batch, and runs a single batch
+on the calling thread, so a large `n_jobs` costs nothing on a small read.
 
 One reader, opened and warmed up once, reading random 1,000 bp windows from a
 238 MB ATAC-seq bigWig:
@@ -30,6 +32,12 @@ fastest of the other readers, took 1.25 s on 1 thread and was no faster on 8.
 
 - Batches of a thousand windows or fewer gain little from threads. In
   DataLoader workers pass `n_jobs=1` and get parallelism from `num_workers`.
+- The cost per window falls as a read takes more windows: 35 µs per window
+  for 100 windows and 7.6 µs for 100,000 on one thread, 0.74 µs for 100,000
+  on 32. A training loop reading 128 random peak windows per call took
+  4.1 ms per call with a reused reader (32 µs per window), and 5.2 ms given a
+  path, which re-reads the index. When the windows fit in memory, read them
+  all in one call and index the array each step.
 - To read every window once, use `n_jobs` from 8 to 32.
 
 ## Writing
@@ -87,7 +95,10 @@ median 0.12 s longer, mostly importing numba.
 
 Threads multiply across processes: 8 DataLoader workers at the default
 `n_jobs=8` start 64 threads. Keep processes times `n_jobs` within the free
-cores. On a shared machine, check the load first.
+cores. On a shared machine, check the load first. numpy's OpenBLAS starts a
+thread per CPU when it is imported; set `OPENBLAS_NUM_THREADS=1` for many
+short processes, such as one `figwig bam2bw` per file, which do no linear
+algebra.
 
 ## Measuring on the target machine
 

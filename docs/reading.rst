@@ -48,8 +48,9 @@ the longest width and masked, or with one call per width.
 opened, and its data index on its first read, and keeps the index, so reading
 one file many times, as a data loader does, pays for the index once.
 ``chrom_sizes`` holds the length of each chromosome, in the order of the
-file's chromosome tree, which is usually sorted by name (``chr1``,
-``chr10``, ``chr11``, ...). One ``BigWigReader`` can be read from several
+file's chromosome tree: sorted by name (``chr1``, ``chr10``, ``chr11``,
+...) in ENCODE's and UCSC's files, and in the order they were given to the
+writer in figwig's and pyBigWig's. One ``BigWigReader`` can be read from several
 threads at once, and holds no open file between reads.
 
 Reading several bigWigs into one array
@@ -195,34 +196,43 @@ Training with PyTorch
     from figwig import BigWigReader
 
     class Windows(torch.utils.data.Dataset):
-        def __init__(self, path, chroms, starts, width, batch_size):
+        def __init__(self, path, chroms, starts, width):
             self.bw, self.chroms, self.starts = BigWigReader(path), chroms, starts
-            self.width, self.batch_size = width, batch_size
+            self.width = width
+            self.bw.read(chroms[:1], starts[:1], width)   # reads the index once
 
         def __len__(self):
-            return -(-len(self.starts) // self.batch_size)
+            return len(self.starts)
 
-        def __getitem__(self, i):
-            batch = slice(i * self.batch_size, (i + 1) * self.batch_size)
-            return torch.from_numpy(self.bw.read(self.chroms[batch],
-                self.starts[batch], self.width, n_jobs=1))
+        def __getitem__(self, idx):                        # a batch of indices
+            return torch.from_numpy(self.bw.read(self.chroms[idx], self.starts[idx],
+                self.width, n_jobs=1))
 
     if __name__ == '__main__':
         starts = numpy.arange(1_000_000, 2_000_000, 1000)
         chroms = numpy.full(len(starts), "chr1")
-        data = Windows("ENCFF830RWF.bigWig", chroms, starts, 1000, batch_size=64)
-        loader = torch.utils.data.DataLoader(data, batch_size=None, num_workers=2,
-            multiprocessing_context="spawn")
+        data = Windows("ENCFF830RWF.bigWig", chroms, starts, 1000)
+        batches = torch.utils.data.BatchSampler(torch.utils.data.RandomSampler(data),
+            batch_size=64, drop_last=False)
+        loader = torch.utils.data.DataLoader(data, sampler=batches, batch_size=None,
+            num_workers=2, persistent_workers=True, multiprocessing_context="spawn")
         y = torch.cat(list(loader))
         print(y.shape, float(y.sum()))
         # torch.Size([1000, 1000]) 28857.0
 
-Each item is a whole batch, read in one call. A ``BigWigReader`` can be
+Each item is a whole batch, read in one call: the ``BatchSampler`` hands
+``__getitem__`` a new mix of indices each epoch. A ``BigWigReader`` can be
 pickled, carrying its index if it has read it, so it can go to DataLoader
-workers under any start method. The workers already read in parallel, so
-each reads its batch on one thread; :doc:`threads` has the numbers behind
-that choice. When every window fits in memory, reading all of them once is
-simpler still, and ``torch.from_numpy`` wraps the result without a copy.
+workers under any start method; reading once in the main process, as
+``__init__`` does here, saves each worker from reading the index again. The
+workers already read in parallel, so each reads its batch on one thread;
+:doc:`threads` has the numbers behind that choice. For several tracks, keep a
+list of readers and call ``read_bigwig`` with it.
+
+When every window fits in memory, reading all of them once is faster still,
+and ``torch.from_numpy`` wraps the result without a copy: 88,971 windows of
+1,000 bp from both bigWigs above (712 MB) took 0.27 s on 8 threads, where an
+epoch read by 4 workers, one batch of 64 at a time, took about 1.7 s.
 
 What it reads, and what it refuses
 ----------------------------------

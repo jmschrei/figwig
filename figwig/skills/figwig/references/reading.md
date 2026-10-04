@@ -4,7 +4,7 @@
 
 ```python
 BigWigReader(path)        # reads the header and chromosome tree now
-reader.chrom_sizes        # {name: length} in the file's order: chr1, chr10, chr11, ...
+reader.chrom_sizes        # {name: length} in the file's order; ENCODE's is chr1, chr10, chr11, ...
 reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0)
 read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0)
 ```
@@ -98,15 +98,19 @@ UserWarning: 2 windows are on chromosomes not in ENCFF830RWF.bigWig, and are
 
 Either the sample has no data there, since writers leave out chromosomes
 without data, or the names differ (`1` against `chr1`). Check before reading
-with `set(chroms) - set(reader.chrom_sizes)`. Under pytest's
+with `set(chroms) - set(reader.chrom_sizes)`. To keep your own names, map
+them only in the call, such as `numpy.char.add("chr", chroms)`; a writer
+writes whatever names its `chrom_sizes` holds. Under pytest's
 `filterwarnings = error`, the warning is an exception.
 
 ## PyTorch
 
-Make each dataset item a whole batch, read in one call. A `BigWigReader`
-pickles, carrying its index if it has read it, so it works in DataLoader
-workers under any start method. The workers already run in parallel, so read
-on one thread in each:
+Make each dataset item a whole batch, read in one call: a `BatchSampler`
+over a `RandomSampler` hands `__getitem__` a new mix of indices each epoch,
+with `batch_size=None` on the loader. Read once in the main process, so that
+each worker's pickled copy of the reader carries the index instead of reading
+it again. A `BigWigReader` pickles under any start method. The workers
+already run in parallel, so read on one thread in each:
 
 ```python
 import numpy
@@ -114,31 +118,40 @@ import torch
 from figwig import BigWigReader
 
 class Windows(torch.utils.data.Dataset):
-	def __init__(self, path, chroms, starts, width, batch_size):
+	def __init__(self, path, chroms, starts, width):
 		self.bw, self.chroms, self.starts = BigWigReader(path), chroms, starts
-		self.width, self.batch_size = width, batch_size
+		self.width = width
+		self.bw.read(chroms[:1], starts[:1], width)   # reads the index once
 
 	def __len__(self):
-		return -(-len(self.starts) // self.batch_size)
+		return len(self.starts)
 
-	def __getitem__(self, i):
-		batch = slice(i * self.batch_size, (i + 1) * self.batch_size)
-		return torch.from_numpy(self.bw.read(self.chroms[batch],
-			self.starts[batch], self.width, n_jobs=1))
+	def __getitem__(self, idx):                        # a batch of indices
+		return torch.from_numpy(self.bw.read(self.chroms[idx], self.starts[idx],
+			self.width, n_jobs=1))
 
 if __name__ == '__main__':
 	starts = numpy.arange(1_000_000, 2_000_000, 1000)
 	chroms = numpy.full(len(starts), "chr1")
-	data = Windows("ENCFF830RWF.bigWig", chroms, starts, 1000, batch_size=64)
-	loader = torch.utils.data.DataLoader(data, batch_size=None, num_workers=2,
-		multiprocessing_context="spawn")
+	data = Windows("ENCFF830RWF.bigWig", chroms, starts, 1000)
+	batches = torch.utils.data.BatchSampler(torch.utils.data.RandomSampler(data),
+		batch_size=64, drop_last=False)
+	loader = torch.utils.data.DataLoader(data, sampler=batches, batch_size=None,
+		num_workers=2, persistent_workers=True, multiprocessing_context="spawn")
 	y = torch.cat(list(loader))
 	print(y.shape, float(y.sum()))
 	# torch.Size([1000, 1000]) 28857.0
 ```
 
-When every window fits in memory, read them all once with `n_jobs=-1` and
-wrap the result with `torch.from_numpy`, which does not copy.
+`persistent_workers=True` keeps the workers, and their readers, from one
+epoch to the next. For several tracks, keep a list of readers and call
+`read_bigwig(readers, ...)` in `__getitem__`. For random shifts, read windows
+wider by twice the largest shift and slice each example.
+
+When every window fits in memory, read them all once and wrap the result with
+`torch.from_numpy`, which does not copy. 88,971 windows of 1,000 bp from two
+bigWigs (712 MB) took 0.27 s on 8 threads, where an epoch streamed by 4
+workers took 1.7 s, on the machine in `references/threads-and-memory.md`.
 
 ## Falling back to another reader
 

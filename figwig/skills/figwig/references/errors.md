@@ -25,9 +25,9 @@ Every call that raises writes nothing; the writer stays usable.
 
 | Message | Cause | Fix |
 |---|---|---|
-| `chromosome 'chr10' is written after 'chr9', but comes before it in chrom_sizes.` | calls not in `chrom_sizes` order; `BigWigReader.chrom_sizes` is in name order | loop over `writer.chrom_sizes`, or build `chrom_sizes` in writing order |
+| `chromosome 'chr10' is written after 'chr9', but comes before it in chrom_sizes.` | calls not in `chrom_sizes` order; an ENCODE file's `BigWigReader.chrom_sizes` is in name order | loop over `writer.chrom_sizes`, or build `chrom_sizes` in writing order |
 | `window 0 on 'chr1' starts at 50, before the end of what was written on it before, 101.` | a call's items start before the last call's end | sort the batches by position before writing |
-| `window 1 on 'chr1', at 5, starts before window 0 ends, at 10; they must not overlap.` | overlapping windows or intervals in one call | merge or trim them; for overlapping predictions, average them first |
+| `window 1 on 'chr1', at 5, starts before window 0 ends, at 10; they must not overlap.` | overlapping windows or intervals in one call; a window's full width counts, even where its values are `missing` or NaN | average overlapping predictions, then write each merged stretch as single bases (`(n, 1)` values) or as intervals with `ends`, since a call takes one width |
 | `window 0 on 'chr2' runs past the end of its chromosome, at 5000, where its values must be NaN.` | a window over a chromosome's end with values there | set the values past the end to NaN |
 | `chromosome 'chrX' is not one of the writer's chromosomes.` | missing from `chrom_sizes` | add it, or drop those items |
 | `values must be finite or NaN, but … holds an infinite value.` | `inf` | replace it, or set it to NaN to leave it out |

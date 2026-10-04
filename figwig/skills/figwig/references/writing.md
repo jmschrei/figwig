@@ -45,12 +45,14 @@ To copy a file's chromosomes, pass `BigWigReader(path).chrom_sizes`.
 Each of these raises `ValueError`, and a call that raises writes nothing.
 
 - Every chromosome written must be in `chrom_sizes`.
-- Within one call, items may come in any order but must not overlap.
+- Within one call, items may come in any order but must not overlap. A
+  window's full width counts, even where its values are `missing` or NaN.
 - Each call's items come after the last call's: on a chromosome later in
   `chrom_sizes`, or on the same one at or after the last call's last end.
-  `BigWigReader.chrom_sizes` is in name order (chr1, chr10, chr11, …, chr2),
-  so writing chr1, chr2, … one call each raises at chr10 with "chromosome
-  'chr10' is written after 'chr9', but comes before it in chrom_sizes".
+  `BigWigReader.chrom_sizes` is in the order the file stores, which is name
+  order (chr1, chr10, chr11, …, chr2) in ENCODE and UCSC files, so writing
+  chr1, chr2, … one call each raises at chr10 with "chromosome 'chr10' is
+  written after 'chr9', but comes before it in chrom_sizes".
   Loop over `writer.chrom_sizes`, or build `chrom_sizes` in the order you
   write.
 - `starts` must be integers and at least 0. An interval must end after its
