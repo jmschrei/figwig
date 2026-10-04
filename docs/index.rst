@@ -4,18 +4,29 @@ figwig
 A fast, multithreaded reader and writer of bigWig files, into and out of
 numpy.
 
-It reads the per-base values of tens or hundreds of thousands of windows in
-one call, straight into a float32 numpy array, from one bigWig or from several
-at once, and writes bigWigs from the same windows, or from intervals. The
-work runs on several threads, because zlib's ``uncompress()`` and
-``compress2()`` and the numba kernels all run without the GIL. It depends only
-on numpy and numba; libdeflate, through the optional ``deflate`` package,
-makes writing faster. The README on `GitHub <https://github.com/jmschrei/figwig>`_
-has examples for data loaders and the comparisons with other readers and
-writers, and the API pages describe every value figwig gives, every file it
-refuses and how it lays out the files it writes. Its command,
-:doc:`figwig bam2bw <bam2bw>`, turns SAM/BAM files of reads, or BED/tsv files
-of fragments, into bigWigs of per-base counts.
+figwig reads the per-base values of tens or hundreds of thousands of windows
+in one call, straight into a float32 numpy array, from one bigWig or from
+several at once, and writes bigWigs from the same windows, from intervals, or
+from per-base counts. Its command, :doc:`figwig bam2bw <bam2bw>`, turns
+SAM/BAM files of reads, or BED/tsv files of fragments, into bigWigs of
+per-base counts. The work runs on threads that run in parallel, because
+zlib's ``uncompress()`` and ``compress2()``, libdeflate and figwig's numba
+kernels all run without the GIL. It depends only on numpy and numba. A file
+it cannot read with certainty raises a ``ValueError`` that says what it found,
+rather than being guessed at, so that a pipeline can fall back to another
+reader.
+
+==============================================================  ===============================  ==================================
+task                                                            figwig                           fastest other tool
+==============================================================  ===============================  ==================================
+read 167,750 windows of 1,000 bp from an ATAC-seq bigWig        0.135 s on 8 threads             1.25 s, pybigtools
+write 15.9 million per-base counts                              0.18 s on 8 threads              4.20 s, pyBigWig
+write 21.2 million intervals with zoom levels                   0.55 s on 8 threads              5.47 s, pybigtools
+convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs           4.65 s and 910 MB at ``-p 2``    58.48 s and 3,039 MB, bam2bw 0.5.1
+==============================================================  ===============================  ==================================
+
+These were measured on a 2x AMD EPYC 9575F; :doc:`benchmarks` has the
+setup, every comparison, and how the times fall with threads.
 
 .. code-block:: python
 
@@ -61,6 +72,16 @@ figwig is not on PyPI yet. Install it from a clone:
     cd figwig
     pip install .
 
+It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
+To write faster with libdeflate, install the ``fast`` extra, which adds the
+``deflate`` package, and for ``figwig bam2bw``, the ``bam2bw`` extra, which
+adds pysam, pyfaidx, biopython, tqdm, isal and deflate:
+
+.. code-block:: bash
+
+    pip install ".[fast]"
+    pip install ".[bam2bw]"
+
 Development install
 -------------------
 
@@ -71,12 +92,43 @@ Development install
     uv sync --extra dev
     uv run pytest
 
+Claude Code skill
+=================
+
+figwig ships a `Claude Code <https://claude.com/claude-code>`_ skill that
+teaches a coding agent to use figwig in any project: reading windows from one
+bigWig or several, writing predictions, intervals and per-base counts,
+converting reads with ``figwig bam2bw``, the rules a write follows, what each
+error message means, and how much threads gain. ``figwig install-skill``
+copies it into ``~/.claude/skills/figwig``:
+
+.. code-block:: bash
+
+    figwig install-skill                 # into ~/.claude/skills
+    figwig install-skill -d DIRECTORY    # into DIRECTORY/figwig
+    figwig install-skill --force         # replace an installed copy
+
+An installed copy raises ``FileExistsError`` unless ``--force`` is given, so
+after upgrading figwig, run it with ``--force`` to pick up a changed skill.
+``--symlink`` links to the copy inside the installed package instead, so that
+the skill follows the package; the link breaks if the package moves or is
+uninstalled.
+
 
 .. toctree::
    :maxdepth: 1
    :caption: Getting Started
 
    whats_new
+
+.. toctree::
+   :maxdepth: 1
+   :caption: User Guide
+
+   reading
+   writing
+   threads
+   benchmarks
 
 .. toctree::
    :maxdepth: 1
