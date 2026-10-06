@@ -294,6 +294,59 @@ has an example of each, and the
 [documentation](https://figwig.readthedocs.io/en/latest/bam2bw.html) says how
 files are read and shared across cores.
 
+<details>
+<summary><b>All arguments, from <code>figwig bam2bw -h</code></b></summary>
+
+```text
+usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p] [-ps POS_SHIFT]
+                     [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
+                     [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
+                     -n NAME [-z ZOOMS] [-v]
+                     filename [filename ...]
+
+This tool will convert BAM files to bigwig files without an intermediate.
+
+positional arguments:
+  filename              The SAM/BAM or tsv/tsv.gz file to be processed.
+
+options:
+  -h, --help            show this help message and exit
+  -s, --sizes SIZES     A chrom_sizes, .fai, or FASTA file. Only the first two
+                        columns of a chrom_sizes/.fai file are read. A
+                        compressed FASTA must be BGZF, not gzip.
+  -u, --unstranded      Have only one, unstranded, output.
+  -f, --fragments       The data is fragments and so both ends should be
+                        recorded.
+  -3p, --three_prime    Record the 3' end of each read instead of the 5' end.
+  -ps, --pos_shift POS_SHIFT
+                        A shift to apply to positive strand reads.
+  -ns, --neg_shift NEG_SHIFT
+                        A shift to apply to negative strand reads.
+  -mp, --mate_pairs     Treat paired-end reads as a single RNA/fragment tag
+                        instead of counting each mate independently: buffer
+                        reads by name, and once both mates of a pair are seen,
+                        record one jointly-determined position (see --rna5 and
+                        --opposite_strand). BAM/SAM input only.
+  --rna5 {read1,read2}  Which mate carries the 5' end of the RNA/fragment. The
+                        other mate's own 5' end is used as the RNA's 3' end.
+                        Only used with --mate_pairs.
+  --opposite_strand     Report the strand of the mate opposite the one chosen
+                        by --rna5, instead of that mate's own strand. Only
+                        used with --mate_pairs.
+  -sf, --scale_factor SCALE_FACTOR
+                        A scaling factor to multiply each position by.
+  -r, --read_depth      Whether to divide through by total (pre-scaled) read
+                        depth.
+  -p, --parallel PARALLEL
+                        The number of cores to use, or a negative number to
+                        count back from the number of CPUs: -1 is all of them.
+  -n, --name NAME
+  -z, --zooms ZOOMS     The number of zooms to store in the bigwig.
+  -v, --verbose
+```
+
+</details>
+
 #### figwig install-skill
 
 Installs the Claude Code skill; see [above](#claude-code-skill).
