@@ -18,9 +18,9 @@ import warnings
 
 import numpy
 
-from ._tables import match_rows
-from ._tables import read_table
-from ._tables import track_name
+from ._tables import _match_rows
+from ._tables import _read_table
+from ._tables import _track_name
 from .bigwig import BigWigReader
 from .bigwig import read_bigwig
 from .figwig import _DEFAULT_GROUPS
@@ -68,18 +68,18 @@ def _parser(prog):
 	return parser
 
 
-def tracks_from_table(filenames, metadata, dtype=None):
+def _tracks_from_table(filenames, metadata, dtype=None):
 	"""One track record per file: its name, dtype and attributes, from the
 	metadata table when there is one."""
 
 	tracks = []
 	rows = [None] * len(filenames)
 	if metadata is not None:
-		header, records = read_table(metadata)
-		rows = match_rows(metadata, records, header, filenames)
+		header, records = _read_table(metadata)
+		rows = _match_rows(metadata, records, header, filenames)
 
 	for filename, row in zip(filenames, rows):
-		track = {'name': track_name(filename), 'dtype': dtype}
+		track = {'name': _track_name(filename), 'dtype': dtype}
 		if row is not None:
 			for column, value in row.items():
 				if column == 'name' and len(value) > 0:
@@ -93,7 +93,7 @@ def tracks_from_table(filenames, metadata, dtype=None):
 	return tracks
 
 
-def shared_chrom_sizes(readers, sizes=None):
+def _shared_chrom_sizes(readers, sizes=None):
 	"""The chromosomes of the output: those of the sizes file, or every
 	chromosome of the bigWigs in order of first appearance, which must agree
 	on each one's length."""
@@ -113,7 +113,7 @@ def shared_chrom_sizes(readers, sizes=None):
 	return list(chrom_sizes.items())
 
 
-def convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
+def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
 	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False):
 	"""Write the bigWigs `filenames` as the tracks of `output`."""
 
@@ -146,10 +146,10 @@ def main(argv=None, prog='figwig bw2fw'):
 			raise SystemExit("{}: {} is not a file.".format(prog, filename))
 
 	try:
-		tracks = tracks_from_table(args.bigwig, args.metadata, args.dtype)
+		tracks = _tracks_from_table(args.bigwig, args.metadata, args.dtype)
 		readers = [BigWigReader(filename) for filename in args.bigwig]
-		chrom_sizes = shared_chrom_sizes(readers, args.sizes)
-		convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
+		chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
+		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose)
 	except (ValueError, TypeError) as e:

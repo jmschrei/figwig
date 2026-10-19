@@ -125,8 +125,8 @@ def test_zooms_and_level(tmp_path, fw):
 
 
 def test_bigwig_name_replaces_separators():
-	assert figwig.fw2bw.bigwig_name({'name': 'a/b'}) == 'a_b.bw'
-	assert figwig.fw2bw.bigwig_name({'name': 'plain'}) == 'plain.bw'
+	assert figwig.fw2bw._bigwig_name({'name': 'a/b'}) == 'a_b.bw'
+	assert figwig.fw2bw._bigwig_name({'name': 'plain'}) == 'plain.bw'
 
 
 def test_text():

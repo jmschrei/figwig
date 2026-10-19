@@ -211,10 +211,10 @@ def test_errors(tmp_path, bam, sizes):
 
 
 def test_helpers():
-	assert figwig.bam2fw.base_name("/a/b/x.tsv.gz") == "x"
-	assert figwig.bam2fw.base_name("x.bam") == "x"
-	assert figwig.bam2fw.base_name("x.other") == "x.other"
-	tracks, groups = figwig.bam2fw.tracks_for_files(["a.bam", "b.bam"], None,
+	assert figwig.bam2fw._base_name("/a/b/x.tsv.gz") == "x"
+	assert figwig.bam2fw._base_name("x.bam") == "x"
+	assert figwig.bam2fw._base_name("x.other") == "x.other"
+	tracks, groups = figwig.bam2fw._tracks_for_files(["a.bam", "b.bam"], None,
 		True, "uint32")
 	assert tracks == [{"name": "a", "dtype": "uint32"}, {"name": "b", "dtype":
 		"uint32"}]

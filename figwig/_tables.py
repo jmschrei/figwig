@@ -20,7 +20,7 @@ def _delimiter(path):
 	return ',' if str(path).endswith('.csv') else '\t'
 
 
-def read_table(path):
+def _read_table(path):
 	"""The rows of a metadata table, as (header, list of dicts), with the
 	first column's header first."""
 
@@ -49,7 +49,7 @@ def read_table(path):
 	return header, records
 
 
-def match_rows(path, records, header, filenames):
+def _match_rows(path, records, header, filenames):
 	"""The row of each input file, matched on the first column by the path
 	given or its base name."""
 
@@ -70,7 +70,7 @@ def match_rows(path, records, header, filenames):
 	return rows
 
 
-def write_table(path, header, records):
+def _write_table(path, header, records):
 	"""Write rows as a metadata table, with the columns in `header`."""
 
 	with open(path, 'w', newline='') as handle:
@@ -81,7 +81,7 @@ def write_table(path, header, records):
 			writer.writerow([record.get(column, '') for column in header])
 
 
-def track_name(filename):
+def _track_name(filename):
 	"""A track's name from its bigWig's path: the base name without a
 	.bw, .bigWig or .bigwig extension."""
 

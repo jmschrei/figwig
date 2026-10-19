@@ -209,10 +209,10 @@ def test_bad_arguments_fail_cleanly(tmp_path, bigwigs):
 
 
 def test_helpers(bigwigs):
-	assert figwig.bw2fw.track_name('/a/b/x.bw') == 'x'
-	assert figwig.bw2fw.track_name('x.bigWig') == 'x'
-	assert figwig.bw2fw.track_name('x.txt') == 'x.txt'
-	tracks = figwig.bw2fw.tracks_from_table(bigwigs, None, 'uint8')
+	assert figwig.bw2fw._track_name('/a/b/x.bw') == 'x'
+	assert figwig.bw2fw._track_name('x.bigWig') == 'x'
+	assert figwig.bw2fw._track_name('x.txt') == 'x.txt'
+	tracks = figwig.bw2fw._tracks_from_table(bigwigs, None, 'uint8')
 	assert tracks == [{'name': 'counts', 'dtype': 'uint8'}, {'name': 'signal',
 		'dtype': 'uint8'}, {'name': 'dense', 'dtype': 'uint8'}]
 

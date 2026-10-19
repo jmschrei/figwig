@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy
 
-from ._tables import write_table
+from ._tables import _write_table
 from .figwig import FigWigReader
 from .writer import BigWigWriter
 
@@ -50,7 +50,7 @@ def _parser(prog):
 	return parser
 
 
-def selected_tracks(reader, names=None, select=None):
+def _selected_tracks(reader, names=None, select=None):
 	"""The indices of the tracks to write: those named, those whose
 	attributes match, or all."""
 
@@ -78,7 +78,7 @@ def selected_tracks(reader, names=None, select=None):
 	return numpy.arange(len(reader.tracks))
 
 
-def bigwig_name(track):
+def _bigwig_name(track):
 	"""The file name of a track's bigWig: its name with path separators
 	replaced, plus .bw."""
 
@@ -88,7 +88,7 @@ def bigwig_name(track):
 	return name + '.bw'
 
 
-def convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
+def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 	"""Write the tracks `ids` of the figwig file `path` as bigWigs in
 	`directory`, and the metadata table. Returns the table's path."""
 
@@ -109,7 +109,7 @@ def convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 		writers = {}
 		try:
 			for i in members:
-				paths[i] = os.path.join(directory, bigwig_name(reader.tracks[i]))
+				paths[i] = os.path.join(directory, _bigwig_name(reader.tracks[i]))
 				writers[i] = BigWigWriter(paths[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
 
@@ -152,7 +152,7 @@ def convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 
 	table = os.path.join(directory, os.path.splitext(os.path.basename(path))[0]
 		+ '.tsv')
-	write_table(table, keys, records)
+	_write_table(table, keys, records)
 	return table
 
 
@@ -176,8 +176,8 @@ def main(argv=None, prog='figwig fw2bw'):
 
 	try:
 		reader = FigWigReader(args.figwig)
-		ids = selected_tracks(reader, args.tracks, args.select)
-		convert(args.figwig, args.output, ids, zooms=args.zooms, level=args.level,
+		ids = _selected_tracks(reader, args.tracks, args.select)
+		_convert(args.figwig, args.output, ids, zooms=args.zooms, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))

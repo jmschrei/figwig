@@ -20,8 +20,8 @@ import os
 
 import numpy
 
-from ._tables import match_rows
-from ._tables import read_table
+from ._tables import _match_rows
+from ._tables import _read_table
 from .figwig import _DEFAULT_TILE
 from .figwig import FigWigWriter
 
@@ -60,7 +60,7 @@ def _parser(prog):
 	return parser
 
 
-def base_name(filename):
+def _base_name(filename):
 	"""A file's name without its directory and its extension."""
 
 	name = os.path.basename(filename)
@@ -71,19 +71,19 @@ def base_name(filename):
 	return name
 
 
-def tracks_for_files(filenames, metadata, unstranded, dtype=None):
+def _tracks_for_files(filenames, metadata, unstranded, dtype=None):
 	"""The track records of every file, as (tracks, groups): a track per
 	strand of each file, or one with `unstranded`, and the files' rows of the
 	metadata table as their attributes."""
 
 	rows = [None] * len(filenames)
 	if metadata is not None:
-		header, records = read_table(metadata)
-		rows = match_rows(metadata, records, header, filenames)
+		header, records = _read_table(metadata)
+		rows = _match_rows(metadata, records, header, filenames)
 
 	tracks, groups = [], []
 	for filename, row in zip(filenames, rows):
-		name = base_name(filename)
+		name = _base_name(filename)
 		attributes = {}
 		if row is not None:
 			first = list(row)[0]
@@ -113,7 +113,7 @@ def tracks_for_files(filenames, metadata, unstranded, dtype=None):
 	return tracks, groups
 
 
-def trim_counts(reads, chrom_sizes, unstranded):
+def _trim_counts(reads, chrom_sizes, unstranded):
 	"""Each file's counts as sorted arrays within their chromosomes, with
 	the entries that fall outside a chromosome dropped and counted."""
 
@@ -138,7 +138,7 @@ def trim_counts(reads, chrom_sizes, unstranded):
 	return trimmed, discarded
 
 
-def write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
+def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
 	"""Write one file's counts, strands['+'] and strands['-'] or strands['+']
 	alone, as the tracks `names`, chromosome by chromosome, each count times
 	`scale_factor` and divided by `read_depth` unless it is None."""
@@ -179,7 +179,7 @@ def main(argv=None, prog='figwig bam2fw'):
 	try:
 		_check_filenames(args)
 		chrom_sizes = read_chrom_sizes(args.sizes)
-		tracks, groups = tracks_for_files(args.filename, args.metadata,
+		tracks, groups = _tracks_for_files(args.filename, args.metadata,
 			args.unstranded, args.dtype)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))
@@ -194,7 +194,7 @@ def main(argv=None, prog='figwig bam2fw'):
 	if args.verbose:
 		print("\n" * len(args.filename))
 
-	files, discarded = trim_counts(reads, chrom_sizes, args.unstranded)
+	files, discarded = _trim_counts(reads, chrom_sizes, args.unstranded)
 	del reads
 	if len(discarded) > 0:
 		print("{} entries fell outside the provided chromosome sizes and were "
@@ -214,7 +214,7 @@ def main(argv=None, prog='figwig bam2fw'):
 						print("Dividing {} through by a read depth of {}.".format(
 							group[0], read_depth))
 
-				write_counts(writer, group, strands, chrom_sizes, args.scale_factor,
+				_write_counts(writer, group, strands, chrom_sizes, args.scale_factor,
 					read_depth)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))
