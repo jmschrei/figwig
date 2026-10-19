@@ -20,6 +20,12 @@ they are not integers; and the chunks are compressed with zlib or
 libdeflate, as bigWig blocks are. Six genome-wide count tracks that take
 971 MB as bigWigs take 266 MB as one figwig file (:doc:`benchmarks`).
 
+The examples on this page read ``k562.fw``, six genome-wide count tracks
+converted from bigWigs with ``figwig bw2fw`` and a metadata table: the two
+strands of the 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, the two strands
+of PRO-cap ENCFF994CSC and ENCFF253HUA, and the unstranded cut counts of
+ATAC-seq ENCFF830RWF and DNase-seq ENCFF989SAK.
+
 Reading
 -------
 
@@ -30,9 +36,9 @@ Reading
 
     fw = FigWigReader("k562.fw")
     print(fw.genome, len(fw.chrom_sizes), fw.tile)
-    # hg38 25 16384
+    # hg38 195 16384
     print([track["name"] for track in fw.tracks])
-    # ['atac.+', 'atac.-', 'procap.+', 'procap.-', 'dnase', 'cage']
+    # ['atac.+', 'atac.-', 'procap.+', 'procap.-', 'atac_cuts', 'dnase']
 
     chroms = numpy.array(["chr1", "chr1", "chr2"])
     starts = numpy.array([1_000_000, 2_500_000, 300_000])
@@ -92,12 +98,12 @@ Selecting tracks by their attributes
 
     fw = FigWigReader("k562.fw")
     print(fw.tracks[0])
-    # {'name': 'atac.+', 'dtype': 'uint16', 'group': 0, 'assay': 'ATAC-seq', 'strand': '+'}
+    # {'name': 'atac.+', 'dtype': 'uint8', 'assay': 'ATAC-seq', 'biosample': 'K562', 'strand': '+', 'group': 0}
     print(fw.select(assay="ATAC-seq"))
+    # [0 1 4]
+    print(fw.select(assay="ATAC-seq", biosample="K562"))
     # [0 1]
-    print(fw.select(strand="-"))
-    # [1 3]
-    y = fw.read("chr1", [1_000_000], width=2114, tracks=fw.select(assay="ATAC-seq"))
+    y = fw.read("chr1", [1_000_000], width=2114, tracks=fw.select(strand="-"))
 
 ``select`` matches every keyword against the track records and returns the
 indices of the tracks that have them all, in the file's order, to pass as
@@ -108,8 +114,8 @@ structured array with each track's ``sum``, ``nonzero`` bases, ``min`` and
 
 .. code-block:: python
 
-    print(fw.stats["sum"][fw.select(assay="ATAC-seq")])
-    # [15859293. 15860363.]
+    print(fw.stats["sum"][fw.select(biosample="K562", assay="ATAC-seq")])
+    # [22410840. 22410840.]
 
 Writing
 -------

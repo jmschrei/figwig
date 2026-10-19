@@ -22,6 +22,12 @@ of fragments, into bigWigs of per-base counts. It is
 [bam2bw](https://github.com/jmschrei/bam2bw) with the same arguments, outputs
 and messages, with faster readers. figwig depends only on numpy and numba.
 
+figwig also defines its own file format, the figwig file, which holds any
+number of per-base tracks over one genome with a JSON record of attributes
+for each, and reads windows from any subset of them in one call, as
+integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
+`bam2fw` convert bigWigs and reads to and from it.
+
 | | figwig | fastest other tool |
 |---|---|---|
 | Read 167,750 windows of 1,000 bp from an ATAC-seq bigWig | **0.135 s** on 8 threads | 1.25 s, pybigtools |
@@ -262,6 +268,40 @@ batch at a time. Each call's items come after the last call's, in the order
 of `chrom_sizes`. The header, index and zoom levels are written when the
 writer is closed.
 
+#### Reading and writing figwig files
+
+```python
+import numpy
+from figwig import FigWigReader
+from figwig import FigWigWriter
+
+chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
+tracks = [
+    {"name": "atac.+", "assay": "ATAC-seq", "strand": "+"},
+    {"name": "atac.-", "assay": "ATAC-seq", "strand": "-"},
+]
+counts = numpy.random.default_rng(0).poisson(0.1, (3, 2, 2114))
+chroms = numpy.array(["chr2", "chr1", "chr1"])
+starts = numpy.array([300_000, 2_500_000, 1_000_000])
+
+with FigWigWriter("example.fw", chrom_sizes, tracks, genome="hg38") as fw:
+    fw.write(chroms, starts, counts)
+
+fw = FigWigReader("example.fw")
+y = fw.read(chroms, starts, width=2114, tracks=fw.select(strand="+"))
+print(y.shape, y.dtype, numpy.array_equal(y[:, 0], counts[:, 0]))
+# (3, 1, 2114) uint8 True
+```
+
+A figwig file holds many tracks over one genome, each with attributes that
+`select` matches, and is read like a bigWig: many windows of one width in one
+call, from any subset of the tracks, into `(windows, tracks, width)` in the
+tracks' own dtype. Tracks lie on one grid of tiles, the tiles of a group of
+tracks are stored together, and a tile with no values takes no space, so six
+genome-wide count tracks that take 971 MB as bigWigs take 266 MB as one
+figwig file. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
+guide covers the format, the API and the converters.
+
 The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
 and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides
 cover the rest: values and coordinates, chromosomes a file does not have,
@@ -346,6 +386,22 @@ options:
 ```
 
 </details>
+
+#### figwig bw2fw, fw2bw and bam2fw
+
+```bash
+figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> k562.fw
+figwig fw2bw k562.fw -o bigwigs -p 8 --select assay=ATAC-seq                      # tracks -> bigwigs/<name>.bw
+figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8          # reads -> k562.fw
+```
+
+`figwig bw2fw` writes bigWigs as the tracks of one figwig file, named after
+their files or by a metadata table whose other columns become the tracks'
+attributes; `figwig fw2bw` writes a figwig file's tracks back as bigWigs
+with such a table; and `figwig bam2fw` takes `figwig bam2bw`'s arguments and
+writes each input file as its own pair of stranded tracks. The
+[converters](https://figwig.readthedocs.io/en/latest/converters.html) page
+has the options.
 
 #### figwig install-skill
 

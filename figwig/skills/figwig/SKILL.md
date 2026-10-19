@@ -7,10 +7,14 @@ description: >-
   several threads. Use it to write bigWigs from numpy arrays, model
   predictions, intervals or per-base counts, and to convert BAM, SAM,
   BED or fragment files to bigWig coverage tracks with `figwig bam2bw`.
-  It fires whenever code reads values from or creates a .bw/.bigWig file,
-  replaces pyBigWig, pybigtools or pybbi loops, builds a data loader over
-  bigWig tracks, or turns reads into 5'-end count tracks. This file is a
-  router: read the matching reference file before writing code.
+  Use its own figwig file (.fw) to hold many tracks in one file with
+  attributes per track, read in windows from any subset of them as
+  integers, and convert bigWigs or reads to and from it with `figwig
+  bw2fw`, `fw2bw` and `bam2fw`. It fires whenever code reads values from
+  or creates a .bw/.bigWig/.fw file, replaces pyBigWig, pybigtools or
+  pybbi loops, builds a data loader over bigWig or figwig tracks, or turns
+  reads into 5'-end count tracks. This file is a router: read the matching
+  reference file before writing code.
 ---
 
 # figwig
@@ -24,6 +28,10 @@ from figwig import BigWigReader
 from figwig import read_bigwig
 from figwig import BigWigWriter
 from figwig import write_bigwig
+from figwig import FigWigReader
+from figwig import read_figwig
+from figwig import FigWigWriter
+from figwig import write_figwig
 ```
 
 ## When it is the wrong tool
@@ -70,6 +78,8 @@ later.
 | writing a genome-wide track a batch at a time | `references/writing.md` |
 | choosing `n_jobs` or `-p`, the expected gain from threads, memory, the first call's compile time | `references/threads-and-memory.md` |
 | converting BAM, SAM, BED or fragment files to bigWig | `references/bam2bw.md` |
+| a figwig file (`.fw`): many tracks in one file, read in windows by attribute; `FigWigReader`, `FigWigWriter`, `read_figwig`, `write_figwig` | `references/figwig-files.md` |
+| converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
 
 ## Symptom → reference
 
@@ -80,5 +90,6 @@ later.
 | values that are 0 where you expected NaN, or the reverse | `references/reading.md` |
 | `figwig bam2bw` running on one core, or a minus-strand bigWig that is empty | `references/bam2bw.md` |
 | threads that do not make a read faster | `references/threads-and-memory.md` |
+| `tracks must make up whole groups`, or a figwig read decoding more tracks than asked for | `references/figwig-files.md` |
 
 The full documentation is at <https://figwig.readthedocs.io>.
