@@ -1000,7 +1000,8 @@ def test_without_jit(tmp_path, ref):
 
 	script = """
 import numpy, sys
-from figwig import FigWigWriter, FigWigReader
+from figwig import FigWigWriter
+from figwig import FigWigReader
 values = numpy.zeros((1, 2, 100))
 values[0, 0, 5] = 3
 values[0, 1, 40:70] = 2.5

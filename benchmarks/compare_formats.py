@@ -26,8 +26,9 @@ DataLoader pattern is timed too: the first 2,048 of those windows in
 batches of 64 on one thread. Each configuration runs in its own process,
 which warms up on 1,000 windows, opens the files again and times one read,
 opening included; every repetition runs every configuration once, in an
-order rotated from the last, and the table gives medians. Threads are
-pinned through OMP, MKL, OpenBLAS and NUMBA.
+order rotated from the last, and the table gives medians. Conversions run
+`--write-repeats` times, once by default, since each is a pass over every
+track. Threads are pinned through OMP, MKL, OpenBLAS and NUMBA.
 """
 
 import os
@@ -35,7 +36,6 @@ import sys
 import json
 import time
 import argparse
-import itertools
 import statistics
 import subprocess
 
@@ -212,7 +212,7 @@ def run(args):
 	for n in args.tracks:
 		prepare_tracks(args, n)
 		for threads in args.write_threads:
-			for repeat in range(args.repeats):
+			for repeat in range(args.write_repeats):
 				seconds, fw_size, bw_size = convert(args, n, threads)
 				record({'kind': 'bw2fw', 'n': n, 'threads': threads, 'seconds':
 					seconds, 'figwig_bytes': fw_size, 'bigwig_bytes': bw_size})
@@ -247,7 +247,7 @@ def run(args):
 
 	if args.bam is not None:
 		for threads in args.write_threads:
-			for repeat in range(args.repeats):
+			for repeat in range(args.write_repeats):
 				name = os.path.join(args.workdir, 'bam')
 				seconds = shell([sys.executable, '-m', 'figwig', 'bam2bw', args.bam,
 					'-s', args.sizes, '-n', name, '-p', str(threads)],
@@ -332,7 +332,10 @@ def main():
 		32])
 	parser.add_argument('--prepare-threads', type=int, default=16)
 	parser.add_argument('--level', type=int, default=6)
-	parser.add_argument('--repeats', type=int, default=3)
+	parser.add_argument('--repeats', type=int, default=3, help="Repetitions of "
+		"each read configuration.")
+	parser.add_argument('--write-repeats', type=int, default=1, help="Repetitions "
+		"of each conversion.")
 	parser.add_argument('--table', default=None, help="Print the table of an "
 		"existing results file and exit.")
 	parser.add_argument('--one', action='store_true', help=argparse.SUPPRESS)
