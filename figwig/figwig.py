@@ -580,12 +580,14 @@ class FigWigWriter:
 				raise ValueError("{} starts at {}, at or past its length, {}."
 					.format(describe(j), starts[j], lengths[j]))
 
-		order = numpy.lexsort((starts, tids))
-		if (numpy.diff(order) != 1).any():
+		# Items that already come in order, as counts from a sorted BAM do,
+		# are not sorted again.
+		keys = (tids << 32) | starts
+		order = None
+		if (keys[1:] <= keys[:-1]).any():
+			order = numpy.lexsort((starts, tids))
 			tids, starts, ends = tids[order], starts[order], ends[order]
 			values = values[order]
-		else:
-			order = None
 
 		overlap = (tids[1:] == tids[:-1]) & (starts[1:] < ends[:-1])
 		if overlap.any():

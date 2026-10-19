@@ -148,6 +148,108 @@ both, the two were the same (6.6 and 6.7 GB). These runs were made before
 which lowers its peak on BAM files: on the 10 GB BAM at ``-p 1``, run one at a
 time, it is now 2.9 GB, and 4.9 GB with ``-u -f``, in the same time.
 
+figwig files
+------------
+
+``benchmarks/compare_formats.py`` times a figwig file against the bigWigs
+of the same tracks. The tracks were six genome-wide count tracks on hg38:
+the two strands of the 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, written
+by ``figwig bam2bw``; the two strands of PRO-cap, ENCFF994CSC and
+ENCFF253HUA; and the unstranded cut counts of ATAC-seq ENCFF830RWF and
+DNase-seq ENCFF989SAK. Past six, track i is track i mod 6 with every
+chromosome rolled by a random offset, written as a bigWig by figwig, so
+that it has the statistics of a real track and shares no position with it.
+``figwig bw2fw`` wrote the figwig file of each set, in groups of 8 tracks
+at a tile of 16,384 bases and compression level 6, and that conversion and
+``figwig fw2bw`` back are the write timings, one run each; every file was
+on tmpfs.
+
+The read was 8,192 windows of 2,114 bp centred on the summits of the K562
+ATAC-seq IDR peaks ENCFF855PCP, drawn at random, in one call:
+``read_bigwig`` over the N bigWigs into float32, and ``FigWigReader.read``
+into the tracks' own dtype (uint8 or uint16) and into float32. Each
+configuration ran in its own process, which warmed up on 1,000 windows,
+then opened the files again and timed one read, opening included; the
+table gives the median of three. Every configuration of one N gave the same
+values.
+
+======  =======  =============  ==========  ==========
+tracks  threads  bigWigs, f32   figwig      figwig, f32
+======  =======  =============  ==========  ==========
+1       1        0.191 s        0.057 s     0.064 s
+1       8        0.040 s        0.022 s     0.027 s
+1       32       0.028 s        0.034 s     0.032 s
+2       1        0.393 s        0.095 s     0.103 s
+2       8        0.065 s        0.026 s     0.037 s
+2       32       0.038 s        0.043 s     0.037 s
+6       1        0.921 s        0.254 s     0.279 s
+6       8        0.152 s        0.054 s     0.057 s
+6       32       0.115 s        0.046 s     0.052 s
+24      1        3.351 s        0.666 s     0.769 s
+24      8        0.516 s        0.122 s     0.151 s
+24      32       0.312 s        0.116 s     0.124 s
+96      1        13.093 s       2.415 s     2.757 s
+96      8        1.930 s        0.425 s     0.498 s
+96      32       1.087 s        0.406 s     0.432 s
+======  =======  =============  ==========  ==========
+
+On one thread the figwig file read 3.4 to 5.4 times faster than the
+bigWigs, and on 8 threads 1.8 to 4.5 times. A read of 8,192 windows from a
+figwig file is done in tens of milliseconds, and gained nothing past 8
+threads, so at 16 and 32 threads one or two bigWigs read as fast as the
+figwig file; at 24 and 96 tracks the figwig file stayed 2.7 times faster at
+32 threads. Reading into float32 costs a few percent over the tracks' own
+types, which are half or a quarter of the bytes.
+
+The pattern of a PyTorch DataLoader worker, 32 batches of 64 windows read
+one after another on one thread, is where the figwig file gains most, since
+a batch of windows on a sparse track shares few bigWig blocks:
+
+======  ===============  ===========
+tracks  bigWigs, f32     figwig
+======  ===============  ===========
+1       0.127 s          0.018 s
+2       0.253 s          0.029 s
+6       0.538 s          0.070 s
+24      2.507 s          0.185 s
+96      10.458 s         0.661 s
+======  ===============  ===========
+
+Sizes, and the conversions each way, one run each:
+
+======  ==============  =============  ====================================  ====================================
+tracks  bigWigs         figwig file    ``bw2fw``, 1 / 8 / 32 threads         ``fw2bw``, 1 / 8 / 32 threads
+======  ==============  =============  ====================================  ====================================
+1       36.9 MB         30.1 MB        6.2 s / 2.6 s / 3.1 s                 6.1 s / 5.5 s / 7.9 s
+2       73.9 MB         54.0 MB        11.4 s / 4.6 s / 5.2 s                12.8 s / 8.4 s / 8.1 s
+6       971.4 MB        266.4 MB       40.5 s / 12.8 s / 12.7 s              44.8 s / 28.8 s / 20.4 s
+24      2,195.1 MB      1,054.6 MB     152.2 s / 38.6 s / 38.6 s             178.0 s / 109.2 s / 74.9 s
+96      7,089.9 MB      4,219.7 MB     604.0 s / 149.4 s / 150.0 s           717.5 s / 441.9 s / 313.7 s
+======  ==============  =============  ====================================  ====================================
+
+The six real tracks are 3.6 times smaller as a figwig file, most of the
+gain on the two ENCODE tracks written as bedGraph, 883 MB of the 971; the
+rolled copies past six are bigWigs figwig wrote as varStep, and the figwig
+file is 0.6 times their size. ``bw2fw`` reads the bigWigs and encodes whole
+tiles on its threads and gained nothing past 8; ``fw2bw`` is bound by
+laying each track's windows out as bigWig sections, on one thread per
+track. ``figwig fw2bw`` wrote the six tracks back as 408 MB of bigWigs.
+
+``figwig bam2fw`` and ``figwig bam2bw`` converted the 2.4 GB ATAC-seq BAM
+ENCFF877LRY, on tmpfs, to one figwig file of two tracks and to two bigWigs,
+median of three:
+
+=================  ========  ========  ========  =========
+command            1 core    8 cores   32 cores  output
+=================  ========  ========  ========  =========
+``figwig bam2bw``  9.42 s    1.88 s    1.84 s    73.9 MB
+``figwig bam2fw``  11.79 s   4.13 s    4.05 s    53.9 MB
+=================  ========  ========  ========  =========
+
+Both read the BAM the same way; ``figwig bam2fw`` spends the difference
+merging the two strands' positions and encoding their tiles, which runs on
+the calling thread.
+
 Thread scaling
 --------------
 

@@ -324,8 +324,8 @@ def main():
 	parser.add_argument('--out', default='results.jsonl')
 	parser.add_argument('--width', type=int, default=2114)
 	parser.add_argument('--windows', type=int, default=8192)
-	parser.add_argument('--tracks', type=int, nargs='+', default=[1, 2, 6, 24,
-		96])
+	parser.add_argument('--tracks', type=int, nargs='*', default=[1, 2, 6, 24,
+		96], help="Numbers of tracks; none runs only the BAM conversions.")
 	parser.add_argument('--threads-list', type=int, nargs='+', default=[1, 2, 4,
 		8, 16, 32])
 	parser.add_argument('--write-threads', type=int, nargs='+', default=[1, 8,

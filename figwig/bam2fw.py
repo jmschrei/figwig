@@ -145,9 +145,14 @@ def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth)
 
 	for chrom, _ in chrom_sizes:
 		parts = [strands[key][chrom] for key in ('+', '-') if key in strands]
-		positions = numpy.unique(numpy.concatenate([p for p, _ in parts]))
+		# Each strand's positions are sorted, so a stable sort of the two
+		# together merges them; numpy.unique hashes, which is far slower here.
+		positions = numpy.concatenate([p for p, _ in parts])
 		if len(positions) == 0:
 			continue
+		positions.sort(kind='stable')
+		positions = positions[numpy.concatenate([[True], positions[1:] !=
+			positions[:-1]])]
 
 		values = numpy.zeros((len(positions), len(parts), 1), dtype=numpy.float64)
 		for k, (p, counts) in enumerate(parts):
