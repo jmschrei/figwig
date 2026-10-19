@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy
 
 from ._figwig_kernels import _check_chunks
+from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_tiles
 from ._figwig_kernels import _inflate_chunks
 from ._figwig_kernels import _read_tiles
@@ -564,14 +565,15 @@ class FigWigWriter:
 				raise ValueError("{} ends at {}, past its length, {}.".format(
 					describe(j), ends[j], lengths[j]))
 
-			# A window past the end is accepted where its values are NaN,
-			# as a read gives them, and is cut there.
+			# A window past the end is accepted where its values are NaN or
+			# 0, as reads give them there, and is cut there.
 			for j in over.tolist():
-				tail = values[j, :, max(0, lengths[j] - starts[j]):]
-				if not numpy.isnan(tail.astype(numpy.float64)).all():
+				tail = values[j, :, max(0, lengths[j] - starts[j]):].astype(
+					numpy.float64)
+				if not (numpy.isnan(tail) | (tail == 0)).all():
 					raise ValueError("{} ends at {}, past its length, {}; a "
 						"window may run past the end only where its values are "
-						"NaN.".format(describe(j), ends[j], lengths[j]))
+						"NaN or 0.".format(describe(j), ends[j], lengths[j]))
 			ends = numpy.minimum(ends, lengths)
 			if (ends <= starts).any():
 				j = int(numpy.argmax(ends <= starts))
@@ -616,19 +618,36 @@ class FigWigWriter:
 						order is None else int(order[a])), starts[a], last[1]))
 				last = (tid, int(ends[b - 1]))
 
+		inside = None
+		if values.ndim == 3:
+			inside = numpy.arange(values.shape[2])[None, :] < (ends - starts)[:,
+				None]
 		for g, members in groups.items():
 			slots = numpy.array([members[int(i)] for i in self._groups[g]],
 				dtype=numpy.int64)
-			self._check_declared(g, slots, values)
+			self._check_declared(g, slots, values, inside)
+
+		# The encoders take float32 and integers as they are, and other types
+		# as float64, from a copy, since encoding goes on after this call
+		# returns and the caller may then change `values`.
+		if values.dtype == numpy.float32:
+			dtype = numpy.float32
+		elif values.dtype.kind in 'iu' and values.dtype.itemsize < 8 or \
+				values.dtype == numpy.int64:
+			dtype = numpy.int64
+		else:
+			dtype = numpy.float64
 
 		for g, members in groups.items():
 			slots = numpy.array([members[int(i)] for i in self._groups[g]],
 				dtype=numpy.int64)
+			identity = len(slots) == values.shape[1] and bool((slots ==
+				numpy.arange(len(slots))).all())
 			for a, b in zip(bounds[:-1], bounds[1:]):
-				block = values[a:b, slots]
+				block = values[a:b] if identity else values[a:b, slots]
 				if block.ndim == 2:
 					block = block[:, :, None]
-				block = numpy.ascontiguousarray(block, dtype=numpy.float64)
+				block = numpy.array(block, dtype=dtype, order='C')
 				self._write_group(g, int(tids[a]), starts[a:b], ends[a:b], block,
 					values.ndim == 3)
 
@@ -638,8 +657,10 @@ class FigWigWriter:
 		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
 			2 * self.n_jobs)))
 
-	def _check_declared(self, g, slots, values):
-		"""Raise if a value of a track with a declared dtype does not fit it."""
+	def _check_declared(self, g, slots, values, inside):
+		"""Raise if a value of a track with a declared dtype does not fit it.
+		`inside` masks the bases of windows that lie within their
+		chromosome."""
 
 		for i, slot in zip(self._groups[g].tolist(), slots.tolist()):
 			dtype = self.tracks[i]['dtype']
@@ -647,6 +668,8 @@ class FigWigWriter:
 				continue
 
 			block = values[:, slot].astype(numpy.float64, copy=False)
+			if inside is not None:
+				block = block[inside]
 			if numpy.isnan(block).any():
 				raise ValueError("track {!r} is {}, and a value is NaN.".format(
 					self.tracks[i]['name'], dtype))
@@ -679,39 +702,101 @@ class FigWigWriter:
 					None, True, False)
 			self._open[g] = None
 
-		# The tiles the items touch; the others stay zero and take nothing.
+		# The tiles the items touch; the others stay zero and take nothing. A
+		# tile that one window covers whole is encoded from the window's
+		# values; the rest are filled into the group's buffer.
 		k0, k1 = starts // tile, (ends - 1) // tile
 		counts = k1 - k0 + 1
 		total = int(counts.sum())
 		tiles = numpy.repeat(k0, counts) + numpy.arange(total) - numpy.repeat(
 			numpy.cumsum(counts) - counts, counts)
 		tiles = numpy.unique(tiles)
-		lo = numpy.searchsorted(ends, tiles * tile, side='right')
-		hi = numpy.searchsorted(starts, (tiles + 1) * tile, side='left')
+		last_tile = int(tiles[-1])
 
 		# The last tile stays open unless its last item ends on its edge, or
 		# at the end of the chromosome.
-		last_full = int(ends[-1]) == int(tiles[-1] + 1) * tile or \
+		last_full = int(ends[-1]) == (last_tile + 1) * tile or \
 			int(ends[-1]) == int(self._lengths[tid])
 		bound = n_tracks * tile * 4 + 8
 		per_batch = max(1, _BATCH_BYTES // bound)
-		for a in range(0, len(tiles), per_batch):
-			b = min(len(tiles), a + per_batch)
-			keep_last = b == len(tiles) and not last_full
-			self._encode(g, tid, tiles[a:b], lo[a:b], hi[a:b], (starts, ends,
-				values, by_base), preset and a == 0, keep_last)
+
+		# Whole tiles belong to the window that covers them, and the segments
+		# of whole and of partial tiles are encoded in tile order, so that
+		# each run of chunks in the index spans only its own tiles.
+		full_tiles = numpy.zeros(0, dtype=numpy.int64)
+		full_items = numpy.zeros(0, dtype=numpy.int64)
+		if by_base:
+			f0 = -(-starts // tile)
+			f1 = ends // tile - 1
+			whole = numpy.flatnonzero(f1 >= f0)
+			if len(whole) > 0:
+				spans = f1[whole] - f0[whole] + 1
+				full_tiles = numpy.repeat(f0[whole], spans) + numpy.arange(int(
+					spans.sum())) - numpy.repeat(numpy.cumsum(spans) - spans, spans)
+				full_items = numpy.repeat(whole, spans)
+
+		is_full = numpy.isin(tiles, full_tiles)
+		cuts = numpy.concatenate([[0], numpy.flatnonzero(is_full[1:] !=
+			is_full[:-1]) + 1, [len(tiles)]])
+		for a, b in zip(cuts[:-1], cuts[1:]):
+			if is_full[a]:
+				items = full_items[numpy.searchsorted(full_tiles, tiles[a:b])]
+				columns = tiles[a:b] * tile - starts[items]
+				for e in range(a, b, per_batch):
+					f = min(b, e + per_batch)
+					self._encode_dense(g, tid, values, items[e - a:f - a],
+						columns[e - a:f - a], tiles[e:f])
+			else:
+				segment = tiles[a:b]
+				lo = numpy.searchsorted(ends, segment * tile, side='right')
+				hi = numpy.searchsorted(starts, (segment + 1) * tile, side='left')
+				for e in range(0, len(segment), per_batch):
+					f = min(len(segment), e + per_batch)
+					keep_last = b == len(tiles) and f == len(segment) and \
+						not last_full
+					self._encode(g, tid, segment[e:f], lo[e:f], hi[e:f], (starts,
+						ends, values, by_base), preset and a == 0 and e == 0,
+						keep_last)
 
 		if not last_full:
-			self._open[g] = (tid, int(tiles[-1]))
+			self._open[g] = (tid, last_tile)
 
 		last = self._last[g]
 		if last is not None and last[0] != tid:
 			self._done[g].add(last[0])
 		self._last[g] = (tid, int(ends[-1]))
 
+	def _encode_dense(self, g, tid, values, items, columns, tiles):
+		"""Encode whole tiles covered by windows, each tile from window
+		items[t] at column columns[t], on the pool when there is one, and
+		compress them in the same task."""
+
+		task = (self._dense_task, g, tid, values, items, columns, tiles)
+		if self._pool is None:
+			self._inflight.append((task[0](*task[1:]), g, None))
+		else:
+			self._inflight.append((self._pool.submit(*task), g, None))
+
+	def _dense_task(self, g, tid, values, items, columns, tiles):
+		"""Encode and compress one batch of whole tiles. Returns (compressed
+		bytes, sizes, kind bytes, file tiles, stats) of the live tiles."""
+
+		n_tracks = len(self._groups[g])
+		tile = self.tile
+		n = len(tiles)
+		out = numpy.empty(n * (n_tracks * tile * 4 + 8), dtype=numpy.uint8)
+		bounds = numpy.zeros(n + 1, dtype=numpy.int64)
+		kinds = numpy.zeros(n, dtype=numpy.uint8)
+		stats = numpy.zeros((n_tracks, 5), dtype=numpy.float64)
+		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
+		_encode_dense_tiles(tile, values, items, columns, out, bounds, kinds,
+			stats)
+		return self._compress(g, tid, tiles, n, out, bounds, kinds) + (stats,)
+
 	def _encode(self, g, tid, tiles, lo, hi, items, preset, keep_last):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
-		and submit the chunks it made for compression and writing."""
+		on this thread, since it fills the group's buffer, and hand the
+		chunks it made to the compressors."""
 
 		n_tracks = len(self._groups[g])
 		tile = self.tile
@@ -737,37 +822,58 @@ class FigWigWriter:
 		if len(live) == 0:
 			return
 
+		args = (g, tid, tiles, n_done, out, bounds, kinds)
+		if self._pool is None:
+			self._inflight.append((self._compress(*args), g, None))
+		else:
+			self._inflight.append((self._pool.submit(self._compress, *args), g,
+				None))
+
+	def _compress(self, g, tid, tiles, n_done, out, bounds, kinds):
+		"""Compress the first `n_done` encoded tiles of a batch. Returns
+		(compressed bytes, sizes, kind bytes, file tiles) of the live
+		tiles."""
+
+		live = numpy.flatnonzero(kinds[:n_done])
 		gtiles = self._tile_offsets[tid] + tiles[:n_done][live]
+		if len(live) == 0:
+			return numpy.zeros(0, dtype=numpy.uint8), numpy.zeros(0,
+				dtype=numpy.int64), kinds[:0], gtiles
+
 		cuts = numpy.append(bounds[live], bounds[n_done])
 		data = out[:bounds[n_done]]
 		if self.level == 0:
-			parts = [(data, numpy.diff(cuts))]
-		elif self._pool is None:
-			parts = [_compress_blocks(self.engine, self.level, data, cuts)]
-		else:
-			shares = numpy.searchsorted(cuts[1:], cuts[-1] * numpy.arange(1,
-				self.n_jobs) / self.n_jobs).tolist()
-			parts = []
-			for a, b in zip([0] + shares, shares + [len(live)]):
-				if b > a:
-					parts.append(self._pool.submit(_compress_blocks, self.engine,
-						self.level, data[cuts[a]:cuts[b]], cuts[a:b + 1] - cuts[a]))
+			return data, numpy.diff(cuts), kinds[:n_done][live], gtiles
 
-		self._inflight.append((parts, g, gtiles, kinds[:n_done][live]))
+		compressed, sizes = _compress_blocks(self.engine, self.level, data, cuts)
+		return compressed, sizes, kinds[:n_done][live], gtiles
 
 	def _write(self, n_batches):
 		"""Write the first `n_batches` batches in flight to the file, in
-		order, and record their chunks in the index."""
+		order, record their chunks in the index, and fold in the stats of
+		those encoded on the pool."""
 
-		for parts, g, gtiles, kinds in self._inflight[:n_batches]:
+		for result, g, _ in self._inflight[:n_batches]:
+			if not isinstance(result, tuple):
+				result = result.result()
+			if len(result) == 5:
+				stats = result[4]
+				rows = self._groups[g]
+				self._stats[rows, 0] += stats[:, 0]
+				self._stats[rows, 1] += stats[:, 1]
+				self._stats[rows, 2] = numpy.minimum(self._stats[rows, 2],
+					stats[:, 2])
+				self._stats[rows, 3] = numpy.maximum(self._stats[rows, 3],
+					stats[:, 3])
+				self._stats[rows, 4] = numpy.maximum(self._stats[rows, 4],
+					stats[:, 4])
+
+			compressed, sizes, kinds, gtiles = result[:4]
+			if len(gtiles) == 0:
+				continue
+
 			offset = self._file.tell()
-			sizes = []
-			for part in parts:
-				out, part_sizes = part if isinstance(part, tuple) else part.result()
-				self._file.write(out[:part_sizes.sum()])
-				sizes.append(part_sizes)
-
-			sizes = numpy.concatenate(sizes)
+			self._file.write(compressed[:sizes.sum()])
 			self._kinds[g][gtiles] = kinds
 			self._sizes[g][gtiles] = sizes
 			total = int(sizes.sum())

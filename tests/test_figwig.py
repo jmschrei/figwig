@@ -574,8 +574,10 @@ def test_window_past_the_end_needs_nan(tmp_path):
 
 	with FigWigWriter(path, {'chr1': 80}, ['a', 'b'], tile=16) as writer:
 		values[0, 1, 35] = 1
-		with pytest.raises(ValueError, match="only where its values are NaN"):
+		with pytest.raises(ValueError, match="only where its values are NaN or 0"):
 			writer.write('chr1', [50], values)
+		values[0, 1, 35] = 0
+		writer.write('chr1', [50], values)
 		with pytest.raises(ValueError, match="at or past its length"):
 			writer.write('chr1', [80], numpy.full((1, 2, 10), numpy.nan))
 

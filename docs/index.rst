@@ -130,6 +130,7 @@ uninstalled.
 
    reading
    writing
+   figwig
    threads
    benchmarks
 
@@ -138,6 +139,7 @@ uninstalled.
    :caption: Command line
 
    bam2bw
+   converters
 
 .. toctree::
    :maxdepth: 1
@@ -145,3 +147,4 @@ uninstalled.
 
    api/bigwig
    api/writer
+   api/figwig

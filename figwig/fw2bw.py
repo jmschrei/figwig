@@ -16,6 +16,8 @@ import argparse
 import os
 import sys
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy
 
 from ._tables import write_table
@@ -23,6 +25,7 @@ from .figwig import FigWigReader
 from .writer import BigWigWriter
 
 _PIECE = 1 << 22
+_WINDOW = 1 << 16
 
 
 def _parser(prog):
@@ -97,22 +100,31 @@ def convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 	for i in ids.tolist():
 		by_group.setdefault(int(reader._group_of[i]), []).append(i)
 
+	# A group's tracks are read together and their bigWigs written at once,
+	# one track per thread, each writer compressing on its share of the
+	# threads.
 	paths = {}
+	pool = ThreadPoolExecutor(n_jobs) if n_jobs > 1 else None
 	for g, members in by_group.items():
 		writers = {}
 		try:
 			for i in members:
 				paths[i] = os.path.join(directory, bigwig_name(reader.tracks[i]))
 				writers[i] = BigWigWriter(paths[i], chrom_sizes, zooms=zooms,
-					level=level, n_jobs=n_jobs)
+					level=level, n_jobs=max(1, n_jobs // len(members)))
 
 			for chrom, length in chrom_sizes:
-				width = int(min(_PIECE, length))
-				for start in range(0, length, _PIECE):
-					values = reader.read(chrom, [start], width, tracks=members,
+				width = int(min(_WINDOW, length))
+				for a in range(0, length, _PIECE):
+					starts = numpy.arange(a, min(length, a + _PIECE), width)
+					values = reader.read(chrom, starts, width, tracks=members,
 						dtype='float32', n_jobs=n_jobs)
-					for k, i in enumerate(members):
-						writers[i].write(chrom, [start], values[:, k], missing=0.0)
+					if pool is None:
+						for k, i in enumerate(members):
+							writers[i].write(chrom, starts, values[:, k], missing=0.0)
+					else:
+						list(pool.map(lambda k: writers[members[k]].write(chrom,
+							starts, values[:, k], missing=0.0), range(len(members))))
 				if verbose:
 					print("{}: group {}, {}".format(path, g, chrom), file=sys.stderr)
 
@@ -122,6 +134,8 @@ def convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 			for writer in writers.values():
 				writer.__exit__(type(error), error, error.__traceback__)
 			raise
+	if pool is not None:
+		pool.shutdown()
 
 	keys = ['file', 'name', 'dtype']
 	for i in ids.tolist():

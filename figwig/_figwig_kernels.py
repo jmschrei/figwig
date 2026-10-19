@@ -313,6 +313,155 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 
 
 @numba.njit(nogil=True, cache=True)
+def _encode_dense_tiles(tile, values, items, columns, out, bounds, kinds, stats):
+	"""Encode whole tiles that windows cover, straight from their values.
+
+	Tile t is values[items[t], :, columns[t]:columns[t] + tile], where
+	`values` holds the windows' values, (windows, tracks, width), so no
+	scratch buffer is filled or cleared. The chunks, `bounds`, `kinds` and
+	`stats` are as in `_encode_tiles`, and every tile is encoded.
+	"""
+
+	n_tracks = values.shape[1]
+	n_tiles = items.shape[0]
+	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
+	mins = numpy.zeros(n_tracks, dtype=numpy.float64)
+	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
+	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
+	nonint = numpy.zeros(n_tracks, dtype=numpy.bool_)
+	position = bounds[0]
+
+	for t in range(n_tiles):
+		block = values[items[t]]
+		c0 = columns[t]
+		integral = True
+		total = 0
+		for g in range(n_tracks):
+			nnz[g] = 0
+			mins[g] = 0.0
+			maxs[g] = 0.0
+			sums[g] = 0.0
+			nonint[g] = False
+			for p in range(c0, c0 + tile):
+				v = numpy.float64(block[g, p])
+				if v != 0.0:
+					nnz[g] += 1
+					sums[g] += v
+					if v < mins[g]:
+						mins[g] = v
+					if v > maxs[g]:
+						maxs[g] = v
+					if v != numpy.floor(v) or v < -2147483648.0 or \
+							v >= 4294967296.0:
+						nonint[g] = True
+			if nonint[g]:
+				integral = False
+			total += nnz[g]
+
+		if total == 0:
+			kinds[t] = _ZERO
+			bounds[t + 1] = position
+			continue
+
+		low = mins.min()
+		high = maxs.max()
+		if not integral:
+			code = _F32
+		elif low >= 0.0:
+			code = _U8 if high <= 255.0 else _U16 if high <= 65535.0 else _U32
+		elif low >= -128.0 and high <= 127.0:
+			code = _I8
+		elif low >= -32768.0 and high <= 32767.0:
+			code = _I16
+		elif high <= 2147483647.0:
+			code = _I32
+		else:
+			code = _F32
+
+		w = _WIDTHS[code]
+		dense_bytes = n_tracks * tile * w
+		sparse_bytes = 4 * n_tracks + (2 * total + 3) // 4 * 4 + total * w
+
+		if dense_bytes <= sparse_bytes:
+			kinds[t] = _DENSE | (code << 2)
+			end = position + dense_bytes
+			if code == _U8:
+				for g in range(n_tracks):
+					for p in range(tile):
+						out[position + g * tile + p] = numpy.uint8(block[g, c0 + p])
+			elif code == _U16:
+				view = out[position:end].view(numpy.uint16)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.uint16(block[g, c0 + p])
+			elif code == _U32:
+				view = out[position:end].view(numpy.uint32)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.uint32(block[g, c0 + p])
+			elif code == _I8:
+				view = out[position:end].view(numpy.int8)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.int8(block[g, c0 + p])
+			elif code == _I16:
+				view = out[position:end].view(numpy.int16)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.int16(block[g, c0 + p])
+			elif code == _I32:
+				view = out[position:end].view(numpy.int32)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.int32(block[g, c0 + p])
+			else:
+				view = out[position:end].view(numpy.float32)
+				for g in range(n_tracks):
+					for p in range(tile):
+						view[g * tile + p] = numpy.float32(block[g, c0 + p])
+		else:
+			kinds[t] = _SPARSE | (code << 2)
+			counts = out[position:position + 4 * n_tracks].view(numpy.uint32)
+			deltas_at = position + 4 * n_tracks
+			values_at = deltas_at + (2 * total + 3) // 4 * 4
+			end = values_at + total * w
+			deltas = out[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
+			for p in range(deltas_at + 2 * total, values_at):
+				out[p] = 0
+
+			d = 0
+			o = values_at
+			for g in range(n_tracks):
+				counts[g] = nnz[g]
+				last = 0
+				for p in range(tile):
+					v = numpy.float64(block[g, c0 + p])
+					if v != 0.0:
+						deltas[d] = numpy.uint16(p - last)
+						_store(out, o, code, v)
+						last = p
+						d += 1
+						o += w
+
+		for p in range(end, _pad8(end)):
+			out[p] = 0
+		position = _pad8(end)
+		bounds[t + 1] = position
+
+		for g in range(n_tracks):
+			stats[g, 0] += sums[g]
+			stats[g, 1] += nnz[g]
+			if mins[g] < stats[g, 2]:
+				stats[g, 2] = mins[g]
+			if maxs[g] > stats[g, 3]:
+				stats[g, 3] = maxs[g]
+			if nonint[g]:
+				stats[g, 4] = 1.0
+
+	return n_tiles
+
+
+@numba.njit(nogil=True, cache=True)
 def _inflate_chunks(uncompress, data, starts, sizes, buffer, positions, lengths,
 	length):
 	"""Inflate chunks one after another into `buffer`, each starting on an

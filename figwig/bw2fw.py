@@ -27,8 +27,10 @@ from .figwig import _DEFAULT_GROUPS
 from .figwig import _DEFAULT_TILE
 from .figwig import FigWigWriter
 
-# A chromosome is read and written this many bases at a time.
+# A chromosome is read and written this many bases at a time, as windows of
+# this many bases.
 _PIECE = 1 << 22
+_WINDOW = 1 << 16
 
 
 def _parser(prog):
@@ -122,15 +124,16 @@ def convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_T
 			group = [readers[i] for i in members.tolist()]
 			names = [writer.tracks[i]['name'] for i in members.tolist()]
 			for chrom, length in chrom_sizes:
-				starts = numpy.arange(0, length, _PIECE)
-				width = int(min(_PIECE, length))
-				for a in range(0, len(starts), 1):
-					start = starts[a:a + 1]
+				# A piece is read as windows of a tile's width, so that the
+				# bigWig reader's batches spread over the threads.
+				width = int(min(_WINDOW, length))
+				for a in range(0, length, _PIECE):
+					starts = numpy.arange(a, min(length, a + _PIECE), width)
 					with warnings.catch_warnings():
 						warnings.simplefilter('ignore')
-						values = read_bigwig(group, [chrom], start, width,
-							n_jobs=n_jobs)
-					writer.write(chrom, start, values, tracks=names)
+						values = read_bigwig(group, [chrom] * len(starts), starts,
+							width, n_jobs=n_jobs)
+					writer.write(chrom, starts, values, tracks=names)
 				if verbose:
 					print("{}: group {} of {}, {}".format(output, g + 1,
 						len(writer._groups), chrom), file=sys.stderr)
