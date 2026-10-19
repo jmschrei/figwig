@@ -4,8 +4,11 @@
 """
 The `figwig` command, also run as `python -m figwig`. `figwig bam2bw`
 converts SAM/BAM files or BED/tsv files of fragments into per-base bigWig
-tracks (see `figwig.bam2bw`), and `figwig install-skill` installs figwig's
-Claude Code skill (see `figwig.install_skill`).
+tracks (see `figwig.bam2bw`), `figwig bam2fw` converts them into one figwig
+file (see `figwig.bam2fw`), `figwig bw2fw` and `figwig fw2bw` convert
+between bigWigs and figwig files (see `figwig.bw2fw` and `figwig.fw2bw`),
+and `figwig install-skill` installs figwig's Claude Code skill (see
+`figwig.install_skill`).
 """
 
 import sys
@@ -24,6 +27,13 @@ def _parser():
 		required=True)
 	commands.add_parser('bam2bw', help="Convert SAM/BAM or BED/tsv files into "
 		"per-base bigWig tracks of reads' 5' ends; see figwig bam2bw -h.")
+	commands.add_parser('bam2fw', help="Convert SAM/BAM or BED/tsv files into "
+		"one figwig file of per-base counts, a track per strand of each file; "
+		"see figwig bam2fw -h.")
+	commands.add_parser('bw2fw', help="Convert bigWig files into one figwig "
+		"file, one track per bigWig; see figwig bw2fw -h.")
+	commands.add_parser('fw2bw', help="Convert a figwig file's tracks into "
+		"bigWig files; see figwig fw2bw -h.")
 
 	install = commands.add_parser('install-skill', help="Install figwig's "
 		"Claude Code skill into a skills directory.", description="Copy "
@@ -49,6 +59,18 @@ def main(argv=None):
 	if len(argv) > 0 and argv[0] == 'bam2bw':
 		from . import bam2bw
 		bam2bw.main(argv[1:], prog='figwig bam2bw', fast_exit=True)
+		return
+	if len(argv) > 0 and argv[0] == 'bam2fw':
+		from . import bam2fw
+		bam2fw.main(argv[1:], prog='figwig bam2fw')
+		return
+	if len(argv) > 0 and argv[0] == 'bw2fw':
+		from . import bw2fw
+		bw2fw.main(argv[1:], prog='figwig bw2fw')
+		return
+	if len(argv) > 0 and argv[0] == 'fw2bw':
+		from . import fw2bw
+		fw2bw.main(argv[1:], prog='figwig fw2bw')
 		return
 
 	args = _parser().parse_args(argv)
