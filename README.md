@@ -34,7 +34,7 @@ integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
 | Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
 | Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
 | Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
-| Read 8,192 windows of 2,114 bp from 6 count tracks | **0.054 s** on 8 threads, from one figwig file | 0.152 s from 6 bigWigs, figwig |
+| Read 8,192 windows of 2,114 bp from 6 count tracks | **0.044 s** on 8 threads, from one figwig file | 0.174 s from 6 bigWigs, figwig |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
@@ -115,14 +115,14 @@ counted while still reading a BAM. On the 10 GB BAM at `-p 1` its peak is now
 from N genome-wide count tracks on tmpfs as N bigWigs with `read_bigwig` and
 as one figwig file with `FigWigReader.read`, in one call and in 32 batches of
 64 windows on one thread; median of three, opening included. The six real
-tracks are 971 MB as bigWigs and 266 MB as a figwig file.
+tracks are 971 MB as bigWigs and 227 MB as a figwig file.
 
 | tracks | bigWigs, 1 thread | figwig, 1 thread | bigWigs, 8 threads | figwig, 8 threads | bigWigs, batches | figwig, batches |
 |---|---|---|---|---|---|---|
-| 1 | 0.191 s | **0.057 s** | 0.040 s | **0.022 s** | 0.127 s | **0.018 s** |
-| 6 | 0.921 s | **0.254 s** | 0.152 s | **0.054 s** | 0.538 s | **0.070 s** |
-| 24 | 3.351 s | **0.666 s** | 0.516 s | **0.122 s** | 2.507 s | **0.185 s** |
-| 96 | 13.093 s | **2.415 s** | 1.930 s | **0.425 s** | 10.458 s | **0.661 s** |
+| 1 | 0.197 s | **0.037 s** | 0.042 s | **0.035 s** | 0.127 s | **0.014 s** |
+| 6 | 0.963 s | **0.121 s** | 0.174 s | **0.044 s** | 0.541 s | **0.036 s** |
+| 24 | 3.697 s | **0.355 s** | 0.582 s | **0.123 s** | 2.515 s | **0.102 s** |
+| 96 | 13.503 s | **1.325 s** | 2.051 s | **0.341 s** | 10.702 s | **0.357 s** |
 
 #### Threads
 
@@ -317,7 +317,7 @@ summed per label with `labels=`. It is written in position order, tiles
 across tracks, for reading windows across many tracks, or in track order for
 reading a few tracks over the genome, and `write_sparse` takes nonzero bases
 as entries, such as the cut sites of single cells. Six genome-wide count
-tracks that take 971 MB as bigWigs take 266 MB as one figwig file. The
+tracks that take 971 MB as bigWigs take 227 MB as one figwig file. The
 [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html) guide
 covers the format, the API and the converters.
 

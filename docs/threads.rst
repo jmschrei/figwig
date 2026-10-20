@@ -45,8 +45,8 @@ A figwig file is read the same way, in batches of chunks on up to
 chunks and inflated by libdeflate, or by zlib where the ``deflate`` package
 is not installed; a read cuts its chunks into about eight batches per
 thread, so that a read of a few thousand windows shares out evenly. On the
-six-track file of :doc:`benchmarks`, 8,192 windows took 0.13 s on one
-thread and 0.04 s on 8, and nothing more was gained past 8.
+six-track file of :doc:`benchmarks`, 8,192 windows took 0.12 s on one
+thread and 0.044 s on 8, and nothing more was gained past 8.
 
 Writing
 -------

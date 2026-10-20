@@ -28,7 +28,7 @@ many tracks. In *track order*, each track's
 nonzero bases lie in blocks per chromosome, so one track over the genome
 is a few slices and a window read searches each requested track's blocks.
 That is the order for reading a few of many tracks. Six genome-wide count
-tracks that take 971 MB as bigWigs take 226 MB as one figwig file
+tracks that take 971 MB as bigWigs take 227 MB as one figwig file
 (:doc:`benchmarks`).
 
 The examples on this page read ``k562.fw``, six genome-wide count tracks
