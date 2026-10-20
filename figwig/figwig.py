@@ -1975,7 +1975,9 @@ class FigWigReader:
 				values = numpy.concatenate([values] + [values[channels == s] for
 					_, s in extra])
 				channels = numpy.concatenate([channels] + [c for c, _ in extra])
-			order = numpy.lexsort((offsets, channels, rows))
+			# One key per entry sorts several times faster than three keys.
+			key = (rows * len(ids) + channels) * width + offsets
+			order = numpy.argsort(key)
 			return SparseWindows(rows[order], channels[order], offsets[order],
 				values[order].astype(dtype), (n, len(ids), width))
 

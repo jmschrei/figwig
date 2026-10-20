@@ -26,7 +26,7 @@ The reads are `--windows` windows of `--width` bases on the BED regions'
 midpoints, in one call on 1 and 8 threads and as 32 batches of 64 windows
 on one thread: dense, with `sparse=True`, and with `labels` (one label per
 strand for the six, six labels for the 96, ten random labels for cells), for
-every track and for a subset of 500 cells; and for cells also every cut of
+every track and for a subset of 100 cells; and for cells also every cut of
 20 cells over the genome with `read_entries`. Each configuration runs in
 its own process after a warm-up on 1,000 windows, opening included, and
 the table gives the median of `--repeats`. Every configuration of one set
@@ -183,8 +183,8 @@ def time_one(args):
 
 	n_tracks = args.n if reader is None else len(reader.tracks)
 	selection = None
-	if args.selection == 'subset500':
-		selection = numpy.sort(rng.choice(n_tracks, 500, replace=False))
+	if args.selection == 'subset100':
+		selection = numpy.sort(rng.choice(n_tracks, 100, replace=False))
 	if args.labels == 'strand':
 		labels = numpy.array([i % 2 for i in range(n_tracks)])
 	elif args.labels == 'six':
@@ -256,7 +256,7 @@ def configurations(args, sets):
 	out = []
 	for set_name, n, bigwigs, files, label_name in sets:
 		cells = set_name == 'cells'
-		selections = ['all', 'subset500'] if cells else ['all']
+		selections = ['all', 'subset100'] if cells else ['all']
 		kinds = []
 		if bigwigs:
 			kinds.append(('bigwigs', None, 'bigwig'))
@@ -283,7 +283,7 @@ def configurations(args, sets):
 						1, True))
 		if cells:
 			for name, path in files.items():
-				out.append((set_name, name, path, n, 'entries', 'subset500', 'none',
+				out.append((set_name, name, path, n, 'entries', 'subset100', 'none',
 					1, False))
 	return out
 
