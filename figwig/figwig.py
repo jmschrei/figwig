@@ -85,14 +85,12 @@ _MAX_GROUP_BASES = 1 << 29
 
 # The most bytes of chunks before compression that one task encodes or
 # decodes, the most and the fewest chunks one read task takes, how many
-# tasks each thread of a read should get and the most in all, and the most
-# bytes a dense read allocates before asking for a sparse or summed one
-# instead.
+# tasks each thread of a write should get, and the most bytes a dense read
+# allocates before asking for a sparse or summed one instead.
 _BATCH_BYTES = 1 << 25
 _BATCH_CHUNKS = 256
 _MIN_BATCH_CHUNKS = 16
 _BATCHES_PER_THREAD = 8
-_MAX_BATCHES = 128
 _MAX_DENSE_BYTES = 1 << 33
 
 # Whether a tile whose few tracks have values may be stored as a matrix
@@ -2365,13 +2363,12 @@ def _window_tiles(tile, tile_offsets, tids, starts, lengths, width):
 
 def _batch_chunks(n, n_jobs):
 	"""The most chunks or blocks in one batch of a read of n of them on
-	n_jobs threads: _BATCH_CHUNKS, or fewer so that each thread gets about
-	_BATCHES_PER_THREAD batches to balance the work, though no more than
-	_MAX_BATCHES in all, since each batch's Python work adds up, and at
-	least _MIN_BATCH_CHUNKS."""
+	n_jobs threads: _BATCH_CHUNKS, or fewer so that a small read still has
+	a batch for every thread, but at least _MIN_BATCH_CHUNKS. Smaller
+	batches than that balanced the threads no better and cost each about
+	25 microseconds of Python."""
 
-	target = min(_BATCHES_PER_THREAD * n_jobs, _MAX_BATCHES)
-	return min(_BATCH_CHUNKS, max(_MIN_BATCH_CHUNKS, -(-n // target)))
+	return min(_BATCH_CHUNKS, max(_MIN_BATCH_CHUNKS, -(-n // n_jobs)))
 
 
 def _compact(chunk, live):
