@@ -11,12 +11,11 @@ in track order read densely, as sparse entries and summed per label.
 
 Three sets of tracks:
 
-- the bigWigs given (six genome-wide count tracks in the paper's runs);
+- the bigWigs given (six genome-wide count tracks in the documented runs);
 - 96 tracks, the six plus copies rolled by a random offset per chromosome,
-  made as `compare_formats.py` makes them;
-- the single-cell cut sites of `--cuts`, a .npz from the figwig-singlecell
-  experiment's `filter_cells.py`: tid, pos, cell, count, barcodes, chroms,
-  lengths, one track per cell.
+made as `compare_formats.py` makes them;
+- the single-cell cut sites of `--cuts`, a .npz holding tid, pos, cell,
+count, barcodes, chroms and lengths, one track per cell.
 
 For each set the files are: the N bigWigs (not for cells); a figwig file in
 groups of 8 (64 for cells) written as figwig 0.1 wrote them, with
