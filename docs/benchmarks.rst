@@ -277,31 +277,70 @@ tracks  file and read             1 thread          8 threads         batches of
 6       one group raw, sparse     0.216 s           0.149 s
 6       bigWigs, 2 labels         1.004 s           0.263 s           0.556 s
 6       one group raw, 2 labels   0.092 s           0.047 s           0.024 s
-96      bigWigs                   13.741 s          3.188 s           10.827 s
-96      groups of 8, dense        2.419 s           0.532 s           0.692 s
-96      one group, dense          1.961 s           0.372 s           0.521 s
-96      one group raw, dense      0.828 s           0.184 s           0.190 s
-96      track order, dense        4.314 s           1.000 s           10.924 s
-96      groups of 8, sparse       2.893 s           1.030 s
-96      one group raw, sparse     1.002 s           0.599 s
-96      bigWigs, 6 labels         14.346 s          2.959 s           10.987 s
-96      groups of 8, 6 labels     2.215 s           0.508 s           0.633 s
-96      one group raw, 6 labels   0.485 s           0.122 s           0.104 s
+96      bigWigs                   13.566 s          1.973 s           10.677 s
+96      groups of 8, dense        2.462 s           0.493 s           0.676 s
+96      one group, dense          2.016 s           0.370 s           0.508 s
+96      one group raw, dense      0.784 s           0.175 s           0.178 s
+96      track order, dense        3.994 s           0.859 s           11.774 s
+96      groups of 8, sparse       2.884 s           1.160 s
+96      one group raw, sparse     0.974 s           0.588 s
+96      bigWigs, 6 labels         14.241 s          2.799 s           10.720 s
+96      groups of 8, 6 labels     2.196 s           0.743 s           0.615 s
+96      one group raw, 6 labels   0.438 s           0.422 s           0.106 s
 ======  ========================  ================  ================  =======================
 
-An uncompressed file in one group reads dense windows 2.6 times faster
-than the compressed groups of 8 on one thread, and sums 96 tracks into 6
-labels 4.6 times faster, at 2.2 to 2.4 times the size (583 MB against 267
-for the six tracks, 9.3 GB against 4.2 for the 96); compressed, one group
-of 96 is 7% smaller than groups of 8 and 20% faster. The sparse return is
-slower than the dense one on count tracks this dense, since it lists and
-sorts millions of entries (4.6 million for the six tracks), and is meant
-for tracks that are mostly zero. Track order reads windows across many
-tracks slowest, 10.9 s for the 96-track batches where one group takes 0.2
-s, since every window searches a block of every track; it is the order for
-the single-cell reads below. The files: six tracks 267 MB in groups of 8
-or one group compressed, 583 MB uncompressed, 961 MB in track order; 96
-tracks 4,229, 3,912, 9,302 and 15,369 MB.
+An uncompressed file in one group reads dense windows 2.6 to 3.1 times
+faster than the compressed groups of 8 on one thread, and sums 96 tracks
+into 6 labels 5 times faster, at 2.2 to 2.4 times the size (583 MB against
+267 for the six tracks, 9.3 GB against 4.2 for the 96); compressed, one
+group of 96 is 7% smaller than groups of 8 and 20% faster. Sums per label
+on several threads go into one copy of the output per thread, which are
+added at the end, so they gain less from threads than dense reads do. The
+sparse return is slower than the dense one on count tracks this dense,
+since it lists and sorts millions of entries (4.6 million for the six
+tracks), and is meant for tracks that are mostly zero. Track order reads
+windows across many tracks slowest, 11.8 s for the 96-track batches where
+one group takes 0.2 s, since every window searches a block of every
+track; it is the order for the single-cell reads below. The files: six
+tracks 267 MB in groups of 8 or one group compressed, 583 MB uncompressed,
+961 MB in track order; 96 tracks 4,229, 3,912, 9,302 and 15,369 MB.
+
+Single cells
+~~~~~~~~~~~~
+
+The same script on the 10,246 called cells of the 10x PBMC ATAC-seq
+experiment (``10k_pbmc_ATACv2_nextgem_Chromium_Controller``), 488 million
+Tn5 cut sites written with ``write_sparse`` as one uint8 track per cell,
+at a tile of 16,384 bases: in groups of 64 cells as figwig 0.1 would have
+laid them out, in one group compressed and uncompressed, and in track
+order. The reads were 512 windows of 2,114 bp: the cells summed into 10
+labels (pseudobulks), in one call and as 32 batches of 64 windows; every
+cell's nonzero bases with ``sparse=True``; 100 cells densely and sparsely;
+and the genome-wide cuts of 20 cells with ``read_entries``. No bigWigs:
+10,246 of them is not a layout anyone keeps. Medians of three; every
+configuration gave the same cuts.
+
+=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
+file                   MB       build    10 labels, 1 / 8 thr  10 labels, 32 batches    sparse, all, 1 / 8    dense, 100 cells, 1 / 8  sparse, 100 cells  20 cells, genome
+=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
+groups of 64           2,135    94 s     0.63 / 0.63 s         1.41 s                   0.66 / 0.69 s         0.25 / 0.23 s            0.21 s             3.99 s
+one group, compressed  1,263    154 s    0.19 / 0.20 s         0.42 s                   0.25 / 0.24 s         0.15 / 0.13 s            0.13 s             17.65 s
+one group, raw         2,588    131 s    0.10 / 0.11 s         0.33 s                   0.15 / 0.14 s         0.05 / 0.05 s            0.03 s             1.58 s
+track order            2,452    88 s     5.87 / 4.77 s         36.28 s                  6.08 / 4.86 s         0.09 / 0.09 s            0.09 s             0.17 s
+=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
+
+Every cell in one uncompressed group reads pseudobulks of 512 windows in
+0.10 s and its 32 batches in 0.33 s, 6 and 4 times faster than the groups
+of 64, whose chunks carry a count for every cell of the group in every
+tile; the compressed one-group file is the smallest, 1.26 GB for 488
+million cuts, at twice the read time. Track order is 60 times slower for
+pseudobulks, since every window searches a block of each of 10,246 cells,
+and 10 times faster than the uncompressed position order for 20 cells'
+cuts over the genome, which position order answers by decoding every
+chunk; compressed position order takes 17.7 s for that. These reads gain
+nothing from threads, since a read of 512 windows is a few tens of
+milliseconds of decoding.
+
 
 Thread scaling
 --------------
