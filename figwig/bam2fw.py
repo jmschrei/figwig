@@ -210,6 +210,8 @@ def main(argv=None, prog='figwig bam2fw'):
 		with FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 				genome=args.genome, tile=args.tile, groups=groups, level=args.level,
 				n_jobs=cores) as writer:
+			# The arrays `_write_counts` makes are the writer's to keep.
+			writer._copies = False
 			for strands, group in zip(files, groups):
 				read_depth = None
 				if args.read_depth:

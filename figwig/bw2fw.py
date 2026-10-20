@@ -16,6 +16,8 @@ import os
 import sys
 import warnings
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy
 
 from ._tables import _match_rows
@@ -118,8 +120,8 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 	"""Write the bigWigs `filenames` as the tracks of `output`."""
 
 	readers = [BigWigReader(filename) for filename in filenames]
-	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
-			groups=groups, level=level, n_jobs=n_jobs) as writer:
+
+	def pieces(writer):
 		for g, members in enumerate(writer._groups):
 			group = [readers[i] for i in members.tolist()]
 			names = [writer.tracks[i]['name'] for i in members.tolist()]
@@ -129,14 +131,39 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 				width = int(min(_WINDOW, length))
 				for a in range(0, length, _PIECE):
 					starts = numpy.arange(a, min(length, a + _PIECE), width)
-					with warnings.catch_warnings():
-						warnings.simplefilter('ignore')
-						values = read_bigwig(group, [chrom] * len(starts), starts,
-							width, n_jobs=n_jobs)
-					writer.write(chrom, starts, values, tracks=names)
-				if verbose:
-					print("{}: group {} of {}, {}".format(output, g + 1,
-						len(writer._groups), chrom), file=sys.stderr)
+					yield g, group, names, chrom, starts, width
+
+	def read_piece(piece):
+		g, group, names, chrom, starts, width = piece
+		with warnings.catch_warnings():
+			warnings.simplefilter('ignore')
+			return read_bigwig(group, [chrom] * len(starts), starts, width,
+				n_jobs=n_jobs)
+
+	# Each piece is read while the one before it is written: the writer
+	# encodes and compresses on its own threads, and the arrays read here
+	# are handed to it without a copy, since nothing here touches them
+	# again.
+	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
+			groups=groups, level=level, n_jobs=n_jobs) as writer, \
+			ThreadPoolExecutor(1) as reader:
+		writer._copies = False
+		ahead = None
+		for piece in pieces(writer):
+			future = reader.submit(read_piece, piece)
+			if ahead is not None:
+				_write_piece(writer, output, ahead, verbose)
+			ahead = (piece, future)
+		if ahead is not None:
+			_write_piece(writer, output, ahead, verbose)
+
+
+def _write_piece(writer, output, ahead, verbose):
+	(g, group, names, chrom, starts, width), future = ahead
+	writer.write(chrom, starts, future.result(), tracks=names)
+	if verbose and int(starts[-1]) + width >= writer.chrom_sizes[chrom]:
+		print("{}: group {} of {}, {}".format(output, g + 1, len(
+			writer._groups), chrom), file=sys.stderr)
 
 
 def main(argv=None, prog='figwig bw2fw'):
