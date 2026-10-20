@@ -1229,7 +1229,9 @@ def test_write_sparse_reads_back(cells, key, read_batching):
 	rng = numpy.random.default_rng(31)
 	chroms, starts = random_windows(rng, 150, 200)
 	subset = numpy.sort(rng.choice(120, 30, replace=False))
-	for tracks in (None, subset):
+	# One cell of 120 is looked up among a matrix chunk's present tracks by
+	# binary search; thirty are found by walking them.
+	for tracks in (None, subset, subset[:1]):
 		picked = numpy.arange(120) if tracks is None else tracks
 		y = reader.read(chroms, starts, 200, tracks=tracks, dtype='float64')
 		exp = numpy.zeros((150, len(picked), 200))

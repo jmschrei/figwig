@@ -1663,6 +1663,11 @@ class FigWigReader:
 			range(n_groups)]
 		if any(len(group) == 0 for group in self._groups):
 			raise ValueError(error + ": a group has no tracks.")
+		self._slot_of = numpy.zeros(n_tracks, dtype=numpy.int64)
+		for group in self._groups:
+			self._slot_of[group] = numpy.arange(len(group))
+		self._dtype_codes = numpy.array([_DTYPES.index(track['dtype']) for
+			track in tracks], dtype=numpy.int64)
 
 		self._tids = {name: i for i, (name, _) in enumerate(chroms)}
 		self._lengths = numpy.array([length for _, length in chroms],
@@ -1996,11 +2001,12 @@ class FigWigReader:
 				out3, mode, n_jobs)
 		else:
 			tasks = []
-			for g in sorted(set(self._group_of[list(first_channel)].tolist())):
+			read_ids = numpy.array(list(first_channel), dtype=numpy.int64)
+			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
+			for g in numpy.unique(self._group_of[read_ids]).tolist():
+				mine = self._group_of[read_ids] == g
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
-				for i, channel in first_channel.items():
-					if self._group_of[i] == g:
-						slots[numpy.flatnonzero(self._groups[g] == i)[0]] = channel
+				slots[self._slot_of[read_ids[mine]]] = channels[mine]
 				tasks.extend(self._plan(g, slots, tids, starts, lengths, width,
 					out3, mode, n_jobs))
 
@@ -2135,9 +2141,12 @@ class FigWigReader:
 	def _dtype(self, ids, dtype, check=True):
 		"""The output dtype for these tracks, checked against their values."""
 
-		own = [numpy.dtype(self.tracks[i]['dtype']) for i in ids.tolist()]
+		# The tracks' dtypes as codes into _DTYPES, so that a read of
+		# thousands of tracks does not build a dtype for each.
+		codes = numpy.unique(self._dtype_codes[ids])
+		own = [numpy.dtype(_DTYPES[c]) for c in codes.tolist()]
 		if dtype is None:
-			if all(d == own[0] for d in own):
+			if len(own) == 1:
 				dtype = own[0]
 			elif any(d.kind == 'f' for d in own):
 				dtype = numpy.dtype(numpy.float32)
@@ -2155,15 +2164,18 @@ class FigWigReader:
 
 		if check and dtype.kind in 'iu':
 			info = numpy.iinfo(dtype)
-			for i, d in zip(ids.tolist(), own):
-				if d.kind == 'f':
-					raise ValueError("track {!r} is float32 and cannot be read as "
-						"{}.".format(self.tracks[i]['name'], dtype))
-				if self.stats[i]['min'] < info.min or self.stats[i]['max'] > \
-						info.max:
-					raise ValueError("track {!r} has values from {} to {}, which "
-						"{} does not hold.".format(self.tracks[i]['name'],
-						self.stats[i]['min'], self.stats[i]['max'], dtype))
+			floats = numpy.flatnonzero(self._dtype_codes[ids] == _DTYPES.index(
+				'float32'))
+			if len(floats) > 0:
+				raise ValueError("track {!r} is float32 and cannot be read as {}."
+					.format(self.tracks[int(ids[floats[0]])]['name'], dtype))
+			outside = numpy.flatnonzero((self.stats['min'][ids] < info.min) | (
+				self.stats['max'][ids] > info.max))
+			if len(outside) > 0:
+				i = int(ids[outside[0]])
+				raise ValueError("track {!r} has values from {} to {}, which {} "
+					"does not hold.".format(self.tracks[i]['name'], self.stats[i][
+					'min'], self.stats[i]['max'], dtype))
 
 		return dtype
 

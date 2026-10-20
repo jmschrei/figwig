@@ -993,9 +993,9 @@ def _value(values, i, ones):
 # values are all 1 and whose view is empty.
 
 @numba.njit(nogil=True, cache=True)
-def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots, values,
-	ones, base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-	out_channels, out_offsets, out_values):
+def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
+	selected, values, ones, base, a, b, start, channels, accumulate, fill, row,
+	k_out, out_rows, out_channels, out_offsets, out_values):
 	"""One window's bases of one sparse or matrix chunk: set or added into
 	the window's `channels`, (channels, width) of the output, when
 	`channels` has a row, or listed as entries from k_out on when `fill`,
@@ -1004,8 +1004,8 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots, values,
 	A sparse chunk's varints start at `at` of `data`, `counts` per track; a
 	matrix chunk's present `tracks`, `ptr` and uint16 `offsets` are as its
 	header gives them, and each present track's first base in the window
-	is found by binary search. `values` is the typed view of the chunk's
-	values.
+	is found by binary search. `selected` lists the group's tracks with a
+	slot, ascending. `values` is the typed view of the chunk's values.
 	"""
 
 	listing = channels.shape[0] == 0
@@ -1045,7 +1045,26 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots, values,
 			d += count
 		return k_out
 
-	for k in range(tracks.shape[0]):
+	# The present tracks that are read: all of them in turn, or, when few
+	# of the group's tracks are read, each of those looked up among the
+	# present ones by binary search.
+	n_present = tracks.shape[0]
+	few = selected.shape[0] * 16 < n_present
+	for j in range(selected.shape[0] if few else n_present):
+		if few:
+			g = selected[j]
+			lo, hi = 0, n_present
+			while lo < hi:
+				mid = (lo + hi) // 2
+				if numpy.int64(tracks[mid]) < g:
+					lo = mid + 1
+				else:
+					hi = mid
+			if lo == n_present or numpy.int64(tracks[lo]) != g:
+				continue
+			k = lo
+		else:
+			k = j
 		slot = slots[tracks[k]]
 		if slot < 0:
 			continue
@@ -1093,9 +1112,9 @@ def _dense_entries(data, at, code, n, row, slot, a, start, fill, k_out,
 
 
 @numba.njit(nogil=True, cache=True)
-def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots, base,
-	start, a, b, channels, accumulate, fill, row, k_out, out_rows, out_channels,
-	out_offsets, out_values):
+def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
+	selected, base, start, a, b, channels, accumulate, fill, row, k_out,
+	out_rows, out_channels, out_offsets, out_values):
 	"""The bases of one window in one chunk, set or added into `channels`
 	or listed as entries, by the chunk's kind and element type. Returns the
 	entries in the window, for a listing."""
@@ -1134,42 +1153,42 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots, base,
 	v0 = values_at
 	if code == _U8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + total], False, base, a, b, start, channels,
+			slots, selected, data[v0:v0 + total], False, base, a, b, start, channels,
 			accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
 			out_values)
 	elif code == _U16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + 2 * total].view(numpy.uint16), False, base, a, b,
+			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	elif code == _U32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + 4 * total].view(numpy.uint32), False, base, a, b,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	elif code == _I8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + total].view(numpy.int8), False, base, a, b,
+			slots, selected, data[v0:v0 + total].view(numpy.int8), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	elif code == _I16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + 2 * total].view(numpy.int16), False, base, a, b,
+			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	elif code == _I32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + 4 * total].view(numpy.int32), False, base, a, b,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	elif code == _F32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
-			slots, data[v0:v0 + 4 * total].view(numpy.float32), False, base, a,
+			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), False, base, a,
 			b, start, channels, accumulate, fill, row, k_out, out_rows,
 			out_channels, out_offsets, out_values)
 	return _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
-		data[v0:v0], True, base, a, b, start, channels, accumulate, fill, row,
-		k_out, out_rows, out_channels, out_offsets, out_values)
+		selected, data[v0:v0], True, base, a, b, start, channels, accumulate,
+		fill, row, k_out, out_rows, out_channels, out_offsets, out_values)
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1197,6 +1216,7 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	width = out.shape[2]
 	empty = numpy.zeros(0, dtype=numpy.int64)
 	empty_values = numpy.zeros(0, dtype=numpy.float64)
+	selected = numpy.flatnonzero(slots >= 0)
 	for q in range(pair_chunks.shape[0]):
 		base = pair_bases[q]
 		start = pair_starts[q]
@@ -1216,8 +1236,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			continue
 
 		_window_of_chunk(tile, data, positions[chunk], kinds[chunk] & 3,
-			kinds[chunk] >> 2, n_tracks, slots, base, start, a, b, out[row],
-			accumulate, False, row, 0, empty, empty, empty, empty_values)
+			kinds[chunk] >> 2, n_tracks, slots, selected, base, start, a, b,
+			out[row], accumulate, False, row, 0, empty, empty, empty,
+			empty_values)
 
 	return 0
 
@@ -1237,6 +1258,7 @@ def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 	k_out = 0
 	no_channels = numpy.zeros((0, 0), dtype=numpy.float64)
+	selected = numpy.flatnonzero(slots >= 0)
 	for q in range(pair_chunks.shape[0]):
 		base = pair_bases[q]
 		start = pair_starts[q]
@@ -1248,9 +1270,9 @@ def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			continue
 
 		k_out = _window_of_chunk(tile, data, positions[chunk], kinds[chunk] & 3,
-			kinds[chunk] >> 2, n_tracks, slots, base, start, a, b, no_channels,
-			False, fill, row, k_out, out_rows, out_channels, out_offsets,
-			out_values)
+			kinds[chunk] >> 2, n_tracks, slots, selected, base, start, a, b,
+			no_channels, False, fill, row, k_out, out_rows, out_channels,
+			out_offsets, out_values)
 
 	return k_out
 
