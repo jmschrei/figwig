@@ -23,8 +23,10 @@ _ZLIB_UNCOMPRESS = []
 _ZLIB_COMPRESS = []
 
 # libdeflate's compressor functions through ctypes, from the `deflate`
-# package, loaded on the first write that uses them.
+# package, loaded on the first write that uses them, and its decompressor
+# functions, loaded on the first figwig read.
 _LIBDEFLATE = []
+_LIBDEFLATE_INFLATE = []
 
 # The names zlib's shared library goes by on Linux, macOS and Windows, tried
 # in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
@@ -165,6 +167,48 @@ def _load_libdeflate():
 	free.argtypes = [ctypes.c_size_t]
 	free.restype = None
 	return alloc, compress, free
+
+
+def _libdeflate_inflate():
+	"""libdeflate's (alloc_decompressor, zlib_decompress, free_decompressor)
+	as ctypes functions, or None if the `deflate` package is not installed
+	or its library does not export them.
+
+	`_inflate_chunks_libdeflate` calls `zlib_decompress` without the GIL;
+	it inflates a stream about twice as fast as zlib's uncompress(). A
+	decompressor is passed to it as an integer, as a compressor is to
+	`zlib_compress`.
+	"""
+
+	if len(_LIBDEFLATE_INFLATE) == 0:
+		_LIBDEFLATE_INFLATE.append(_load_libdeflate_inflate())
+
+	return _LIBDEFLATE_INFLATE[0]
+
+
+def _load_libdeflate_inflate():
+	try:
+		import ctypes
+		import deflate._deflate
+	except ImportError:
+		return None
+
+	try:
+		library = ctypes.CDLL(deflate._deflate.__file__)
+		alloc = library.libdeflate_alloc_decompressor
+		decompress = library.libdeflate_zlib_decompress
+		free = library.libdeflate_free_decompressor
+	except (OSError, AttributeError):
+		return None
+
+	alloc.argtypes = []
+	alloc.restype = ctypes.c_size_t
+	decompress.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+		ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+	decompress.restype = ctypes.c_int
+	free.argtypes = [ctypes.c_size_t]
+	free.restype = None
+	return alloc, decompress, free
 
 
 @numba.njit(nogil=True, cache=True)
