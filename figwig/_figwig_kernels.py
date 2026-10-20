@@ -1338,7 +1338,7 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 		row, slot = pair_rows[q], pair_slots[q]
 		view = data[position:position + 4 * n].view(numpy.uint32)
 		values_at = _pad8(position + 4 * n)
-		dst = out[row, slot]
+		dst = out[row, slot] if not list_entries else out[0, 0]
 		v0 = values_at
 		if code == _U8:
 			k_out = _block_window(view, data[v0:v0 + n], False, n, start, end,
