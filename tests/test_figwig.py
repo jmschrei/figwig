@@ -944,17 +944,16 @@ def test_encode_tiles_layout():
 		False, False, True, out, bounds, kinds, stats)
 	assert n == 2 and not buffer.any()
 	assert kinds[0] == 1 | (0 << 2) and kinds[1] == 2 | (1 << 2)
-	# The sparse chunk: two counts, where each track's offsets start and
-	# the last end, three one-byte varints padded to 4, three uint16
-	# values, padded to 8.
-	assert bounds.tolist() == [0, 32, 32 + 8 + 12 + 4 + 6 + 2]
+	# The sparse chunk: two counts, the bytes of each track's offsets,
+	# three one-byte varints padded to 4, three uint16 values, padded to 8.
+	assert bounds.tolist() == [0, 32, 32 + 8 + 8 + 4 + 6 + 6]
 	numpy.testing.assert_array_equal(out[:16], numpy.arange(16))
 	numpy.testing.assert_array_equal(out[16:32], 1)
 	counts = out[32:40].view(numpy.uint32)
 	assert counts.tolist() == [1, 2]
-	assert out[40:52].view(numpy.uint32).tolist() == [0, 1, 3]
-	assert out[52:56].tolist() == [4, 1, 14, 0]
-	sparse_values = out[56:62].view(numpy.uint16)
+	assert out[40:48].view(numpy.uint32).tolist() == [1, 2]
+	assert out[48:52].tolist() == [4, 1, 14, 0]
+	sparse_values = out[52:58].view(numpy.uint16)
 	assert sparse_values.tolist() == [300, 5, 6]
 	assert stats[:, 1].tolist() == [16, 18] and stats[:, 0].tolist() == [420, 27]
 	assert stats[:, 3].tolist() == [300, 6] and stats[:, 4].tolist() == [0, 0]
@@ -976,11 +975,10 @@ def test_encode_tiles_varints_and_ones():
 		numpy.array([0]), numpy.array([1024]), values, True, buffer, False,
 		False, True, out, bounds, kinds, stats)
 	assert kinds[0] == 2 | (7 << 2)
-	assert out[:4].view(numpy.uint32)[0] == 4
-	assert out[4:12].view(numpy.uint32).tolist() == [0, 5]
+	assert out[:8].view(numpy.uint32).tolist() == [4, 5]
 	# The differences 0, 127 and 1 take a byte each, and 895 two.
-	assert out[12:18].tolist() == [0, 127, 1, 0x80 | (895 & 127), 895 >> 7, 0]
-	assert bounds[1] == 24 and stats[0].tolist() == [4, 4, 0, 1, 0]
+	assert out[8:14].tolist() == [0, 127, 1, 0x80 | (895 & 127), 895 >> 7, 0]
+	assert bounds[1] == 16 and stats[0].tolist() == [4, 4, 0, 1, 0]
 
 
 def test_encode_tiles_keeps_an_open_tile():
@@ -1015,12 +1013,11 @@ def test_check_chunks_rejects_short_and_overrunning_chunks():
 	positions = numpy.array([0, 0, 0, 0], dtype=numpy.int64)
 	# dense uint8 of 16 bytes: a length of 16 passes, 15 fails; an unknown
 	# kind fails; a sparse chunk whose one offset is past the tile fails.
-	data[:4].view(numpy.uint32)[0] = 1
-	data[4:12].view(numpy.uint32)[:] = [0, 1]
-	data[12] = 16
+	data[:8].view(numpy.uint32)[:] = [1, 1]
+	data[8] = 16
 	slots = numpy.array([0])
 	kinds = numpy.array([1, 1, 3, 2], dtype=numpy.uint8)
-	lengths = numpy.array([16, 15, 16, 20], dtype=numpy.int64)
+	lengths = numpy.array([16, 15, 16, 16], dtype=numpy.int64)
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		slots, failed) == 3
 	assert failed.tolist() == [0, 1, 1, 1]
@@ -1028,19 +1025,19 @@ def test_check_chunks_rejects_short_and_overrunning_chunks():
 	# An offset of 15 passes; a varint that runs past the track's bytes, or
 	# bytes the varints do not fill, fail; the offsets of a track that is
 	# not read are not checked.
-	data[12] = 15
+	data[8] = 15
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		slots, failed) == 2 and failed[3] == 0
-	data[12] = 128 | 15
+	data[8] = 128 | 15
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		slots, failed) == 3
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		numpy.array([-1]), failed) == 2
-	data[12] = 15
-	data[8:12].view(numpy.uint32)[0] = 2
+	data[8] = 15
+	data[4:8].view(numpy.uint32)[0] = 2
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		slots, failed) == 3
