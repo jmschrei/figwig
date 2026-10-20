@@ -535,14 +535,21 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 		for i in range(lo[t], hi[t]):
 			a = max(starts[i], base)
 			b = min(ends[i], base + width)
+			n = b - a
 			for g in range(n_tracks):
-				row = buffer[g, a - base:b - base]
-				if by_base:
+				# A short item, such as one base's counts, is copied by
+				# index; a long one through row views, which vectorize.
+				if n < 16:
+					for p in range(n):
+						buffer[g, a - base + p] = values[i, g, (a - starts[i] + p) if
+							by_base else 0]
+				elif by_base:
+					row = buffer[g, a - base:b - base]
 					source = values[i, g, a - starts[i]:b - starts[i]]
-					for p in range(b - a):
+					for p in range(n):
 						row[p] = source[p]
 				else:
-					row[:] = values[i, g, 0]
+					buffer[g, a - base:b - base] = values[i, g, 0]
 
 		if t == n_tiles - 1 and keep_last:
 			break
