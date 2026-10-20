@@ -85,12 +85,14 @@ _MAX_GROUP_BASES = 1 << 29
 
 # The most bytes of chunks before compression that one task encodes or
 # decodes, the most and the fewest chunks one read task takes, how many
-# tasks each thread of a read should get, and the most bytes a dense read
-# allocates before asking for a sparse or summed one instead.
+# tasks each thread of a read should get and the most in all, and the most
+# bytes a dense read allocates before asking for a sparse or summed one
+# instead.
 _BATCH_BYTES = 1 << 25
 _BATCH_CHUNKS = 256
 _MIN_BATCH_CHUNKS = 16
 _BATCHES_PER_THREAD = 8
+_MAX_BATCHES = 128
 _MAX_DENSE_BYTES = 1 << 33
 
 # Whether a tile whose few tracks have values may be stored as a matrix
@@ -2003,12 +2005,16 @@ class FigWigReader:
 			tasks = []
 			read_ids = numpy.array(list(first_channel), dtype=numpy.int64)
 			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
-			for g in numpy.unique(self._group_of[read_ids]).tolist():
+			groups_read = numpy.unique(self._group_of[read_ids]).tolist()
+			tiles = _window_tiles(self.tile, self._tile_offsets, tids, starts,
+				lengths, width)
+			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_jobs)
+			for g in groups_read:
 				mine = self._group_of[read_ids] == g
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 				slots[self._slot_of[read_ids[mine]]] = channels[mine]
-				tasks.extend(self._plan(g, slots, tids, starts, lengths, width,
-					out3, mode, n_jobs))
+				tasks.extend(self._plan(g, slots, tiles, starts, width, out3, mode,
+					most))
 
 		self._run(tasks, n_jobs, out3 if mode == 'sum' else None)
 
@@ -2179,41 +2185,23 @@ class FigWigReader:
 
 		return dtype
 
-	def _plan(self, g, slots, tids, starts, lengths, width, out, mode, n_jobs):
+	def _plan(self, g, slots, tiles, starts, width, out, mode, most):
 		"""The tasks that read group g's part of the windows: each a batch
-		of chunks and the (window, tile) pairs that fall in them."""
+		of up to `most` chunks and the (window, tile) pairs that fall in
+		them, from the windows' tiles as `_window_tiles` gives them."""
 
 		tile = self.tile
 		kinds, sizes, raws, offsets = self._group_index(g)
-
-		# The tiles each window overlaps, clipped to its chromosome.
-		stops = numpy.minimum(starts + width, lengths)
-		k0 = starts // tile
-		k1 = (stops - 1) // tile
-		counts = numpy.maximum(k1 - k0 + 1, 0)
-		counts[stops <= starts] = 0
-		total = int(counts.sum())
+		rows, local, unique, first, inverse, total = tiles
 		if total == 0:
 			return []
 
-		rows = numpy.repeat(numpy.arange(len(starts)), counts)
-		local = numpy.repeat(k0, counts) + numpy.arange(total) - numpy.repeat(
-			numpy.cumsum(counts) - counts, counts)
-		gtiles = self._tile_offsets[tids[rows]] + local
-		order = numpy.argsort(gtiles, kind='stable')
-		rows, local, gtiles = rows[order], local[order], gtiles[order]
-
-		unique, first = numpy.unique(gtiles, return_index=True)
-		inverse = numpy.repeat(numpy.arange(len(unique)), numpy.diff(
-			numpy.append(first, total)))
 		chunk_kinds = kinds[unique]
 		live = chunk_kinds != 0
 		bounds = raws[unique] + 8
 
 		# Batches of chunks, cut where a batch would hold too many bytes
-		# before compression or too many chunks: at most _BATCH_CHUNKS, and
-		# fewer when that would give the threads too few batches to share.
-		most = _batch_chunks(int(live.sum()), n_jobs)
+		# before compression or too many chunks.
 		tasks = []
 		a = 0
 		while a < len(unique):
@@ -2350,14 +2338,40 @@ class FigWigReader:
 					summed += buffer
 
 
+def _window_tiles(tile, tile_offsets, tids, starts, lengths, width):
+	"""The tiles the windows overlap, clipped to their chromosomes, as
+	(window rows, tiles on the chromosome, distinct file tiles, where each
+	distinct tile's pairs start, each pair's distinct tile, pairs), the
+	pairs sorted by file tile."""
+
+	stops = numpy.minimum(starts + width, lengths)
+	k0 = starts // tile
+	k1 = (stops - 1) // tile
+	counts = numpy.maximum(k1 - k0 + 1, 0)
+	counts[stops <= starts] = 0
+	total = int(counts.sum())
+
+	rows = numpy.repeat(numpy.arange(len(starts)), counts)
+	local = numpy.repeat(k0, counts) + numpy.arange(total) - numpy.repeat(
+		numpy.cumsum(counts) - counts, counts)
+	gtiles = tile_offsets[tids[rows]] + local
+	order = numpy.argsort(gtiles, kind='stable')
+	rows, local, gtiles = rows[order], local[order], gtiles[order]
+	unique, first = numpy.unique(gtiles, return_index=True)
+	inverse = numpy.repeat(numpy.arange(len(unique)), numpy.diff(
+		numpy.append(first, total)))
+	return rows, local, unique, first, inverse, total
+
+
 def _batch_chunks(n, n_jobs):
 	"""The most chunks or blocks in one batch of a read of n of them on
 	n_jobs threads: _BATCH_CHUNKS, or fewer so that each thread gets about
-	_BATCHES_PER_THREAD batches to balance the work, but at least
-	_MIN_BATCH_CHUNKS."""
+	_BATCHES_PER_THREAD batches to balance the work, though no more than
+	_MAX_BATCHES in all, since each batch's Python work adds up, and at
+	least _MIN_BATCH_CHUNKS."""
 
-	return max(_MIN_BATCH_CHUNKS, min(_BATCH_CHUNKS, -(-n // (
-		_BATCHES_PER_THREAD * n_jobs))))
+	target = min(_BATCHES_PER_THREAD * n_jobs, _MAX_BATCHES)
+	return min(_BATCH_CHUNKS, max(_MIN_BATCH_CHUNKS, -(-n // target)))
 
 
 def _compact(chunk, live):
