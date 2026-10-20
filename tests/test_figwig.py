@@ -944,16 +944,15 @@ def test_encode_tiles_layout():
 		False, False, True, out, bounds, kinds, stats)
 	assert n == 2 and not buffer.any()
 	assert kinds[0] == 1 | (0 << 2) and kinds[1] == 2 | (1 << 2)
-	# The sparse chunk: two counts, the bytes of each track's offsets,
-	# three one-byte varints padded to 4, three uint16 values, padded to 8.
-	assert bounds.tolist() == [0, 32, 32 + 8 + 8 + 4 + 6 + 6]
+	# The sparse chunk: the entries in all, the bytes of each track's
+	# offsets, three one-byte varints padded to 4, three uint16 values,
+	# padded to 8.
+	assert bounds.tolist() == [0, 32, 32 + 4 + 8 + 4 + 6 + 2]
 	numpy.testing.assert_array_equal(out[:16], numpy.arange(16))
 	numpy.testing.assert_array_equal(out[16:32], 1)
-	counts = out[32:40].view(numpy.uint32)
-	assert counts.tolist() == [1, 2]
-	assert out[40:48].view(numpy.uint32).tolist() == [1, 2]
-	assert out[48:52].tolist() == [4, 1, 14, 0]
-	sparse_values = out[52:58].view(numpy.uint16)
+	assert out[32:44].view(numpy.uint32).tolist() == [3, 1, 2]
+	assert out[44:48].tolist() == [4, 1, 14, 0]
+	sparse_values = out[48:54].view(numpy.uint16)
 	assert sparse_values.tolist() == [300, 5, 6]
 	assert stats[:, 1].tolist() == [16, 18] and stats[:, 0].tolist() == [420, 27]
 	assert stats[:, 3].tolist() == [300, 6] and stats[:, 4].tolist() == [0, 0]
@@ -1023,8 +1022,9 @@ def test_check_chunks_rejects_short_and_overrunning_chunks():
 	assert failed.tolist() == [0, 1, 1, 1]
 
 	# An offset of 15 passes; a varint that runs past the track's bytes, or
-	# bytes the varints do not fill, fail; the offsets of a track that is
-	# not read are not checked.
+	# bytes the varints do not fill, fail. The offsets of a track that is
+	# not read are only counted: an offset past the tile passes there, and
+	# a varint that does not end is one short of the total.
 	data[8] = 15
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
@@ -1033,6 +1033,10 @@ def test_check_chunks_rejects_short_and_overrunning_chunks():
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		slots, failed) == 3
+	failed[:] = 0
+	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
+		numpy.array([-1]), failed) == 3
+	data[8] = 16
 	failed[:] = 0
 	assert _check_chunks(tile, data, positions, lengths, kinds, n_tracks,
 		numpy.array([-1]), failed) == 2
