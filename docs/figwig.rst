@@ -18,15 +18,17 @@ default, every track is cut on one grid of tiles of ``tile`` bases, 16,384
 by default, so a window's tiles are found by division rather than a tree
 search. The tiles of a *group* of tracks at one position are one *chunk*: a
 chunk whose values are all zero takes no space; the others hold their
-values densely, as nonzero bases per track, or as a sparse matrix of the
-tracks present, whichever is smaller, in the narrowest integer type that
-holds them, or float32 where they are not integers; and the chunks are
-compressed with zlib or libdeflate, as bigWig blocks are. That is the order
-for reading windows across many tracks. In *track order*, each track's
+values densely, as nonzero bases per track with their offsets as varints,
+or as a sparse matrix of the tracks present, whichever is smaller, in the
+narrowest integer type that holds them, float32 where they are not
+integers, or no values at all where every nonzero value is 1, as in a tile
+of single-cell cut sites; and the chunks are compressed with libdeflate or
+zlib, as bigWig blocks are. That is the order for reading windows across
+many tracks. In *track order*, each track's
 nonzero bases lie in blocks per chromosome, so one track over the genome
 is a few slices and a window read searches each requested track's blocks.
 That is the order for reading a few of many tracks. Six genome-wide count
-tracks that take 971 MB as bigWigs take 266 MB as one figwig file
+tracks that take 971 MB as bigWigs take 226 MB as one figwig file
 (:doc:`benchmarks`).
 
 The examples on this page read ``k562.fw``, six genome-wide count tracks
@@ -228,9 +230,11 @@ Each tile is encoded as the writer reaches it, and a tile a call fills only
 part of waits for the next call, so predictions can be written a batch at a
 time. Chunks are compressed on ``n_jobs`` threads, with libdeflate when the
 ``deflate`` package is installed, as :doc:`writing` describes for bigWigs,
-and ``level=0`` stores them uncompressed, which decodes fastest. The file
-depends on the values and on which calls wrote which groups, not on the
-number of threads or on how the values were split between calls.
+and ``level=0`` stores them uncompressed, which decodes fastest. Reads
+inflate chunks with libdeflate as well where it is installed, about twice
+as fast as zlib, and with zlib otherwise. The file depends on the values
+and on which calls wrote which groups, not on the number of threads or on
+how the values were split between calls.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------

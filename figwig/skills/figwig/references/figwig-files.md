@@ -135,6 +135,11 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
   not stored, so a bigWig's "no data" and 0 are the same thing here.
 - `level=0` stores chunks uncompressed, the fastest to read; `tile=` must be
   a power of two from 16 to 65536, and smaller tiles decode less per window.
+  Compressed chunks are inflated by libdeflate when the `deflate` package is
+  installed (`pip install figwig[fast]` brings it), about twice as fast as
+  zlib, which is used otherwise.
+- A chunk whose nonzero values are all 1, as single-cell cut sites usually
+  are, stores no values at all; counts cost nothing extra when they are 1.
 - The file depends on the values and on which calls wrote which groups, not
   on `n_jobs` or on how values were split between calls.
 

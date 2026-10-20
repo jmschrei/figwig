@@ -40,6 +40,14 @@ once, 8 to 32 threads are where the gains were; on the full set of 167,750
 windows, 8 threads were 6.1 times faster than one, and 32 were 11 times
 faster.
 
+A figwig file is read the same way, in batches of chunks on up to
+``n_jobs`` threads, each batch read with one ``pread`` per run of adjacent
+chunks and inflated by libdeflate, or by zlib where the ``deflate`` package
+is not installed; a read cuts its chunks into about eight batches per
+thread, so that a read of a few thousand windows shares out evenly. On the
+six-track file of :doc:`benchmarks`, 8,192 windows took 0.13 s on one
+thread and 0.04 s on 8, and nothing more was gained past 8.
+
 Writing
 -------
 

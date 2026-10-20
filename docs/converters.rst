@@ -22,7 +22,10 @@ from instead, and a bigWig without one of them is zero there. ``-g``
 records the reference genome, as a name or a URL. ``-t`` sets the tile
 size, ``--groups`` the consecutive tracks stored together (8 by default),
 ``--dtype`` one dtype for every track, and ``-l`` the compression level,
-with 0 for uncompressed chunks.
+with 0 for uncompressed chunks. Each piece of a chromosome is read on one
+thread of its own while the piece before it is encoded and compressed on
+``-p`` threads, and the arrays read are handed to the writer without a
+copy.
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
