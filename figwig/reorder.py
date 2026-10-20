@@ -1,0 +1,74 @@
+# reorder.py
+# Contact: Jacob Schreiber <jmschreiber91@gmail.com>
+
+"""The `figwig reorder` command: a figwig file written again in the other
+order.
+
+A file in position order reads windows across many tracks fast and a file
+in track order reads a few tracks over the genome fast; this reads every
+nonzero base of the input, chromosome by chromosome, and writes it in the
+order asked for, with the same tracks, attributes and genome.
+"""
+
+import argparse
+import os
+
+from .figwig import _DEFAULT_GROUPS
+from .figwig import _DEFAULT_TILE
+from .figwig import FigWigReader
+from .figwig import FigWigWriter
+
+
+def _parser(prog):
+	parser = argparse.ArgumentParser(prog=prog, description="Write a figwig "
+		"file again in position order or in track order.")
+	parser.add_argument('figwig', help="The figwig file to read.")
+	parser.add_argument('output', help="The figwig file to write.")
+	parser.add_argument('--order', required=True, choices=['positions', 'tracks',
+		'csc', 'csr'], help="The order of the output: 'positions' (or 'csc') "
+		"for reading windows across many tracks, 'tracks' (or 'csr') for "
+		"reading a few tracks over the genome.")
+	parser.add_argument('-t', '--tile', default=_DEFAULT_TILE, type=int,
+		help="The bases per tile in position order. Default is {}.".format(
+		_DEFAULT_TILE))
+	parser.add_argument('--groups', default=_DEFAULT_GROUPS, type=int,
+		help="The consecutive tracks per group in position order. Default is "
+		"{}.".format(_DEFAULT_GROUPS))
+	parser.add_argument('-l', '--level', default=None, type=int, help="The "
+		"compression level, or 0 for uncompressed chunks. Default is 6 in "
+		"position order and 0 in track order.")
+	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
+		"number of threads. Default is 1.")
+	parser.add_argument('-v', '--verbose', action='store_true')
+	return parser
+
+
+def _reorder(path, output, order, tile=_DEFAULT_TILE, groups=_DEFAULT_GROUPS,
+	level=None, n_jobs=1, verbose=False):
+	reader = FigWigReader(path)
+	tracks = [{key: value for key, value in track.items() if key != 'group'}
+		for track in reader.tracks]
+	with FigWigWriter(output, reader.chrom_sizes, tracks, genome=reader.genome,
+			attributes=reader.attributes, tile=tile, groups=groups, level=level,
+			n_jobs=n_jobs, order=order) as writer:
+		for chrom in reader.chrom_sizes:
+			entries = reader.read_entries(chroms=[chrom], n_jobs=n_jobs)
+			if len(entries.values) > 0:
+				writer.write_sparse(chrom, entries.positions, entries.tracks,
+					entries.values)
+			if verbose:
+				print("{}: {}, {:,} entries".format(output, chrom, len(
+					entries.values)))
+
+
+def main(argv=None, prog='figwig reorder'):
+	args = _parser(prog).parse_args(argv)
+	if not os.path.isfile(args.figwig):
+		raise SystemExit("{}: {} is not a file.".format(prog, args.figwig))
+
+	try:
+		_reorder(args.figwig, args.output, args.order, tile=args.tile,
+			groups=args.groups, level=args.level, n_jobs=args.parallel,
+			verbose=args.verbose)
+	except (ValueError, TypeError) as e:
+		raise SystemExit("{}: {}".format(prog, e))

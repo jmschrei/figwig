@@ -1,9 +1,9 @@
 figwig bw2fw, fw2bw and bam2fw
 ==============================
 
-Three commands move tracks between bigWigs, reads and :doc:`figwig files
-<figwig>`. Each takes ``-p``, the number of threads to read and compress
-on, and ``-v`` for progress.
+Four commands move tracks between bigWigs, reads and :doc:`figwig files
+<figwig>`, and between a figwig file's two orders. Each takes ``-p``, the
+number of threads to read and compress on, and ``-v`` for progress.
 
 figwig bw2fw
 ------------
@@ -95,3 +95,19 @@ needs the ``bam2bw`` extra and runs on Linux and macOS.
                          -n NAME [-m METADATA] [-g GENOME] [-t TILE]
                          [--dtype DTYPE] [-l LEVEL] [-v]
                          filename [filename ...]
+
+figwig reorder
+--------------
+
+.. code-block:: bash
+
+    figwig reorder k562.fw k562_by_track.fw --order tracks -p 8
+    figwig reorder pbmc_by_cell.fw pbmc.fw --order positions --groups 10246 -l 0 -p 8
+
+``figwig reorder`` reads every nonzero base of a figwig file, chromosome by
+chromosome, and writes it again in the order asked for, with the same
+tracks, attributes and genome: ``tracks`` (or ``csr``) for reading a few
+tracks over the genome, ``positions`` (or ``csc``) for reading windows
+across many tracks. In position order ``-t`` sets the tile size and
+``--groups`` the consecutive tracks per group; ``-l`` sets the compression
+level, 6 in position order and 0 in track order unless given.

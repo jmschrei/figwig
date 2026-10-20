@@ -312,11 +312,14 @@ print(y.shape, y.dtype, numpy.array_equal(y[:, 0], counts[:, 0]))
 A figwig file holds many tracks over one genome, each with attributes that
 `select` matches, and is read like a bigWig: many windows of one width in one
 call, from any subset of the tracks, into `(windows, tracks, width)` in the
-tracks' own dtype. Tracks lie on one grid of tiles, the tiles of a group of
-tracks are stored together, and a tile with no values takes no space, so six
-genome-wide count tracks that take 971 MB as bigWigs take 266 MB as one
-figwig file. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
-guide covers the format, the API and the converters.
+tracks' own dtype, or as a sparse list of nonzero bases with `sparse=True`, or
+summed per label with `labels=`. It is written in position order, tiles
+across tracks, for reading windows across many tracks, or in track order for
+reading a few tracks over the genome, and `write_sparse` takes nonzero bases
+as entries, such as the cut sites of single cells. Six genome-wide count
+tracks that take 971 MB as bigWigs take 266 MB as one figwig file. The
+[figwig files](https://figwig.readthedocs.io/en/latest/figwig.html) guide
+covers the format, the API and the converters.
 
 The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
 and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides

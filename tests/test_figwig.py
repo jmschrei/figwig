@@ -18,6 +18,8 @@ from figwig import FigWigReader
 from figwig import FigWigWriter
 from figwig import read_figwig
 from figwig import write_figwig
+from figwig import SparseEntries
+from figwig import SparseWindows
 
 from figwig._figwig_kernels import _check_chunks
 from figwig._figwig_kernels import _encode_tiles
@@ -61,12 +63,12 @@ def reference_tracks(random_state=0):
 
 
 def write_reference(path, ref, n_jobs=2, tile=TILE, level=6, groups=GROUPS,
-	calls=2, width=100):
+	calls=2, width=100, order='positions'):
 	"""Write `ref` as windows of `width`, each chromosome in `calls` calls."""
 
 	with FigWigWriter(path, CHROM_SIZES, TRACKS, genome='hg38', attributes={
 			'made_by': 'test_figwig'}, tile=tile, groups=groups, level=level,
-			n_jobs=n_jobs) as writer:
+			n_jobs=n_jobs, order=order) as writer:
 		for chrom, length in CHROM_SIZES.items():
 			starts = numpy.arange(0, length, width)
 			values = numpy.full((len(starts), 5, width), numpy.nan)
@@ -119,6 +121,13 @@ def ref():
 def fw(tmp_path_factory, ref):
 	path = str(tmp_path_factory.mktemp('fw') / 'reference.fw')
 	write_reference(path, ref)
+	return path
+
+
+@pytest.fixture(scope='session')
+def track_fw(tmp_path_factory, ref):
+	path = str(tmp_path_factory.mktemp('fw') / 'tracks.fw')
+	write_reference(path, ref, order='tracks')
 	return path
 
 
@@ -424,8 +433,8 @@ def test_same_bytes_whatever_threads_and_calls(tmp_path, ref):
 	write_reference(path, ref, n_jobs=3, calls=5, width=37)
 	one, five = FigWigReader(paths[0]), FigWigReader(path)
 	for g in range(3):
-		kinds, sizes, _ = one._group_index(g)
-		kinds_5, sizes_5, _ = five._group_index(g)
+		kinds, sizes, _, _ = one._group_index(g)
+		kinds_5, sizes_5, _, _ = five._group_index(g)
 		numpy.testing.assert_array_equal(kinds, kinds_5)
 		numpy.testing.assert_array_equal(sizes, sizes_5)
 
@@ -633,10 +642,10 @@ def test_chunk_kinds(tmp_path):
 	values[0, 1, 200] = -2               # tile 3: sparse, int8
 	write_figwig(path, {'chr1': 256}, ['a', 'b'], 'chr1', [0], values, tile=64)
 	reader = FigWigReader(path)
-	kinds, sizes, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets = reader._group_index(0)
 	assert [(int(k & 3), int(k >> 2)) for k in kinds] == [(0, 0), (2, 0),
 		(1, 2), (2, 3)]
-	assert sizes[0] == 0 and (sizes[1:] > 0).all()
+	assert sizes[0] == 0 and (sizes[1:] > 0).all() and (raws[1:] > 0).all()
 	numpy.testing.assert_array_equal(reader.read('chr1', [0], 256,
 		dtype='float64')[0], values[0])
 
@@ -888,7 +897,7 @@ def test_truncated_chunk_raises(tmp_path, fw):
 	"""A file whose header is intact but whose chunks were cut short."""
 
 	reader = FigWigReader(fw)
-	kinds, sizes, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets = reader._group_index(0)
 	live = numpy.flatnonzero(kinds)
 	last = int(offsets[live[-1]] + sizes[live[-1]])
 	with open(fw, 'rb') as handle:
@@ -927,7 +936,7 @@ def test_encode_tiles_layout():
 	stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
 
 	n = _encode_tiles(tile, tiles, lo, hi, starts, ends, values, True, buffer,
-		False, False, out, bounds, kinds, stats)
+		False, False, True, out, bounds, kinds, stats)
 	assert n == 2 and not buffer.any()
 	assert kinds[0] == 1 | (0 << 2) and kinds[1] == 2 | (1 << 2)
 	assert bounds.tolist() == [0, 32, 32 + 8 + 8 + 8]
@@ -953,7 +962,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	stats = numpy.zeros((1, 5))
 	n = _encode_tiles(tile, numpy.array([0, 1]), numpy.array([0, 0]),
 		numpy.array([1, 1]), numpy.array([0]), numpy.array([24]), values, True,
-		buffer, False, True, out, bounds, kinds, stats)
+		buffer, False, True, True, out, bounds, kinds, stats)
 	assert n == 1 and kinds[0] == 1 and buffer[0, :8].sum() == 8
 	assert buffer[0, 8:].sum() == 0 and stats[0, 1] == 16
 
@@ -962,7 +971,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	more = numpy.full((1, 1, 8), 2.0)
 	n = _encode_tiles(tile, numpy.array([1]), numpy.array([0]), numpy.array([1]),
 		numpy.array([24]), numpy.array([32]), more, True, buffer, True, False,
-		out, bounds, kinds, stats)
+		True, out, bounds, kinds, stats)
 	assert n == 1 and kinds[0] == 1 and not buffer.any()
 	numpy.testing.assert_array_equal(out[:16], [1] * 8 + [2] * 8)
 	assert stats[0, 1] == 32 and stats[0, 0] == 40
@@ -989,7 +998,7 @@ def test_read_tiles_zero_chunk_writes_zeros():
 	_read_tiles(16, numpy.zeros(8, dtype=numpy.uint8), numpy.zeros(0,
 		dtype=numpy.int64), numpy.zeros(0, dtype=numpy.uint8), 2,
 		numpy.array([1, -1]), numpy.array([-1]), numpy.array([0]),
-		numpy.array([4]), numpy.array([0]), out)
+		numpy.array([4]), numpy.array([0]), out, False)
 	numpy.testing.assert_array_equal(out[0, 1], 0)
 	numpy.testing.assert_array_equal(out[0, 0], 9)
 
@@ -1017,3 +1026,381 @@ print('ok')
 		OPENBLAS_NUM_THREADS='1'), capture_output=True, text=True, timeout=600)
 	assert result.returncode == 0, result.stderr
 	assert result.stdout.strip() == 'ok'
+
+
+###
+# Sparse reads, sums per label, and nonzero bases as entries
+
+
+def sparse_to_dense(found, dtype='float64'):
+	out = numpy.zeros(found.shape, dtype=dtype)
+	out[found.rows, found.channels, found.offsets] = found.values
+	return out
+
+
+def test_sparse_read_matches_dense(fw, ref, read_batching):
+	rng = numpy.random.default_rng(20)
+	chroms, starts = random_windows(rng, 200, 150)
+	reader = FigWigReader(fw)
+	found = reader.read(chroms, starts, 150, sparse=True, dtype='float64')
+	assert isinstance(found, SparseWindows) and found.shape == (200, 5, 150)
+	dense = reader.read(chroms, starts, 150, dtype='float64')
+	# Bases past a chromosome's end are NaN in every channel of the dense
+	# read and absent from the entries; a NaN value is an entry.
+	past = numpy.isnan(dense).all(axis=1)
+	dense[numpy.broadcast_to(past[:, None, :], dense.shape)] = 0
+	numpy.testing.assert_array_equal(sparse_to_dense(found), dense)
+	assert (found.values != 0).all()
+	order = numpy.lexsort((found.offsets, found.channels, found.rows))
+	numpy.testing.assert_array_equal(order, numpy.arange(len(order)))
+
+	found = reader.read(chroms, starts, 150, tracks=['negative', 'atac_plus',
+		'negative'], sparse=True)
+	assert found.values.dtype == numpy.int32 and found.shape == (200, 3, 150)
+	dense = reader.read(chroms, starts, 150, tracks=['negative', 'atac_plus',
+		'negative'])
+	numpy.testing.assert_array_equal(sparse_to_dense(found, 'int32'), dense)
+
+	found = reader.read(chroms, starts, 150, tracks='signal', sparse=True)
+	assert found.shape == (200, 1, 150) and found.values.dtype == numpy.float32
+	empty = reader.read([], [], 10, sparse=True)
+	assert empty.shape == (0, 5, 10) and len(empty.values) == 0
+
+
+def test_labels_sum_tracks(fw, ref, read_batching):
+	rng = numpy.random.default_rng(21)
+	chroms, starts = random_windows(rng, 100, 150)
+	reader = FigWigReader(fw)
+	labels = numpy.array([0, 0, 1, -1, 1])
+	y = reader.read(chroms, starts, 150, labels=labels)
+	assert y.shape == (100, 2, 150) and y.dtype == numpy.float32
+	dense = reader.read(chroms, starts, 150, dtype='float64')
+	exp = numpy.stack([dense[:, 0] + dense[:, 1], dense[:, 2] + dense[:, 4]],
+		axis=1)
+	assert_identical(y.astype(numpy.float64), exp.astype(numpy.float32).astype(
+		numpy.float64))
+
+	y = reader.read(chroms, starts, 150, tracks=['atac_minus', 'atac_plus'],
+		labels=[0, 0], dtype='int64')
+	assert y.dtype == numpy.int64
+	numpy.testing.assert_array_equal(y[:, 0], numpy.nan_to_num(dense[:, 0] +
+		dense[:, 1]))
+
+	with pytest.raises(ValueError, match="one integer per track"):
+		reader.read(chroms, starts, 150, labels=[0, 1])
+	with pytest.raises(ValueError, match="cannot both"):
+		reader.read(chroms, starts, 150, labels=labels, sparse=True)
+	with pytest.raises(ValueError, match="-1 or from 0"):
+		reader.read(chroms, starts, 150, labels=[0, 0, 0, -2, 0])
+	with pytest.raises(ValueError, match="each track is read once"):
+		reader.read(chroms, starts, 150, tracks=[0, 0], labels=[0, 0])
+	with pytest.raises(ValueError, match="out cannot be given"):
+		reader.read(chroms, starts, 150, sparse=True, out=numpy.zeros(1))
+
+
+def test_dense_guard(fw, monkeypatch):
+	reader = FigWigReader(fw)
+	monkeypatch.setattr(figwig.figwig, '_MAX_DENSE_BYTES', 1000)
+	with pytest.raises(ValueError, match="sparse=True or labels="):
+		reader.read('chr1', [0], 1000)
+	out = numpy.empty((1, 5, 1000), dtype=numpy.float32)
+	assert reader.read('chr1', [0], 1000, out=out) is out
+	assert reader.read('chr1', [0], 1000, sparse=True).shape == (1, 5, 1000)
+
+
+def test_read_entries(fw, ref):
+	reader = FigWigReader(fw)
+	entries = reader.read_entries(tracks=['atac_plus', 'signal'], chroms=['chr2',
+		'chrM'])
+	assert isinstance(entries, SparseEntries)
+	expected = []
+	for tid, chrom in ((1, 'chr2'), (2, 'chrM')):
+		for track in (0, 2):
+			positions = numpy.flatnonzero(ref[chrom][track] != 0)
+			expected.append(numpy.stack([numpy.full(len(positions), tid), positions,
+				numpy.full(len(positions), track), numpy.nan_to_num(ref[chrom][
+				track, positions]).astype(numpy.float32)], axis=1))
+	expected = numpy.concatenate(expected)
+	got = numpy.stack([entries.chroms, entries.positions, entries.tracks,
+		entries.values], axis=1)
+	numpy.testing.assert_array_equal(got, expected)
+
+	everything = reader.read_entries()
+	assert len(everything.values) == int(reader.stats['nonzero'].sum())
+	with pytest.raises(ValueError, match="not one of the file's chromosomes"):
+		reader.read_entries(chroms=['chr9'])
+
+
+###
+# Nonzero bases as input, and matrix chunks
+
+
+def cells_reference(n_cells=120, random_state=30):
+	"""Sparse per-cell counts on the test chromosomes, as (dense reference,
+	entries per chromosome)."""
+
+	rng = numpy.random.default_rng(random_state)
+	ref = {chrom: numpy.zeros((n_cells, length)) for chrom, length in
+		CHROM_SIZES.items()}
+	entries = {}
+	for chrom, length in CHROM_SIZES.items():
+		cells, positions, values = [], [], []
+		for cell in range(n_cells):
+			where = numpy.unique(rng.integers(0, length, max(1, length // 400)))
+			count = rng.integers(1, 4, len(where))
+			ref[chrom][cell, where] = count
+			cells.append(numpy.full(len(where), cell))
+			positions.append(where)
+			values.append(count)
+		entries[chrom] = (numpy.concatenate(positions), numpy.concatenate(cells),
+			numpy.concatenate(values))
+	return ref, entries
+
+
+@pytest.fixture(scope='session')
+def cells(tmp_path_factory):
+	ref, entries = cells_reference()
+	names = ['cell{}'.format(i) for i in range(120)]
+	paths = {}
+	for order, groups in (('positions', 120), ('positions', 8), ('tracks', 1)):
+		path = str(tmp_path_factory.mktemp('cells') / '{}_{}.fw'.format(order,
+			groups))
+		with FigWigWriter(path, CHROM_SIZES, names, tile=64, groups=groups,
+				order=order, n_jobs=3, level=0 if groups == 120 else None) as writer:
+			for chrom, (positions, which, values) in entries.items():
+				writer.write_sparse(chrom, positions, which, values)
+		paths[order, groups] = path
+	return ref, entries, paths
+
+
+@pytest.mark.parametrize('key', [('positions', 120), ('positions', 8),
+	('tracks', 1)])
+def test_write_sparse_reads_back(cells, key, read_batching):
+	ref, entries, paths = cells
+	reader = FigWigReader(paths[key])
+	assert reader.order == key[0]
+	rng = numpy.random.default_rng(31)
+	chroms, starts = random_windows(rng, 150, 200)
+	subset = numpy.sort(rng.choice(120, 30, replace=False))
+	for tracks in (None, subset):
+		picked = numpy.arange(120) if tracks is None else tracks
+		y = reader.read(chroms, starts, 200, tracks=tracks, dtype='float64')
+		exp = numpy.zeros((150, len(picked), 200))
+		for j, (chrom, start) in enumerate(zip(chroms, starts)):
+			length = CHROM_SIZES[chrom]
+			if start < length:
+				piece = ref[chrom][picked, start:min(length, start + 200)]
+				exp[j, :, :piece.shape[1]] = piece
+			exp[j, :, max(0, length - start):] = numpy.nan
+		assert_identical(y, exp)
+		found = reader.read(chroms, starts, 200, tracks=tracks, sparse=True,
+			dtype='float64')
+		numpy.testing.assert_array_equal(sparse_to_dense(found), numpy.nan_to_num(
+			exp))
+
+	labels = rng.integers(0, 4, 120)
+	y = reader.read(chroms, starts, 200, labels=labels, dtype='float64')
+	exp = numpy.zeros((150, 4, 200))
+	for j, (chrom, start) in enumerate(zip(chroms, starts)):
+		length = CHROM_SIZES[chrom]
+		for label in range(4):
+			piece = ref[chrom][labels == label, start:min(length, start + 200)]
+			exp[j, label, :piece.shape[1]] = piece.sum(axis=0)
+		exp[j, :, max(0, length - start):] = numpy.nan
+	assert_identical(y, exp)
+
+	entries_out = reader.read_entries(tracks=[3, 77])
+	for chrom_id, position, track, value in zip(*entries_out):
+		assert ref[list(CHROM_SIZES)[chrom_id]][track, position] == value
+	assert len(entries_out.values) == sum(int((ref[chrom][[3, 77]] != 0).sum())
+		for chrom in CHROM_SIZES)
+	assert [track['dtype'] for track in reader.tracks] == ['uint8'] * 120
+
+
+def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
+	monkeypatch):
+	ref, entries, paths = cells
+	reader = FigWigReader(paths['positions', 120])
+	kinds, sizes, raws, offsets = reader._group_index(0)
+	counts = numpy.bincount(kinds & 3, minlength=4)
+	assert counts[3] > 0
+
+	# Without matrix chunks the same uncompressed values take more bytes,
+	# and a compressed file has none.
+	monkeypatch.setattr(figwig.figwig, '_MATRIX_CHUNKS', False)
+	path = str(tmp_path / 'old.fw')
+	with FigWigWriter(path, CHROM_SIZES, ['cell{}'.format(i) for i in range(
+			120)], tile=64, groups=120, level=0) as writer:
+		for chrom, (positions, which, values) in entries.items():
+			writer.write_sparse(chrom, positions, which, values)
+	old = FigWigReader(path)
+	kinds, _, _, _ = old._group_index(0)
+	assert numpy.bincount(kinds & 3, minlength=4)[3] == 0
+	assert os.path.getsize(path) > os.path.getsize(paths['positions', 120])
+	y = reader.read('chr1', [0], 5000, dtype='float64')
+	assert_identical(old.read('chr1', [0], 5000, dtype='float64'), y)
+	kinds, _, _, _ = FigWigReader(paths['positions', 8])._group_index(0)
+	assert numpy.bincount(kinds & 3, minlength=4)[3] == 0
+
+
+def test_write_sparse_arguments(tmp_path):
+	path = str(tmp_path / 's.fw')
+	writer = FigWigWriter(path, {'chr1': 1000, 'chr2': 500}, ['a', 'b', {'name':
+		'c', 'dtype': 'uint8'}], groups=[['a', 'b'], ['c']], tile=64)
+	with pytest.raises(ValueError, match="outside the chromosome"):
+		writer.write_sparse('chr1', [1000], 'c', [1])
+	with pytest.raises(ValueError, match="outside the chromosome"):
+		writer.write_sparse('chr1', [-1], 'c', [1])
+	with pytest.raises(ValueError, match="both name base"):
+		writer.write_sparse('chr1', [5, 5], ['c', 'c'], [1, 2])
+	with pytest.raises(ValueError, match="one value per position"):
+		writer.write_sparse('chr1', [5, 6], 'c', [1])
+	with pytest.raises(ValueError, match="one track per position"):
+		writer.write_sparse('chr1', [5, 6], ['c'], [1, 2])
+	with pytest.raises(ValueError, match="out of range"):
+		writer.write_sparse('chr1', [5], [7], [1])
+	with pytest.raises(TypeError, match="names or indices"):
+		writer.write_sparse('chr1', [5], [1.5], [1])
+	with pytest.raises(TypeError, match="numbers"):
+		writer.write_sparse('chr1', [5], 'c', ['x'])
+	with pytest.raises(ValueError, match="is uint8, and a value is outside"):
+		writer.write_sparse('chr1', [5], 'c', [300])
+	with pytest.raises(ValueError, match="not one of the writer's"):
+		writer.write_sparse('chr3', [5], 'c', [1])
+
+	writer.write_sparse('chr1', [5, 70, 6], numpy.array(['a', 'b', 'b']), [1, 2,
+		3])
+	writer.write_sparse('chr1', [200], 2, [9])
+	with pytest.raises(ValueError, match="before the end of what was written"):
+		writer.write_sparse('chr1', [60], 'a', [1])
+	with pytest.raises(ValueError, match="which an earlier call already wrote"):
+		writer.write_sparse('chr1', [71], 'a', [1])
+	with pytest.raises(ValueError, match="which an earlier call already wrote"):
+		writer.write('chr1', [72], numpy.ones((1, 2, 10)), tracks=['a', 'b'])
+	writer.write('chr1', [128], numpy.ones((1, 2, 10)), tracks=['a', 'b'])
+	with pytest.raises(ValueError, match="was begun by write"):
+		writer.write_sparse('chr1', [140], 'a', [1])
+	writer.write_sparse('chr1', [300], 'a', [4])
+	writer.write_sparse('chr2', [], [], [])
+	writer.close()
+
+	reader = FigWigReader(path)
+	y = reader.read('chr1', [0], 400, dtype='float64')[0]
+	assert y[0, 5] == 1 and y[1, 70] == 2 and y[1, 6] == 3 and y[2, 200] == 9
+	assert y[0, 128:138].sum() == 10 and y[1, 128:138].sum() == 10
+	assert y[0, 300] == 4 and y.sum() == 1 + 2 + 3 + 9 + 20 + 4
+	with pytest.raises(ValueError, match="closed"):
+		writer.write_sparse('chr2', [1], 'c', [1])
+
+
+###
+# Track order
+
+
+def test_track_order_reads_as_position_order(fw, track_fw, ref, read_batching):
+	one, other = FigWigReader(fw), FigWigReader(track_fw)
+	assert other.order == 'tracks' and one.order == 'positions'
+	assert 'track order' in repr(other)
+	assert [track['dtype'] for track in other.tracks] == [track['dtype'] for
+		track in one.tracks]
+	assert [track['group'] for track in other.tracks] == [0, 1, 2, 3, 4]
+	numpy.testing.assert_array_equal(other.stats['nonzero'], one.stats['nonzero'])
+	numpy.testing.assert_array_equal(other.stats['max'], one.stats['max'])
+
+	rng = numpy.random.default_rng(40)
+	chroms, starts = random_windows(rng, 150, 120)
+	for tracks in (None, ['negative', 'atac_plus', 'negative'], 'signal', [4]):
+		a = one.read(chroms, starts, 120, tracks=tracks, dtype='float64')
+		b = other.read(chroms, starts, 120, tracks=tracks, dtype='float64')
+		assert_identical(a, b)
+		a = one.read(chroms, starts, 120, tracks=tracks, sparse=True)
+		b = other.read(chroms, starts, 120, tracks=tracks, sparse=True)
+		for x, y in zip(a, b):
+			numpy.testing.assert_array_equal(x, y)
+	a = one.read(chroms, starts, 120, labels=[0, 1, 0, 1, -1])
+	b = other.read(chroms, starts, 120, labels=[0, 1, 0, 1, -1])
+	assert_identical(a, b)
+	for x, y in zip(one.read_entries(), other.read_entries()):
+		numpy.testing.assert_array_equal(x, y)
+
+	out = numpy.ones((3, 5, 120), dtype=numpy.float32)
+	other.read(chroms[:3], starts[:3], 120, out=out)
+	assert_identical(out, one.read(chroms[:3], starts[:3], 120))
+
+
+def test_track_order_blocks_and_calls(tmp_path, ref, monkeypatch):
+	"""Blocks of a few entries, written over several calls, read the same."""
+
+	monkeypatch.setattr(figwig.figwig, '_BLOCK_ENTRIES', 16)
+	path = str(tmp_path / 'blocks.fw')
+	write_reference(path, ref, order='tracks', calls=7, width=37, n_jobs=1)
+	reader = FigWigReader(path)
+	assert len(reader._group_index(0)) > 20
+	assert reader.read('chr1', [0], 5000, dtype='float64')[0, 2].tolist() == 		ref['chr1'][2].astype(numpy.float32).astype(numpy.float64).tolist() or 		numpy.isnan(ref['chr1'][2]).any()
+	a = FigWigReader(path).read('chr1', [0], 5000, tracks=['atac_plus'])
+	numpy.testing.assert_array_equal(a[0, 0], ref['chr1'][0])
+	assert reader.read_entries(tracks=['atac_plus']).values.shape == (int(
+		reader.stats['nonzero'][0]),)
+
+
+def test_track_order_writer(tmp_path):
+	path = str(tmp_path / 't.fw')
+	writer = FigWigWriter(path, {'chr1': 300, 'chr2': 100}, ['a', 'b'],
+		order='csr', groups=[['a', 'b']])
+	assert writer.order == 'tracks' and writer.level == 0
+	assert [track['group'] for track in writer.tracks] == [0, 1]
+	writer.write('chr1', [0, 10], [[1.5, 0], [0, 2]], ends=[5, 20], tracks=['a',
+		'b'])
+	writer.write('chr1', [100], numpy.array([[0, 3, 0, 4]]), tracks='b')
+	with pytest.raises(ValueError, match="before the end of what was written"):
+		writer.write('chr1', [50], numpy.array([[1, 1]]), tracks='b')
+	writer.write('chr1', [50], numpy.array([[1, 1]]), tracks='a')
+	writer.write('chr2', [0], numpy.array([[7]]), tracks='a')
+	with pytest.raises(ValueError, match="written again after"):
+		writer.write('chr1', [200], numpy.array([[1]]), tracks='a')
+	writer.close()
+
+	reader = FigWigReader(path)
+	y = reader.read(['chr1', 'chr2'], [0, 0], 300, dtype='float64')
+	numpy.testing.assert_array_equal(y[0, 0, :5], 1.5)
+	numpy.testing.assert_array_equal(y[0, 0, 50:52], 1)
+	numpy.testing.assert_array_equal(y[0, 1, 10:20], 2)
+	assert y[0, 1, 101] == 3 and y[0, 1, 103] == 4 and y[1, 0, 0] == 7
+	assert numpy.isnan(y[1, :, 100:]).all()
+	assert y[0].sum() == 1.5 * 5 + 2 + 20 + 7 and numpy.nansum(y[1]) == 7
+	assert [track['dtype'] for track in reader.tracks] == ['float32', 'uint8']
+
+	with pytest.raises(ValueError, match="order must be"):
+		FigWigWriter(path, {'chr1': 300}, ['a'], order='rows')
+
+
+def test_track_order_compressed(tmp_path, ref):
+	path = str(tmp_path / 'c.fw')
+	write_reference(path, ref, order='tracks', level=6)
+	reader = FigWigReader(path)
+	assert reader._codec == 1
+	y = reader.read('chr1', [100], 500, dtype='float64')[0]
+	exp = ref['chr1'][:, 100:600].copy()
+	exp[2] = exp[2].astype(numpy.float32)
+	assert_identical(y, exp)
+
+
+def test_corrupt_track_order_files_raise_only_value_errors(tmp_path, track_fw):
+	with open(track_fw, 'rb') as handle:
+		data = bytearray(handle.read())
+	reader = FigWigReader(track_fw)
+	offset = int(reader._directory[0])
+	cases = {'truncated': bytes(data[:len(data) // 2]), 'flipped_index':
+		bytes(data[:offset + 8]) + bytes(b ^ 0xFF for b in data[offset + 8:offset
+		+ 48]) + bytes(data[offset + 48:]), 'flipped_block': bytes(data[:140]) +
+		bytes(b ^ 0x55 for b in data[140:170]) + bytes(data[170:])}
+	for name, content in cases.items():
+		path = str(tmp_path / (name + '.fw'))
+		with open(path, 'wb') as handle:
+			handle.write(content)
+		try:
+			FigWigReader(path).read(['chr1', 'chr2'], [0, 0], 3000)
+		except ValueError:
+			pass
+		except Exception as e:
+			raise AssertionError("{} raised {}".format(name, type(e).__name__))

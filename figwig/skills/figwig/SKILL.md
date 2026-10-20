@@ -79,6 +79,7 @@ later.
 | choosing `n_jobs` or `-p`, the expected gain from threads, memory, the first call's compile time | `references/threads-and-memory.md` |
 | converting BAM, SAM, BED or fragment files to bigWig | `references/bam2bw.md` |
 | a figwig file (`.fw`): many tracks in one file, read in windows by attribute; `FigWigReader`, `FigWigWriter`, `read_figwig`, `write_figwig` | `references/figwig-files.md` |
+| single-cell cut sites or any thousands of sparse tracks: `write_sparse`, `sparse=True`, `labels=` pseudobulks, `order='tracks'` vs `'positions'`, `figwig reorder` | `references/figwig-files.md` |
 | converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
 
 ## Symptom → reference

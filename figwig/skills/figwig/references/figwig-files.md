@@ -12,20 +12,39 @@ directory of bigWigs is read in windows again and again.
 
 ```python
 FigWigReader(path)
-reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8)
+reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
+	sparse=False, labels=None)
+reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
 reader.select(**attributes)          # -> int64 indices, for `tracks`
 reader.tracks                        # list of dicts: name, dtype, group, attributes
 reader.stats                         # structured array: sum, nonzero, min, max per track
-reader.chrom_sizes, reader.genome, reader.attributes, reader.tile
-read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8)
+reader.chrom_sizes, reader.genome, reader.attributes, reader.tile, reader.order
+read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=None,
+	n_jobs=8, sparse=False, labels=None)
 
 FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=16384,
-	groups=8, level=6, engine='auto', n_jobs=8)
+	groups=8, level=None, engine='auto', n_jobs=8, order='positions')
 writer.write(chroms, starts, values, ends=None, tracks=None)
+writer.write_sparse(chroms, positions, tracks, values)   # nonzero bases as entries
 writer.close()                       # writes the tables and index; `with` calls it
 write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genome=None,
-	attributes=None, tile=16384, groups=8, level=6, engine='auto', n_jobs=8)
+	attributes=None, tile=16384, groups=8, level=None, engine='auto', n_jobs=8,
+	order='positions')
 ```
+
+| `read(...)` returns | when |
+|---|---|
+| dense `(n, tracks, width)` in the tracks' dtype | default; raises past 8 GiB unless `out=` is given |
+| `SparseWindows(rows, channels, offsets, values, shape)` | `sparse=True`; sorted by row, channel, offset |
+| dense `(n, labels, width)` float32 sums | `labels=` one int per track read, -1 skips |
+
+| `order=` | layout | fast | slow |
+|---|---|---|---|
+| `'positions'` / `'csc'` (default) | tiles across tracks, groups' tiles in one chunk | windows across many tracks, pseudobulks | one track over the genome |
+| `'tracks'` / `'csr'` | each track's nonzero bases in blocks per chromosome, raw by default | `read_entries` of a few tracks | windows over thousands of tracks (one block per track per window) |
+
+`figwig reorder in.fw out.fw --order tracks|positions` rewrites a file in the
+other order.
 
 | `tracks` given to `read` | output shape | dtype |
 |---|---|---|
@@ -63,6 +82,32 @@ y = fw.read(chroms, starts, width=2114, tracks=tracks, n_jobs=1)
 - Tracks of one *group* are stored together and decoded together, so reading
   one track of a group of 8 decodes all 8. Files meant to be read a track at a
   time should be written with small groups.
+
+## Single cells and other sparse track sets
+
+```python
+tracks = [{"name": barcode, "dtype": "uint8", "cell_type": ct} for barcode, ct in cells]
+with FigWigWriter("pbmc.fw", chrom_sizes, tracks, groups=len(tracks), level=0) as writer:
+	for chrom in chrom_sizes:
+		writer.write_sparse(chrom, positions[chrom], cell_ids[chrom], counts[chrom])
+
+fw = FigWigReader("pbmc.fw")
+labels = numpy.array([types.index(t["cell_type"]) for t in fw.tracks])
+y = fw.read(chroms, starts, 2114, labels=labels)            # pseudobulks, (n, types, 2114)
+found = fw.read(chroms, starts, 2114, tracks=fw.select(cell_type="B"), sparse=True)
+```
+
+- One group holding every cell, uncompressed (`level=0`), so that tiles with
+  few cells present are matrix chunks; a compressed file uses plain sparse
+  chunks and is smaller but slower to decode.
+- Never read thousands of cells densely; ask for `labels=` or `sparse=True`.
+- For per-cell slices over the genome (`read_entries(tracks=[...])`), write or
+  `reorder` the file in track order; position order scans every chunk for
+  that.
+- `write_sparse` entries are (chrom, position, track, value); no two may name
+  one base of one track, and a call's entries come after the group's earlier
+  items on that chromosome. Fragment files give two cut sites per fragment;
+  merge duplicates before writing.
 
 ## Writing
 
@@ -125,6 +170,9 @@ figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 | `starts at ..., before the end of what was written on it before` | items out of order across calls |
 | `a window may run past the end only where its values are NaN or 0` | real values past the chromosome's length |
 | `track ... is uint16, and a value is ...` | a declared dtype the values do not fit; declare a wider one or none |
+| `the dense output would take ... GiB` | a dense read of many tracks; use `sparse=True`, `labels=`, fewer windows or `out=` |
+| `entries ... both name base ...` | duplicate (track, position) entries in `write_sparse`; merge them first |
+| `which an earlier call already wrote`, `was begun by write` | `write` and `write_sparse` on one tile in two calls |
 | `has values from ... to ..., which uint8 does not hold` | `dtype=` too narrow for a track on read |
 | `is not one of the file's chromosomes` | a window on a chromosome the file was not written with |
 | `cannot be read as a figwig file`, `a chunk of ... cannot be read` | a truncated or corrupt file; every such case raises `ValueError` |

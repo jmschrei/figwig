@@ -4,22 +4,33 @@
 """The compiled half of figwig's own file format: encoding tiles of values
 into chunks, inflating chunks, and copying windows out of them.
 
-A figwig file holds every track's values on a fixed grid of tiles of `tile`
-bases. The tiles of the tracks of one group, at one position, are one
-chunk, which is stored in one of three ways. A chunk whose every value is 0
-is stored as nothing. A dense chunk holds every value, track after track,
-in the narrowest element type that holds the chunk's values: uint8, uint16
-or uint32 for integers from 0, int8, int16 or int32 for integers below 0,
-and float32 for anything else. A sparse chunk holds, for each track, the
-number of nonzero bases, then every track's nonzero bases' offsets within
-the tile as uint16 differences from the one before, padded to a multiple
-of 4 bytes, then every track's nonzero values in that element type. The
-writer picks dense or sparse by the bytes each takes before compression.
-Each chunk is padded to a multiple of 8 bytes, so that a chunk that starts
-on an 8-byte boundary can be read through typed views.
+A figwig file in position order holds every track's values on a fixed grid
+of tiles of `tile` bases. The tiles of the tracks of one group, at one
+position, are one chunk, which is stored in one of four ways. A chunk whose
+every value is 0 is stored as nothing. A dense chunk holds every value,
+track after track, in the narrowest element type that holds the chunk's
+values: uint8, uint16 or uint32 for integers from 0, int8, int16 or int32
+for integers below 0, and float32 for anything else. A sparse chunk holds,
+for each track, the number of nonzero bases, then every track's nonzero
+bases' offsets within the tile as uint16 differences from the one before,
+padded to a multiple of 4 bytes, then every track's nonzero values in that
+element type. A matrix chunk, for a group of many tracks few of which have
+a value in the tile, holds the number of tracks present, their positions in
+the group (uint32, ascending), a uint32 pointer per present track into the
+entries plus one at the end, the entries' offsets within the tile (uint16,
+ascending within each track), padding to 4 bytes, and the values. The
+writer picks the kind that takes the fewest bytes before compression. Each
+chunk is padded to a multiple of 8 bytes, so that a chunk that starts on an
+8-byte boundary can be read through typed views.
 
-The kind byte of a chunk, kept in the file's index, is the kind (0 zero, 1
-dense, 2 sparse) in its low two bits and the element code in the next three.
+A file in track order holds, for each track and chromosome, blocks of up
+to `_BLOCK_ENTRIES` nonzero bases: their positions on the chromosome
+(uint32, ascending), padding to 8 bytes, and their values in the block's
+element type.
+
+The kind byte of a chunk or block, kept in the file's index, is the kind
+(0 zero, 1 dense, 2 sparse, 3 matrix; 1 for a block) in its low two bits
+and the element code in the next three.
 
 Every kernel here is compiled by numba with `nogil=True`, so that several
 threads can encode, inflate and decode at once.
@@ -29,14 +40,20 @@ import numba
 import numpy
 
 
-_ZERO, _DENSE, _SPARSE = 0, 1, 2
+_ZERO, _DENSE, _SPARSE, _MATRIX = 0, 1, 2, 3
 _U8, _U16, _U32, _I8, _I16, _I32, _F32 = 0, 1, 2, 3, 4, 5, 6
 _WIDTHS = numpy.array([1, 2, 4, 1, 2, 4, 4], dtype=numpy.int64)
+_BLOCK_ENTRIES = 1 << 16
 
 
 @numba.njit(nogil=True, cache=True, inline='always')
 def _pad8(n):
 	return (n + 7) // 8 * 8
+
+
+@numba.njit(nogil=True, cache=True, inline='always')
+def _pad4(n):
+	return (n + 3) // 4 * 4
 
 
 @numba.njit(nogil=True, cache=True)
@@ -81,8 +98,159 @@ def _load(data, offset, code):
 
 
 @numba.njit(nogil=True, cache=True)
+def _note(v, g, nnz, mins, maxs, sums, nonint):
+	"""Fold one nonzero value of track g into the tile's statistics."""
+
+	nnz[g] += 1
+	sums[g] += v
+	if v < mins[g]:
+		mins[g] = v
+	if v > maxs[g]:
+		maxs[g] = v
+	if v != numpy.floor(v) or v < -2147483648.0 or v >= 4294967296.0:
+		nonint[g] = True
+
+
+@numba.njit(nogil=True, cache=True)
+def _code_of(integral, low, high):
+	"""The element code for values from `low` to `high`."""
+
+	if not integral:
+		return _F32
+	elif low >= 0.0:
+		return _U8 if high <= 255.0 else _U16 if high <= 65535.0 else _U32
+	elif low >= -128.0 and high <= 127.0:
+		return _I8
+	elif low >= -32768.0 and high <= 32767.0:
+		return _I16
+	elif high <= 2147483647.0:
+		return _I32
+	return _F32
+
+
+@numba.njit(nogil=True, cache=True)
+def _pick_kind(n_tracks, n_present, total, w, width, allow_dense, allow_matrix):
+	"""The kind of chunk that takes the fewest bytes, and those bytes."""
+
+	dense_bytes = n_tracks * width * w
+	sparse_bytes = 4 * n_tracks + _pad4(2 * total) + total * w
+	matrix_bytes = 8 + 8 * n_present + _pad4(2 * total) + total * w
+	kind, best = _SPARSE, sparse_bytes
+	if allow_matrix and matrix_bytes < best:
+		kind, best = _MATRIX, matrix_bytes
+	if allow_dense and dense_bytes <= best:
+		kind, best = _DENSE, dense_bytes
+	return kind, best
+
+
+@numba.njit(nogil=True, cache=True)
+def _fold_stats(stats, nnz, mins, maxs, sums, nonint):
+	for g in range(stats.shape[0]):
+		stats[g, 0] += sums[g]
+		stats[g, 1] += nnz[g]
+		if mins[g] < stats[g, 2]:
+			stats[g, 2] = mins[g]
+		if maxs[g] > stats[g, 3]:
+			stats[g, 3] = maxs[g]
+		if nonint[g]:
+			stats[g, 4] = 1.0
+
+
+@numba.njit(nogil=True, cache=True)
+def _dense_payload(out, position, block, c0, width, code):
+	"""Write block[:, c0:c0 + width] densely at `position` of `out`, and
+	return where it ends."""
+
+	n_tracks = block.shape[0]
+	end = position + n_tracks * width * _WIDTHS[code]
+	if code == _U8:
+		for g in range(n_tracks):
+			for p in range(width):
+				out[position + g * width + p] = numpy.uint8(block[g, c0 + p])
+	elif code == _U16:
+		view = out[position:end].view(numpy.uint16)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.uint16(block[g, c0 + p])
+	elif code == _U32:
+		view = out[position:end].view(numpy.uint32)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.uint32(block[g, c0 + p])
+	elif code == _I8:
+		view = out[position:end].view(numpy.int8)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.int8(block[g, c0 + p])
+	elif code == _I16:
+		view = out[position:end].view(numpy.int16)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.int16(block[g, c0 + p])
+	elif code == _I32:
+		view = out[position:end].view(numpy.int32)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.int32(block[g, c0 + p])
+	else:
+		view = out[position:end].view(numpy.float32)
+		for g in range(n_tracks):
+			for p in range(width):
+				view[g * width + p] = numpy.float32(block[g, c0 + p])
+	return end
+
+
+@numba.njit(nogil=True, cache=True)
+def _sparse_header(out, position, kind, n_tracks, nnz):
+	"""Write a sparse or matrix chunk's header. Returns where the offsets
+	start, where the values start, and the entries in all."""
+
+	total = 0
+	for g in range(n_tracks):
+		total += nnz[g]
+
+	if kind == _SPARSE:
+		counts = out[position:position + 4 * n_tracks].view(numpy.uint32)
+		for g in range(n_tracks):
+			counts[g] = nnz[g]
+		offsets_at = position + 4 * n_tracks
+	else:
+		n_present = 0
+		for g in range(n_tracks):
+			if nnz[g] > 0:
+				n_present += 1
+		out[position:position + 4].view(numpy.uint32)[0] = n_present
+		tracks = out[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
+		ptr = out[position + 4 + 4 * n_present:position + 8 + 8 * n_present].view(
+			numpy.uint32)
+		k, running = 0, 0
+		for g in range(n_tracks):
+			if nnz[g] > 0:
+				tracks[k] = g
+				ptr[k] = running
+				running += nnz[g]
+				k += 1
+		ptr[n_present] = running
+		offsets_at = position + 8 + 8 * n_present
+
+	values_at = offsets_at + _pad4(2 * total)
+	for p in range(offsets_at + 2 * total, values_at):
+		out[p] = 0
+	return offsets_at, values_at, total
+
+
+@numba.njit(nogil=True, cache=True)
+def _finish_chunk(out, end):
+	"""Zero the padding after a chunk; returns where the next one starts."""
+
+	for p in range(end, _pad8(end)):
+		out[p] = 0
+	return _pad8(end)
+
+
+@numba.njit(nogil=True, cache=True)
 def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
-	preset, keep_last, out, bounds, kinds, stats):
+	preset, keep_last, allow_matrix, out, bounds, kinds, stats):
 	"""Encode the tiles of one group on one chromosome into chunks.
 
 	Tile t of this call is tile tiles[t] of the chromosome, the bases
@@ -102,7 +270,8 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	bytes. stats[g] accumulates the sum, nonzero bases, minimum and maximum
 	of the encoded values of track g, and stats[g, 4] becomes 1 once a value
 	of track g is not an integer, or is an integer outside what int32 and
-	uint32 hold.
+	uint32 hold. With `allow_matrix`, a tile may be stored as a matrix
+	chunk.
 
 	Returns the number of tiles encoded, which is len(tiles) or one fewer.
 	"""
@@ -138,8 +307,6 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 		# The nonzero bases, their range and whether they are all integers
 		# that fit 32 bits, from the whole buffer when earlier calls filled
 		# some of it, and from this call's items otherwise.
-		integral = True
-		total = 0
 		for g in range(n_tracks):
 			nnz[g] = 0
 			mins[g] = 0.0
@@ -147,20 +314,15 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 			sums[g] = 0.0
 			nonint[g] = False
 
+		integral = True
+		total = 0
+		n_present = 0
 		for g in range(n_tracks):
 			if scan:
 				for p in range(width):
 					v = buffer[g, p]
 					if v != 0.0:
-						nnz[g] += 1
-						sums[g] += v
-						if v < mins[g]:
-							mins[g] = v
-						if v > maxs[g]:
-							maxs[g] = v
-						if v != numpy.floor(v) or v < -2147483648.0 or \
-								v >= 4294967296.0:
-							nonint[g] = True
+						_note(v, g, nnz, mins, maxs, sums, nonint)
 			else:
 				for i in range(lo[t], hi[t]):
 					a = max(starts[i], base)
@@ -168,18 +330,12 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 					for p in range(a, b):
 						v = buffer[g, p - base]
 						if v != 0.0:
-							nnz[g] += 1
-							sums[g] += v
-							if v < mins[g]:
-								mins[g] = v
-							if v > maxs[g]:
-								maxs[g] = v
-							if v != numpy.floor(v) or v < -2147483648.0 or \
-									v >= 4294967296.0:
-								nonint[g] = True
+							_note(v, g, nnz, mins, maxs, sums, nonint)
 
 			if nonint[g]:
 				integral = False
+			if nnz[g] > 0:
+				n_present += 1
 			total += nnz[g]
 
 		if total == 0:
@@ -187,84 +343,32 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 			bounds[t + 1] = position
 			continue
 
-		low = mins.min()
-		high = maxs.max()
-		if not integral:
-			code = _F32
-		elif low >= 0.0:
-			code = _U8 if high <= 255.0 else _U16 if high <= 65535.0 else _U32
-		elif low >= -128.0 and high <= 127.0:
-			code = _I8
-		elif low >= -32768.0 and high <= 32767.0:
-			code = _I16
-		elif high <= 2147483647.0:
-			code = _I32
-		else:
-			code = _F32
-
+		code = _code_of(integral, mins.min(), maxs.max())
 		w = _WIDTHS[code]
-		dense_bytes = n_tracks * width * w
-		sparse_bytes = 4 * n_tracks + (2 * total + 3) // 4 * 4 + total * w
+		kind, n_bytes = _pick_kind(n_tracks, n_present, total, w, width, True,
+			allow_matrix)
+		kinds[t] = kind | (code << 2)
 
-		if dense_bytes <= sparse_bytes:
-			kinds[t] = _DENSE | (code << 2)
-			end = position + dense_bytes
-			if code == _U8:
-				for g in range(n_tracks):
-					for p in range(width):
-						out[position + g * width + p] = numpy.uint8(buffer[g, p])
-			elif code == _U16:
-				view = out[position:end].view(numpy.uint16)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.uint16(buffer[g, p])
-			elif code == _U32:
-				view = out[position:end].view(numpy.uint32)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.uint32(buffer[g, p])
-			elif code == _I8:
-				view = out[position:end].view(numpy.int8)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.int8(buffer[g, p])
-			elif code == _I16:
-				view = out[position:end].view(numpy.int16)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.int16(buffer[g, p])
-			elif code == _I32:
-				view = out[position:end].view(numpy.int32)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.int32(buffer[g, p])
-			else:
-				view = out[position:end].view(numpy.float32)
-				for g in range(n_tracks):
-					for p in range(width):
-						view[g * width + p] = numpy.float32(buffer[g, p])
+		if kind == _DENSE:
+			end = _dense_payload(out, position, buffer, 0, width, code)
 		else:
-			kinds[t] = _SPARSE | (code << 2)
-			counts = out[position:position + 4 * n_tracks].view(numpy.uint32)
-			deltas_at = position + 4 * n_tracks
-			values_at = deltas_at + (2 * total + 3) // 4 * 4
+			offsets_at, values_at, _ = _sparse_header(out, position, kind,
+				n_tracks, nnz)
 			end = values_at + total * w
-			deltas = out[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
-			for p in range(deltas_at + 2 * total, values_at):
-				out[p] = 0
+			offsets = out[offsets_at:offsets_at + 2 * total].view(numpy.uint16)
 
 			# Each track's nonzero bases in order, as the kernel finds them
 			# by walking the buffer or the sorted items.
 			d = 0
 			o = values_at
 			for g in range(n_tracks):
-				counts[g] = nnz[g]
 				last = 0
 				if scan:
 					for p in range(width):
 						v = buffer[g, p]
 						if v != 0.0:
-							deltas[d] = numpy.uint16(p - last)
+							offsets[d] = numpy.uint16(p - last if kind == _SPARSE
+								else p)
 							_store(out, o, code, v)
 							last = p
 							d += 1
@@ -276,26 +380,16 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 						for p in range(a - base, b - base):
 							v = buffer[g, p]
 							if v != 0.0:
-								deltas[d] = numpy.uint16(p - last)
+								offsets[d] = numpy.uint16(p - last if kind == _SPARSE
+									else p)
 								_store(out, o, code, v)
 								last = p
 								d += 1
 								o += w
 
-		for p in range(end, _pad8(end)):
-			out[p] = 0
-		position = _pad8(end)
+		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
-
-		for g in range(n_tracks):
-			stats[g, 0] += sums[g]
-			stats[g, 1] += nnz[g]
-			if mins[g] < stats[g, 2]:
-				stats[g, 2] = mins[g]
-			if maxs[g] > stats[g, 3]:
-				stats[g, 3] = maxs[g]
-			if nonint[g]:
-				stats[g, 4] = 1.0
+		_fold_stats(stats, nnz, mins, maxs, sums, nonint)
 
 		# Back to zero for the next tile: the whole buffer when it was
 		# scanned, and otherwise only the bases this tile's items filled.
@@ -313,7 +407,8 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 
 
 @numba.njit(nogil=True, cache=True)
-def _encode_dense_tiles(tile, values, items, columns, out, bounds, kinds, stats):
+def _encode_dense_tiles(tile, values, items, columns, allow_matrix, out, bounds,
+	kinds, stats):
 	"""Encode whole tiles that windows cover, straight from their values.
 
 	Tile t is values[items[t], :, columns[t]:columns[t] + tile], where
@@ -336,6 +431,7 @@ def _encode_dense_tiles(tile, values, items, columns, out, bounds, kinds, stats)
 		c0 = columns[t]
 		integral = True
 		total = 0
+		n_present = 0
 		for g in range(n_tracks):
 			nnz[g] = 0
 			mins[g] = 0.0
@@ -345,17 +441,11 @@ def _encode_dense_tiles(tile, values, items, columns, out, bounds, kinds, stats)
 			for p in range(c0, c0 + tile):
 				v = numpy.float64(block[g, p])
 				if v != 0.0:
-					nnz[g] += 1
-					sums[g] += v
-					if v < mins[g]:
-						mins[g] = v
-					if v > maxs[g]:
-						maxs[g] = v
-					if v != numpy.floor(v) or v < -2147483648.0 or \
-							v >= 4294967296.0:
-						nonint[g] = True
+					_note(v, g, nnz, mins, maxs, sums, nonint)
 			if nonint[g]:
 				integral = False
+			if nnz[g] > 0:
+				n_present += 1
 			total += nnz[g]
 
 		if total == 0:
@@ -363,102 +453,171 @@ def _encode_dense_tiles(tile, values, items, columns, out, bounds, kinds, stats)
 			bounds[t + 1] = position
 			continue
 
-		low = mins.min()
-		high = maxs.max()
-		if not integral:
-			code = _F32
-		elif low >= 0.0:
-			code = _U8 if high <= 255.0 else _U16 if high <= 65535.0 else _U32
-		elif low >= -128.0 and high <= 127.0:
-			code = _I8
-		elif low >= -32768.0 and high <= 32767.0:
-			code = _I16
-		elif high <= 2147483647.0:
-			code = _I32
-		else:
-			code = _F32
-
+		code = _code_of(integral, mins.min(), maxs.max())
 		w = _WIDTHS[code]
-		dense_bytes = n_tracks * tile * w
-		sparse_bytes = 4 * n_tracks + (2 * total + 3) // 4 * 4 + total * w
+		kind, n_bytes = _pick_kind(n_tracks, n_present, total, w, tile, True,
+			allow_matrix)
+		kinds[t] = kind | (code << 2)
 
-		if dense_bytes <= sparse_bytes:
-			kinds[t] = _DENSE | (code << 2)
-			end = position + dense_bytes
-			if code == _U8:
-				for g in range(n_tracks):
-					for p in range(tile):
-						out[position + g * tile + p] = numpy.uint8(block[g, c0 + p])
-			elif code == _U16:
-				view = out[position:end].view(numpy.uint16)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.uint16(block[g, c0 + p])
-			elif code == _U32:
-				view = out[position:end].view(numpy.uint32)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.uint32(block[g, c0 + p])
-			elif code == _I8:
-				view = out[position:end].view(numpy.int8)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.int8(block[g, c0 + p])
-			elif code == _I16:
-				view = out[position:end].view(numpy.int16)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.int16(block[g, c0 + p])
-			elif code == _I32:
-				view = out[position:end].view(numpy.int32)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.int32(block[g, c0 + p])
-			else:
-				view = out[position:end].view(numpy.float32)
-				for g in range(n_tracks):
-					for p in range(tile):
-						view[g * tile + p] = numpy.float32(block[g, c0 + p])
+		if kind == _DENSE:
+			end = _dense_payload(out, position, block, c0, tile, code)
 		else:
-			kinds[t] = _SPARSE | (code << 2)
-			counts = out[position:position + 4 * n_tracks].view(numpy.uint32)
-			deltas_at = position + 4 * n_tracks
-			values_at = deltas_at + (2 * total + 3) // 4 * 4
+			offsets_at, values_at, _ = _sparse_header(out, position, kind,
+				n_tracks, nnz)
 			end = values_at + total * w
-			deltas = out[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
-			for p in range(deltas_at + 2 * total, values_at):
-				out[p] = 0
-
+			offsets = out[offsets_at:offsets_at + 2 * total].view(numpy.uint16)
 			d = 0
 			o = values_at
 			for g in range(n_tracks):
-				counts[g] = nnz[g]
 				last = 0
 				for p in range(tile):
 					v = numpy.float64(block[g, c0 + p])
 					if v != 0.0:
-						deltas[d] = numpy.uint16(p - last)
+						offsets[d] = numpy.uint16(p - last if kind == _SPARSE else p)
 						_store(out, o, code, v)
 						last = p
 						d += 1
 						o += w
 
-		for p in range(end, _pad8(end)):
-			out[p] = 0
-		position = _pad8(end)
+		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
-
-		for g in range(n_tracks):
-			stats[g, 0] += sums[g]
-			stats[g, 1] += nnz[g]
-			if mins[g] < stats[g, 2]:
-				stats[g, 2] = mins[g]
-			if maxs[g] > stats[g, 3]:
-				stats[g, 3] = maxs[g]
-			if nonint[g]:
-				stats[g, 4] = 1.0
+		_fold_stats(stats, nnz, mins, maxs, sums, nonint)
 
 	return n_tiles
+
+
+@numba.njit(nogil=True, cache=True)
+def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
+	allow_matrix, out, bounds, kinds, stats):
+	"""Encode tiles from their nonzero bases, given as entries.
+
+	The entries of tile t are first[t] to first[t + 1] - 1, sorted by track
+	then position, with no two on one (track, position): entry e is base
+	positions[e] of the chromosome in track tracks[e], a position in the
+	group, with the value values[e]. Tiles are stored sparsely or as a
+	matrix, never densely. The chunks, `bounds`, `kinds` and `stats` are as
+	in `_encode_tiles`.
+	"""
+
+	nnz = numpy.zeros(n_tracks, dtype=numpy.int64)
+	mins = numpy.zeros(n_tracks, dtype=numpy.float64)
+	maxs = numpy.zeros(n_tracks, dtype=numpy.float64)
+	sums = numpy.zeros(n_tracks, dtype=numpy.float64)
+	nonint = numpy.zeros(n_tracks, dtype=numpy.bool_)
+	position = bounds[0]
+
+	for t in range(tiles.shape[0]):
+		base = tiles[t] * tile
+		e0, e1 = first[t], first[t + 1]
+		for g in range(n_tracks):
+			nnz[g] = 0
+			mins[g] = 0.0
+			maxs[g] = 0.0
+			sums[g] = 0.0
+			nonint[g] = False
+
+		total = 0
+		for e in range(e0, e1):
+			v = values[e]
+			if v != 0.0:
+				_note(v, tracks[e], nnz, mins, maxs, sums, nonint)
+				total += 1
+
+		if total == 0:
+			kinds[t] = _ZERO
+			bounds[t + 1] = position
+			continue
+
+		integral = True
+		n_present = 0
+		for g in range(n_tracks):
+			if nonint[g]:
+				integral = False
+			if nnz[g] > 0:
+				n_present += 1
+
+		code = _code_of(integral, mins.min(), maxs.max())
+		w = _WIDTHS[code]
+		kind, n_bytes = _pick_kind(n_tracks, n_present, total, w, tile, False,
+			allow_matrix)
+		kinds[t] = kind | (code << 2)
+		offsets_at, values_at, _ = _sparse_header(out, position, kind, n_tracks,
+			nnz)
+		end = values_at + total * w
+		offsets = out[offsets_at:offsets_at + 2 * total].view(numpy.uint16)
+
+		d = 0
+		o = values_at
+		last_track = -1
+		last = 0
+		for e in range(e0, e1):
+			v = values[e]
+			if v == 0.0:
+				continue
+			if tracks[e] != last_track:
+				last_track = tracks[e]
+				last = 0
+			p = positions[e] - base
+			offsets[d] = numpy.uint16(p - last if kind == _SPARSE else p)
+			_store(out, o, code, v)
+			last = p
+			d += 1
+			o += w
+
+		position = _finish_chunk(out, end)
+		bounds[t + 1] = position
+		_fold_stats(stats, nnz, mins, maxs, sums, nonint)
+
+	return tiles.shape[0]
+
+
+@numba.njit(nogil=True, cache=True)
+def _encode_blocks(positions, values, first, out, bounds, kinds, stats):
+	"""Encode blocks of one track's nonzero bases on one chromosome, for a
+	file in track order.
+
+	Block t holds entries first[t] to first[t + 1] - 1: positions[e] on the
+	chromosome, ascending, with values[e], none of them 0. Its bytes are
+	out[bounds[t]:bounds[t + 1]]: the positions as uint32, padding to 8
+	bytes, the values in the block's element type, padding to 8 bytes.
+	`stats` is the (1, 5) statistics row of the track.
+	"""
+
+	nnz = numpy.zeros(1, dtype=numpy.int64)
+	mins = numpy.zeros(1, dtype=numpy.float64)
+	maxs = numpy.zeros(1, dtype=numpy.float64)
+	sums = numpy.zeros(1, dtype=numpy.float64)
+	nonint = numpy.zeros(1, dtype=numpy.bool_)
+	position = bounds[0]
+	for t in range(first.shape[0] - 1):
+		e0, e1 = first[t], first[t + 1]
+		n = e1 - e0
+		nnz[0] = 0
+		mins[0] = 0.0
+		maxs[0] = 0.0
+		sums[0] = 0.0
+		nonint[0] = False
+		for e in range(e0, e1):
+			_note(values[e], 0, nnz, mins, maxs, sums, nonint)
+
+		code = _code_of(not nonint[0], mins[0], maxs[0])
+		w = _WIDTHS[code]
+		kinds[t] = _DENSE | (code << 2)
+		view = out[position:position + 4 * n].view(numpy.uint32)
+		for e in range(e0, e1):
+			view[e - e0] = numpy.uint32(positions[e])
+		values_at = _pad8(position + 4 * n)
+		for p in range(position + 4 * n, values_at):
+			out[p] = 0
+		o = values_at
+		for e in range(e0, e1):
+			_store(out, o, code, values[e])
+			o += w
+		position = _finish_chunk(out, o)
+		bounds[t + 1] = position
+		_fold_stats(stats, nnz, mins, maxs, sums, nonint)
+
+	return first.shape[0] - 1
 
 
 @numba.njit(nogil=True, cache=True)
@@ -494,14 +653,29 @@ def _inflate_chunks(uncompress, data, starts, sizes, buffer, positions, lengths,
 
 
 @numba.njit(nogil=True, cache=True)
+def _matrix_header(data, position):
+	"""A matrix chunk's (n_present, tracks, ptr, offsets_at, values_at,
+	total)."""
+
+	n_present = numpy.int64(data[position:position + 4].view(numpy.uint32)[0])
+	tracks = data[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
+	ptr = data[position + 4 + 4 * n_present:position + 8 + 8 * n_present].view(
+		numpy.uint32)
+	total = numpy.int64(ptr[n_present])
+	offsets_at = position + 8 + 8 * n_present
+	values_at = offsets_at + _pad4(2 * total)
+	return n_present, tracks, ptr, offsets_at, values_at, total
+
+
+@numba.njit(nogil=True, cache=True)
 def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 	"""Whether each chunk of a batch can be decoded by `_read_tiles`.
 
 	Chunk k's bytes are data[positions[k]:positions[k] + lengths[k]], and
 	kinds[k] its kind byte. A chunk fails, and gets failed[k] = 1, when its
 	kind or element code is not one the format defines, when it is shorter
-	than its kind says, or when a sparse chunk's offsets run past the tile.
-	Returns the number of chunks that failed.
+	than its kind says, or when its offsets or track positions are out of
+	range or order. Returns the number of chunks that failed.
 	"""
 
 	n_failed = 0
@@ -512,32 +686,59 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 		length = lengths[k]
 		bad = False
 
-		if position < 0 or code > _F32 or kind == _ZERO or kind == 3:
+		if position < 0 or code > _F32 or kind == _ZERO:
 			bad = True
 		elif kind == _DENSE:
 			bad = length < n_tracks * tile * _WIDTHS[code]
-		elif length < 4 * n_tracks:
-			bad = True
-		else:
-			counts = data[position:position + 4 * n_tracks].view(numpy.uint32)
-			total = 0
-			for g in range(n_tracks):
-				total += numpy.int64(counts[g])
-
-			deltas_at = position + 4 * n_tracks
-			values_at = deltas_at + (2 * total + 3) // 4 * 4
-			if length < values_at - position + total * _WIDTHS[code]:
+		elif kind == _SPARSE:
+			if length < 4 * n_tracks:
 				bad = True
 			else:
-				deltas = data[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
-				d = 0
+				counts = data[position:position + 4 * n_tracks].view(numpy.uint32)
+				total = 0
 				for g in range(n_tracks):
-					p = 0
-					for i in range(numpy.int64(counts[g])):
-						p += numpy.int64(deltas[d + i])
-						if p >= tile:
-							bad = True
-					d += numpy.int64(counts[g])
+					total += numpy.int64(counts[g])
+
+				deltas_at = position + 4 * n_tracks
+				values_at = deltas_at + _pad4(2 * total)
+				if length < values_at - position + total * _WIDTHS[code]:
+					bad = True
+				else:
+					deltas = data[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
+					d = 0
+					for g in range(n_tracks):
+						p = 0
+						for i in range(numpy.int64(counts[g])):
+							p += numpy.int64(deltas[d + i])
+							if p >= tile:
+								bad = True
+						d += numpy.int64(counts[g])
+		else:
+			if length < 4:
+				bad = True
+			else:
+				n_present = numpy.int64(data[position:position + 4].view(
+					numpy.uint32)[0])
+				if n_present > n_tracks or length < 8 + 8 * n_present:
+					bad = True
+				else:
+					_, tracks, ptr, offsets_at, values_at, total = _matrix_header(
+						data, position)
+					if length < values_at - position + total * _WIDTHS[code]:
+						bad = True
+					else:
+						offsets = data[offsets_at:offsets_at + 2 * total].view(
+							numpy.uint16)
+						for j in range(n_present):
+							if tracks[j] >= n_tracks or (j > 0 and tracks[j] <=
+									tracks[j - 1]) or ptr[j + 1] < ptr[j]:
+								bad = True
+								break
+							for i in range(numpy.int64(ptr[j]), numpy.int64(ptr[j +
+									1])):
+								if offsets[i] >= tile or (i > numpy.int64(ptr[j]) and
+										offsets[i] <= offsets[i - 1]):
+									bad = True
 
 		if bad:
 			failed[k] = 1
@@ -547,8 +748,34 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 
 
 @numba.njit(nogil=True, cache=True)
+def _check_blocks(data, positions, lengths, kinds, n_entries, failed):
+	"""Whether each block of a track-order batch can be decoded: its kind
+	is 1, its code known, it is long enough, and its positions ascend."""
+
+	n_failed = 0
+	for k in range(positions.shape[0]):
+		kind = kinds[k] & 3
+		code = kinds[k] >> 2
+		n = n_entries[k]
+		position = positions[k]
+		bad = position < 0 or kind != _DENSE or code > _F32 or lengths[k] < \
+			_pad8(4 * n) + n * _WIDTHS[code]
+		if not bad:
+			view = data[position:position + 4 * n].view(numpy.uint32)
+			for i in range(1, n):
+				if view[i] <= view[i - 1]:
+					bad = True
+					break
+		if bad:
+			failed[k] = 1
+			n_failed += 1
+
+	return n_failed
+
+
+@numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
-	pair_bases, pair_starts, pair_rows, out):
+	pair_bases, pair_starts, pair_rows, out, accumulate):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
@@ -561,9 +788,11 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	it goes to channel slots[g], or nowhere when slots[g] is -1. Every chunk
 	has passed `_check_chunks`.
 
-	A sparse chunk's nonzero bases are scattered over zeros, and every value
-	is cast to the type of `out`. A window's bases past its chromosome's end
-	are not in any tile, and are set by the caller.
+	Without `accumulate`, the window's bases are set, zeros included, and
+	every value is cast to the type of `out`. With it, values are added to
+	`out`, which is zero on entry, so that several tracks with one channel
+	in `slots` are summed. A window's bases past its chromosome's end are
+	not in any tile, and are set by the caller.
 	"""
 
 	width = out.shape[2]
@@ -578,11 +807,12 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 		chunk = pair_chunks[q]
 		if chunk < 0:
-			for g in range(n_tracks):
-				slot = slots[g]
-				if slot >= 0:
-					for p in range(a - start, b - start):
-						out[row, slot, p] = 0
+			if not accumulate:
+				for g in range(n_tracks):
+					slot = slots[g]
+					if slot >= 0:
+						for p in range(a - start, b - start):
+							out[row, slot, p] = 0
 			continue
 
 		kind = kinds[chunk] & 3
@@ -598,7 +828,10 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 				at = position + (g * tile + (a - base)) * w
 				n = b - a
-				if code == _U8:
+				if accumulate:
+					for p in range(n):
+						out[row, slot, a - start + p] += _load(data, at + p * w, code)
+				elif code == _U8:
 					for p in range(n):
 						out[row, slot, a - start + p] = data[at + p]
 				elif code == _U16:
@@ -625,7 +858,7 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 					view = data[at:at + 4 * n].view(numpy.float32)
 					for p in range(n):
 						out[row, slot, a - start + p] = view[p]
-		else:
+		elif kind == _SPARSE:
 			counts = data[position:position + 4 * n_tracks].view(numpy.uint32)
 			total = 0
 			for g in range(n_tracks):
@@ -633,7 +866,7 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 			deltas_at = position + 4 * n_tracks
 			deltas = data[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
-			values_at = deltas_at + (2 * total + 3) // 4 * 4
+			values_at = deltas_at + _pad4(2 * total)
 
 			d = 0
 			for g in range(n_tracks):
@@ -643,8 +876,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 					d += count
 					continue
 
-				for p in range(a - start, b - start):
-					out[row, slot, p] = 0
+				if not accumulate:
+					for p in range(a - start, b - start):
+						out[row, slot, p] = 0
 
 				p = 0
 				for i in range(count):
@@ -653,9 +887,203 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 					if at >= b:
 						break
 					if at >= a:
-						out[row, slot, at - start] = _load(data, values_at + (d +
-							i) * w, code)
+						v = _load(data, values_at + (d + i) * w, code)
+						if accumulate:
+							out[row, slot, at - start] += v
+						else:
+							out[row, slot, at - start] = v
 
 				d += count
+		else:
+			n_present, tracks, ptr, offsets_at, values_at, total = _matrix_header(
+				data, position)
+			offsets = data[offsets_at:offsets_at + 2 * total].view(numpy.uint16)
+			if not accumulate:
+				for g in range(n_tracks):
+					slot = slots[g]
+					if slot >= 0:
+						for p in range(a - start, b - start):
+							out[row, slot, p] = 0
+
+			for k in range(n_present):
+				slot = slots[tracks[k]]
+				if slot < 0:
+					continue
+				# The first offset in the window, by binary search.
+				lo, hi = numpy.int64(ptr[k]), numpy.int64(ptr[k + 1])
+				while lo < hi:
+					mid = (lo + hi) // 2
+					if base + numpy.int64(offsets[mid]) < a:
+						lo = mid + 1
+					else:
+						hi = mid
+				for i in range(lo, numpy.int64(ptr[k + 1])):
+					at = base + numpy.int64(offsets[i])
+					if at >= b:
+						break
+					v = _load(data, values_at + i * w, code)
+					if accumulate:
+						out[row, slot, at - start] += v
+					else:
+						out[row, slot, at - start] = v
 
 	return 0
+
+
+@numba.njit(nogil=True, cache=True)
+def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
+	pair_bases, pair_starts, pair_rows, width, fill, out_rows, out_channels,
+	out_offsets, out_values):
+	"""The nonzero bases of windows in a batch of chunks, as entries.
+
+	The pairs are as in `_read_tiles`. Each nonzero base of a selected
+	track in a window gives one entry: the window's row, the track's
+	channel, the base's offset in the window and its value. Without `fill`
+	only the count is returned; with it the entries are written to the
+	output arrays, which must hold them. Returns the number of entries.
+	"""
+
+	k_out = 0
+	for q in range(pair_chunks.shape[0]):
+		base = pair_bases[q]
+		start = pair_starts[q]
+		row = pair_rows[q]
+		a = max(start, base)
+		b = min(start + width, base + tile)
+		chunk = pair_chunks[q]
+		if b <= a or chunk < 0:
+			continue
+
+		kind = kinds[chunk] & 3
+		code = kinds[chunk] >> 2
+		w = _WIDTHS[code]
+		position = positions[chunk]
+
+		if kind == _DENSE:
+			for g in range(n_tracks):
+				slot = slots[g]
+				if slot < 0:
+					continue
+				at = position + (g * tile + (a - base)) * w
+				for p in range(b - a):
+					v = _load(data, at + p * w, code)
+					if v != 0.0:
+						if fill:
+							out_rows[k_out] = row
+							out_channels[k_out] = slot
+							out_offsets[k_out] = a - start + p
+							out_values[k_out] = v
+						k_out += 1
+		elif kind == _SPARSE:
+			counts = data[position:position + 4 * n_tracks].view(numpy.uint32)
+			total = 0
+			for g in range(n_tracks):
+				total += numpy.int64(counts[g])
+			deltas_at = position + 4 * n_tracks
+			deltas = data[deltas_at:deltas_at + 2 * total].view(numpy.uint16)
+			values_at = deltas_at + _pad4(2 * total)
+			d = 0
+			for g in range(n_tracks):
+				slot = slots[g]
+				count = numpy.int64(counts[g])
+				if slot < 0:
+					d += count
+					continue
+				p = 0
+				for i in range(count):
+					p += numpy.int64(deltas[d + i])
+					at = base + p
+					if at >= b:
+						break
+					if at >= a:
+						if fill:
+							out_rows[k_out] = row
+							out_channels[k_out] = slot
+							out_offsets[k_out] = at - start
+							out_values[k_out] = _load(data, values_at + (d + i) * w,
+								code)
+						k_out += 1
+				d += count
+		else:
+			n_present, tracks, ptr, offsets_at, values_at, total = _matrix_header(
+				data, position)
+			offsets = data[offsets_at:offsets_at + 2 * total].view(numpy.uint16)
+			for k in range(n_present):
+				slot = slots[tracks[k]]
+				if slot < 0:
+					continue
+				lo, hi = numpy.int64(ptr[k]), numpy.int64(ptr[k + 1])
+				while lo < hi:
+					mid = (lo + hi) // 2
+					if base + numpy.int64(offsets[mid]) < a:
+						lo = mid + 1
+					else:
+						hi = mid
+				for i in range(lo, numpy.int64(ptr[k + 1])):
+					at = base + numpy.int64(offsets[i])
+					if at >= b:
+						break
+					if fill:
+						out_rows[k_out] = row
+						out_channels[k_out] = slot
+						out_offsets[k_out] = at - start
+						out_values[k_out] = _load(data, values_at + i * w, code)
+					k_out += 1
+
+	return k_out
+
+
+@numba.njit(nogil=True, cache=True)
+def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
+	pair_starts, pair_rows, width, out, accumulate, list_entries, fill,
+	out_rows, out_channels, out_offsets, out_values):
+	"""Windows out of a batch of track-order blocks.
+
+	Pair q is a window and one block of one track that may hold its bases:
+	block pair_blocks[q] of the batch, whose bytes start at
+	positions[block] of `data` with n_entries[block] entries, for the window
+	at pair_starts[q] of `width` bases, going to row pair_rows[q] and channel
+	pair_slots[q] of `out`. The block's positions ascend, so the window's
+	entries are found by binary search. Without `list_entries` the values
+	are set into `out`, or added with `accumulate`; with it they are counted
+	as entries, and written to the output arrays when `fill`. `out` is zero
+	on entry in every mode. Returns the number of entries.
+	"""
+
+	k_out = 0
+	for q in range(pair_blocks.shape[0]):
+		block = pair_blocks[q]
+		n = n_entries[block]
+		code = kinds[block] >> 2
+		w = _WIDTHS[code]
+		position = positions[block]
+		start = pair_starts[q]
+		end = start + width
+		row, slot = pair_rows[q], pair_slots[q]
+		view = data[position:position + 4 * n].view(numpy.uint32)
+		values_at = _pad8(position + 4 * n)
+		lo, hi = 0, n
+		while lo < hi:
+			mid = (lo + hi) // 2
+			if numpy.int64(view[mid]) < start:
+				lo = mid + 1
+			else:
+				hi = mid
+		for i in range(lo, n):
+			at = numpy.int64(view[i])
+			if at >= end:
+				break
+			v = _load(data, values_at + i * w, code)
+			if list_entries:
+				if fill:
+					out_rows[k_out] = row
+					out_channels[k_out] = slot
+					out_offsets[k_out] = at - start
+					out_values[k_out] = v
+				k_out += 1
+			elif accumulate:
+				out[row, slot, at - start] += v
+			else:
+				out[row, slot, at - start] = v
+
+	return k_out
