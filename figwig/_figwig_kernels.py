@@ -1037,16 +1037,18 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	if kind == _SPARSE:
 		# Entry d of the values is the d-th varint; the varints of tracks
 		# not read, and those after the window, are counted by their last
-		# bytes.
+		# bytes, in one pass over every run of them, from `pending` on.
 		d = 0
+		pending = at
 		for g in range(counts.shape[0]):
 			slot = slots[g]
 			end = at + numpy.int64(counts[g])
 			if slot < 0:
-				d += _count_varints(data, at, end)
 				at = end
 				continue
 
+			if pending < at:
+				d += _count_varints(data, pending, at)
 			if not listing and not accumulate:
 				channels[slot, a - start:b - start] = 0
 
@@ -1071,7 +1073,7 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					else:
 						channels[slot, here - start] = _value(values, d, ones)
 				d += 1
-			d += _count_varints(data, at, end)
+			pending = at
 			at = end
 		return k_out
 
