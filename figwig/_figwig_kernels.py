@@ -9,12 +9,15 @@ of tiles of `tile` bases. The tiles of the tracks of one group, at one
 position, are one chunk, which is stored in one of four ways. A chunk whose
 every value is 0 is stored as nothing. A dense chunk holds every value,
 track after track, in the chunk's element type. A sparse chunk holds, for
-each track, the number of nonzero bases (uint32), then the number of bytes
-of offsets (uint32), then every track's nonzero bases' offsets within the
-tile, the first as it is and the rest as differences from the one before,
-each as a varint (LEB128: seven bits per byte, low bits first, the high bit
-set on every byte but the last), then padding to a multiple of 4 bytes,
-then every track's nonzero values in the element type. A matrix chunk, for
+each track, the number of nonzero bases (uint32), then for each track the
+byte at which its offsets start plus one more for where the last track's
+end (uint32, from the first offset byte), then every track's nonzero
+bases' offsets within the tile, the first as it is and the rest as
+differences from the one before, each as a varint (LEB128: seven bits per
+byte, low bits first, the high bit set on every byte but the last), then
+padding to a multiple of 4 bytes, then every track's nonzero values in the
+element type, so that a read of some of a group's tracks goes straight to
+each one's offsets. A matrix chunk, for
 a group of many tracks few of which have a value in the tile, holds the
 number of tracks present, their positions in the group (uint32,
 ascending), a uint32 pointer per present track into the entries plus one
@@ -109,15 +112,6 @@ def _get_varint(data, at):
 
 
 @numba.njit(nogil=True, cache=True)
-def _skip_varints(data, at, n):
-	"""Where the n varints at `at` of `data` end."""
-
-	for i in range(n):
-		at += 1 + (data[at] >= 128) + (data[at] >= 128 and data[at + 1] >= 128)
-	return at
-
-
-@numba.njit(nogil=True, cache=True)
 def _load(data, offset, code):
 	"""One value of element type `code` at byte `offset` of `data`, as a
 	float64."""
@@ -204,7 +198,7 @@ def _pick_kind(n_tracks, n_present, total, delta_bytes, w, width, allow_dense,
 	as uint8."""
 
 	dense_bytes = n_tracks * width * max(w, 1)
-	sparse_bytes = 4 * n_tracks + 4 + _pad4(delta_bytes) + total * w
+	sparse_bytes = 8 * n_tracks + 4 + _pad4(delta_bytes) + total * w
 	matrix_bytes = 8 + 8 * n_present + _pad4(2 * total) + total * w
 	kind, best = _SPARSE, sparse_bytes
 	if allow_matrix and matrix_bytes < best:
@@ -343,18 +337,20 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 	if kind == _SPARSE:
 		counts = out[position:position + 4 * n_tracks].view(numpy.uint32)
-		for g in range(n_tracks):
-			counts[g] = nnz[g]
-		at = position + 4 * n_tracks + 4
+		starts = out[position + 4 * n_tracks:position + 8 * n_tracks + 4].view(
+			numpy.uint32)
+		deltas_at = position + 8 * n_tracks + 4
+		at = deltas_at
 		d = 0
 		for g in range(n_tracks):
+			counts[g] = nnz[g]
+			starts[g] = at - deltas_at
 			last = 0
 			for i in range(nnz[g]):
 				at = _put_varint(out, at, offs[d] - last)
 				last = offs[d]
 				d += 1
-		out[position + 4 * n_tracks:position + 4 * n_tracks + 4].view(
-			numpy.uint32)[0] = at - (position + 4 * n_tracks + 4)
+		starts[n_tracks] = at - deltas_at
 	else:
 		out[position:position + 4].view(numpy.uint32)[0] = n_present
 		tracks = out[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
@@ -806,18 +802,20 @@ def _inflate_chunks_libdeflate(decompress, decompressor, data, starts, sizes,
 
 @numba.njit(nogil=True, cache=True)
 def _sparse_header(data, position, n_tracks):
-	"""A sparse chunk's (counts, total, deltas_at, delta_bytes,
-	values_at)."""
+	"""A sparse chunk's (counts, starts, total, deltas_at, delta_bytes,
+	values_at): `starts` holds where each track's offsets start, from
+	`deltas_at`, and where the last track's end."""
 
 	counts = data[position:position + 4 * n_tracks].view(numpy.uint32)
+	starts = data[position + 4 * n_tracks:position + 8 * n_tracks + 4].view(
+		numpy.uint32)
 	total = 0
 	for g in range(n_tracks):
 		total += numpy.int64(counts[g])
-	delta_bytes = numpy.int64(data[position + 4 * n_tracks:position + 4 *
-		n_tracks + 4].view(numpy.uint32)[0])
-	deltas_at = position + 4 * n_tracks + 4
+	delta_bytes = numpy.int64(starts[n_tracks])
+	deltas_at = position + 8 * n_tracks + 4
 	values_at = deltas_at + _pad4(delta_bytes)
-	return counts, total, deltas_at, delta_bytes, values_at
+	return counts, starts, total, deltas_at, delta_bytes, values_at
 
 
 @numba.njit(nogil=True, cache=True)
@@ -836,15 +834,20 @@ def _matrix_header(data, position):
 
 
 @numba.njit(nogil=True, cache=True)
-def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
-	"""Whether each chunk of a batch can be decoded by `_read_tiles`.
+def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, slots,
+	failed):
+	"""Whether each chunk of a batch can be decoded by `_read_tiles` for the
+	tracks with a slot.
 
 	Chunk k's bytes are data[positions[k]:positions[k] + lengths[k]], and
 	kinds[k] its kind byte. A chunk fails, and gets failed[k] = 1, when its
 	kind or element code is not one the format defines, when it is shorter
-	than its kind says, when its offsets or track positions are out of
-	range or order, or when its varints do not fill their bytes exactly.
-	Returns the number of chunks that failed.
+	than its kind says, when its track positions or offset starts are out
+	of range or order, or when the offsets of a track that is read, one
+	with slots[g] >= 0, are out of range or order or its varints do not
+	fill their bytes exactly; the offsets of a track that is not read are
+	never touched, so they are not checked. Returns the number of chunks
+	that failed.
 	"""
 
 	n_failed = 0
@@ -860,20 +863,27 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 		elif kind == _DENSE:
 			bad = code == _ONE or length < n_tracks * tile * _WIDTHS[code]
 		elif kind == _SPARSE:
-			if length < 4 * n_tracks + 4:
+			if length < 8 * n_tracks + 4:
 				bad = True
 			else:
-				counts, total, at, delta_bytes, values_at = _sparse_header(data,
-					position, n_tracks)
-				if length < values_at - position + total * _WIDTHS[code]:
+				counts, starts, total, deltas_at, delta_bytes, values_at = \
+					_sparse_header(data, position, n_tracks)
+				if length < values_at - position + total * _WIDTHS[code] or \
+						starts[0] != 0:
 					bad = True
 				else:
-					end = at + delta_bytes
 					for g in range(n_tracks):
+						if starts[g + 1] < starts[g]:
+							bad = True
+							break
+						if slots[g] < 0:
+							continue
+						at = deltas_at + numpy.int64(starts[g])
+						end = deltas_at + numpy.int64(starts[g + 1])
 						p = 0
 						for i in range(numpy.int64(counts[g])):
 							# A varint of up to three bytes, whole within the
-							# offset bytes: checked byte by byte near their end.
+							# track's bytes: checked byte by byte near their end.
 							if at + 3 > end and (at >= end or (data[at] >= 128 and (
 									at + 1 >= end or (data[at + 1] >= 128 and (at + 2
 									>= end or data[at + 2] >= 128))))):
@@ -884,10 +894,9 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 							if p >= tile:
 								bad = True
 								break
-						if bad:
+						if bad or at != end:
+							bad = True
 							break
-					if at != end:
-						bad = True
 		else:
 			if length < 4:
 				bad = True
@@ -909,6 +918,8 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, failed):
 									tracks[j - 1]) or ptr[j + 1] < ptr[j]:
 								bad = True
 								break
+							if slots[tracks[j]] < 0:
+								continue
 							for i in range(numpy.int64(ptr[j]), numpy.int64(ptr[j +
 									1])):
 								if offsets[i] >= tile or (i > numpy.int64(ptr[j]) and
@@ -1001,11 +1012,12 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	`channels` has a row, or listed as entries from k_out on when `fill`,
 	counted either way. Returns the entries in the window.
 
-	A sparse chunk's varints start at `at` of `data`, `counts` per track; a
-	matrix chunk's present `tracks`, `ptr` and uint16 `offsets` are as its
-	header gives them, and each present track's first base in the window
-	is found by binary search. `selected` lists the group's tracks with a
-	slot, ascending. `values` is the typed view of the chunk's values.
+	A sparse chunk's varints start at `at` of `data`, `counts` per track
+	and each track's at `ptr[g]` bytes from there; a matrix chunk's present
+	`tracks`, `ptr` and uint16 `offsets` are as its header gives them, and
+	each present track's first base in the window is found by binary
+	search. `selected` lists the group's tracks with a slot, ascending.
+	`values` is the typed view of the chunk's values.
 	"""
 
 	listing = channels.shape[0] == 0
@@ -1015,7 +1027,6 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 			slot = slots[g]
 			count = numpy.int64(counts[g])
 			if slot < 0:
-				at = _skip_varints(data, at, count)
 				d += count
 				continue
 
@@ -1023,12 +1034,12 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 				channels[slot, a - start:b - start] = 0
 
 			p = 0
+			q = at + numpy.int64(ptr[g])
 			for i in range(count):
-				delta, at = _get_varint(data, at)
+				delta, q = _get_varint(data, q)
 				p += delta
 				here = base + p
 				if here >= b:
-					at = _skip_varints(data, at, count - i - 1)
 					break
 				if here >= a:
 					if listing:
@@ -1136,9 +1147,9 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 		return k_out
 
 	if kind == _SPARSE:
-		counts, total, at, delta_bytes, values_at = _sparse_header(data,
+		counts, ptr, total, at, delta_bytes, values_at = _sparse_header(data,
 			position, n_tracks)
-		tracks = ptr = counts[:0]
+		tracks = counts[:0]
 		offsets = data[at:at].view(numpy.uint16)
 	else:
 		n_present, tracks, ptr, at, values_at, total = _matrix_header(data,

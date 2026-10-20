@@ -1161,7 +1161,7 @@ class FigWigWriter:
 		n_tracks):
 		n = len(tiles)
 		n_entries = len(positions)
-		out = numpy.empty(n * (4 * n_tracks + 8 * min(n_tracks, n_entries) + 32) +
+		out = numpy.empty(n * (8 * n_tracks + 8 * min(n_tracks, n_entries) + 32) +
 			7 * n_entries, dtype=numpy.uint8)
 		bounds = numpy.zeros(n + 1, dtype=numpy.int64)
 		kinds = numpy.zeros(n, dtype=numpy.uint8)
@@ -2467,7 +2467,7 @@ class _Task:
 				self.sizes, self.bound)
 			failed = numpy.zeros(n, dtype=numpy.int64)
 			if _check_chunks(reader.tile, data, positions, lengths, self.kinds,
-					len(self.slots), failed) > 0:
+					len(self.slots), self.slots, failed) > 0:
 				k = int(numpy.argmax(failed))
 				raise ValueError("a chunk of {} cannot be read: tile {} of the "
 					"group of {!r} is corrupt, or the file is truncated.".format(
