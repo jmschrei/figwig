@@ -23,8 +23,9 @@ groups of 8 (64 for cells) written as figwig 0.1 wrote them, with
 `_MATRIX_CHUNKS` off; a figwig file in position order with every track in
 one group, compressed and uncompressed; and a figwig file in track order.
 The reads are `--windows` windows of `--width` bases on the BED regions'
-midpoints, in one call on 1 and 8 threads and as 32 batches of 64 windows
-on one thread: dense, with `sparse=True`, and with `labels` (one label per
+midpoints (`--cell-windows` for the cell set, whose sparse output over
+every cell is large), in one call on 1 and 8 threads and as 32 batches of
+64 windows on one thread: dense, with `sparse=True`, and with `labels` (one label per
 strand for the six, six labels for the 96, ten random labels for cells), for
 every track and for a subset of 100 cells; and for cells also every cut of
 20 cells over the genome with `read_entries`. Each configuration runs in
@@ -233,16 +234,25 @@ def time_one(args):
 		handle = open_()
 		y = read(handle, names, starts)
 		seconds = time.perf_counter() - t0
+		# The digest is over the nonzero bases in (row, channel, offset) order,
+		# which a sparse result already is and a dense one is reduced to, so
+		# that the two can be compared without densifying thousands of
+		# tracks.
 		if args.mode == 'entries':
 			digest = hashlib.sha256(numpy.ascontiguousarray(y.values.astype(
 				numpy.float32)).tobytes()).hexdigest()[:12]
 		else:
 			if args.mode == 'sparse':
-				dense = numpy.zeros(y.shape, dtype=numpy.float32)
-				dense[y.rows, y.channels, y.offsets] = y.values
-				y = dense
-			digest = hashlib.sha256(numpy.ascontiguousarray(numpy.nan_to_num(
-				y.astype(numpy.float32))).tobytes()).hexdigest()[:12]
+				rows, channels, offsets, values = y.rows, y.channels, y.offsets, \
+					y.values
+			else:
+				y = numpy.nan_to_num(y)
+				rows, channels, offsets = numpy.nonzero(y)
+				values = y[rows, channels, offsets]
+			digest = hashlib.sha256(b''.join(numpy.ascontiguousarray(a).tobytes()
+				for a in (rows.astype(numpy.int64), channels.astype(numpy.int64),
+				offsets.astype(numpy.int64), values.astype(numpy.float32)))
+				).hexdigest()[:12]
 
 	print(json.dumps({'kind': 'read', 'set': args.set, 'file': args.file, 'mode':
 		args.mode, 'selection': args.selection, 'labels': args.labels, 'threads':
@@ -265,11 +275,12 @@ def configurations(args, sets):
 			kinds.append((name, path, 'sparse'))
 		for name, path, mode in kinds:
 			for selection in selections:
-				if cells and mode == 'dense' and selection == 'all':
-					continue
-				for threads in args.threads_list:
-					out.append((set_name, name, path, n, mode, selection, 'none',
-						threads, False))
+				# Every cell densely is the read the format refuses; its
+				# pseudobulks and sparse entries are what is timed.
+				if not (cells and mode == 'dense' and selection == 'all'):
+					for threads in args.threads_list:
+						out.append((set_name, name, path, n, mode, selection, 'none',
+							threads, False))
 				if mode != 'sparse':
 					for threads in args.threads_list:
 						out.append((set_name, name, path, n, mode, selection,
@@ -314,6 +325,8 @@ def run(args):
 		out.write(json.dumps(entry) + '\n')
 	out.flush()
 
+	if args.only is not None:
+		sets = [entry for entry in sets if entry[0] == args.only]
 	configs = configurations(args, sets)
 	print('{} read configurations'.format(len(configs)), file=sys.stderr,
 		flush=True)
@@ -325,7 +338,8 @@ def run(args):
 				'--workdir', args.workdir, '--set', set_name, '--file', name,
 				'--path', path or '', '--n', str(n), '--mode', mode, '--selection',
 				selection, '--labels', label_name, '--threads', str(threads),
-				'--width', str(args.width), '--windows', str(args.windows)]
+				'--width', str(args.width), '--windows', str(args.cell_windows if
+				set_name == 'cells' else args.windows)]
 			command += ['--batches'] if batches else []
 			for bed in args.bed:
 				command += ['--bed', bed]
@@ -388,11 +402,15 @@ def main():
 	parser.add_argument('--out', default='results.jsonl')
 	parser.add_argument('--width', type=int, default=2114)
 	parser.add_argument('--windows', type=int, default=8192)
+	parser.add_argument('--cell-windows', type=int, default=512, help="Windows "
+		"for the cell set, whose sparse output over every cell is large.")
 	parser.add_argument('--threads-list', type=int, nargs='+', default=[1, 8])
 	parser.add_argument('--prepare-threads', type=int, default=16)
 	parser.add_argument('--repeats', type=int, default=3)
 	parser.add_argument('--many', action='store_true', help="Include the "
 		"96-track set.")
+	parser.add_argument('--only', default=None, help="Run only this set: "
+		"tracks6, tracks96 or cells.")
 	parser.add_argument('--table', default=None)
 	parser.add_argument('--one', action='store_true', help=argparse.SUPPRESS)
 	parser.add_argument('--set', help=argparse.SUPPRESS)

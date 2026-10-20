@@ -1953,7 +1953,7 @@ class FigWigReader:
 				tasks.extend(self._plan(g, slots, tids, starts, lengths, width,
 					out3, mode))
 
-		self._run(tasks, n_jobs)
+		self._run(tasks, n_jobs, out3 if mode == 'sum' else None)
 
 		if sparse:
 			parts = [task.entries for task in tasks if task.entries is not None]
@@ -2236,10 +2236,16 @@ class FigWigReader:
 
 		return tasks
 
-	def _run(self, tasks, n_jobs):
+	def _run(self, tasks, n_jobs, summed=None):
 		"""Run the tasks on up to `n_jobs` threads, the first on this thread
 		when a kernel has not been compiled yet, so that each is compiled
-		once before any thread starts."""
+		once before any thread starts.
+
+		Tasks that sum into `summed`, the output of a read with labels, may
+		add to the same cells from different groups or tracks, so on several
+		threads each thread sums into its own copy, and the copies are added
+		to `summed` at the end.
+		"""
 
 		if len(tasks) == 0:
 			return
@@ -2259,9 +2265,22 @@ class FigWigReader:
 			if n_jobs == 1 or len(rest) <= 1:
 				for task in rest:
 					task.run(fd)
-			else:
+			elif summed is None:
 				with ThreadPoolExecutor(min(n_jobs, len(rest))) as pool:
 					list(pool.map(lambda task: task.run(fd), rest))
+			else:
+				n_threads = min(n_jobs, len(rest))
+				buffers = [numpy.zeros_like(summed) for _ in range(n_threads)]
+
+				def run_share(k):
+					for task in rest[k::n_threads]:
+						task.out = buffers[k]
+						task.run(fd)
+
+				with ThreadPoolExecutor(n_threads) as pool:
+					list(pool.map(run_share, range(n_threads)))
+				for buffer in buffers:
+					summed += buffer
 
 
 def _compact(chunk, live):

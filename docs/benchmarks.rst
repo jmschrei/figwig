@@ -250,6 +250,59 @@ Both read the BAM the same way; ``figwig bam2fw`` spends the difference
 merging the two strands' positions and encoding their tiles, which runs on
 the calling thread.
 
+Many tracks, sparse reads and the two orders
+--------------------------------------------
+
+``benchmarks/compare_sparse.py`` times the ways of holding many tracks
+against each other: the N bigWigs with ``read_bigwig``; the figwig file in
+groups of 8 tracks that figwig 0.1 wrote ("groups of 8" below); and figwig
+files with every track in one group, compressed and uncompressed, and in
+track order, read densely, with ``sparse=True`` and with ``labels``. The
+tracks were the six count tracks above and the 96 of the previous section,
+on tmpfs, read as 8,192 windows of 2,114 bp on peak summits in one call on
+1 and 8 threads, and as 32 batches of 64 windows on one thread. Each
+configuration ran in its own process after a warm-up on 1,000 windows,
+opening included, and the table gives the median of three; every
+configuration of one set gave the same nonzero bases.
+
+======  ========================  ================  ================  =======================
+tracks  file and read             1 thread          8 threads         batches of 64, 1 thread
+======  ========================  ================  ================  =======================
+6       bigWigs                   0.932 s           0.179 s           0.561 s
+6       groups of 8, dense        0.267 s           0.078 s           0.074 s
+6       one group, dense          0.265 s           0.069 s           0.071 s
+6       one group raw, dense      0.101 s           0.052 s           0.029 s
+6       track order, dense        0.312 s           0.090 s           0.772 s
+6       one group, sparse         0.375 s           0.170 s
+6       one group raw, sparse     0.216 s           0.149 s
+6       bigWigs, 2 labels         1.004 s           0.263 s           0.556 s
+6       one group raw, 2 labels   0.092 s           0.047 s           0.024 s
+96      bigWigs                   13.741 s          3.188 s           10.827 s
+96      groups of 8, dense        2.419 s           0.532 s           0.692 s
+96      one group, dense          1.961 s           0.372 s           0.521 s
+96      one group raw, dense      0.828 s           0.184 s           0.190 s
+96      track order, dense        4.314 s           1.000 s           10.924 s
+96      groups of 8, sparse       2.893 s           1.030 s
+96      one group raw, sparse     1.002 s           0.599 s
+96      bigWigs, 6 labels         14.346 s          2.959 s           10.987 s
+96      groups of 8, 6 labels     2.215 s           0.508 s           0.633 s
+96      one group raw, 6 labels   0.485 s           0.122 s           0.104 s
+======  ========================  ================  ================  =======================
+
+An uncompressed file in one group reads dense windows 2.6 times faster
+than the compressed groups of 8 on one thread, and sums 96 tracks into 6
+labels 4.6 times faster, at 2.2 to 2.4 times the size (583 MB against 267
+for the six tracks, 9.3 GB against 4.2 for the 96); compressed, one group
+of 96 is 7% smaller than groups of 8 and 20% faster. The sparse return is
+slower than the dense one on count tracks this dense, since it lists and
+sorts millions of entries (4.6 million for the six tracks), and is meant
+for tracks that are mostly zero. Track order reads windows across many
+tracks slowest, 10.9 s for the 96-track batches where one group takes 0.2
+s, since every window searches a block of every track; it is the order for
+the single-cell reads below. The files: six tracks 267 MB in groups of 8
+or one group compressed, 583 MB uncompressed, 961 MB in track order; 96
+tracks 4,229, 3,912, 9,302 and 15,369 MB.
+
 Thread scaling
 --------------
 

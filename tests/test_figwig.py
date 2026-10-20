@@ -1404,3 +1404,20 @@ def test_corrupt_track_order_files_raise_only_value_errors(tmp_path, track_fw):
 			pass
 		except Exception as e:
 			raise AssertionError("{} raised {}".format(name, type(e).__name__))
+
+
+def test_labels_sum_the_same_on_threads(cells, monkeypatch):
+	"""Sums per label gather tracks from several groups or tracks, which on
+	several threads land in the same cells of the output."""
+
+	monkeypatch.setattr(figwig.figwig, '_BATCH_CHUNKS', 2)
+	ref, entries, paths = cells
+	rng = numpy.random.default_rng(50)
+	chroms, starts = random_windows(rng, 200, 300)
+	labels = rng.integers(0, 3, 120)
+	for key in (('positions', 8), ('tracks', 1), ('positions', 120)):
+		reader = FigWigReader(paths[key])
+		one = reader.read(chroms, starts, 300, labels=labels, n_jobs=1)
+		for _ in range(5):
+			many = reader.read(chroms, starts, 300, labels=labels, n_jobs=8)
+			assert_identical(many, one)
