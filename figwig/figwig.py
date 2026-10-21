@@ -809,7 +809,7 @@ class FigWigWriter:
 			position = _HEADER.itemsize
 			end = source._data_end
 			while position < end:
-				piece = os.pread(fd, min(1 << 24, end - position), position)
+				piece = _pread(fd, min(1 << 24, end - position), position)
 				if not piece:
 					raise ValueError("{} ends inside its chunks.".format(source.path))
 				self._file.write(piece)
