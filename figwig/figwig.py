@@ -2797,8 +2797,16 @@ class FigWigReader:
 				None, 'list' if sparse else 'sum' if summing else 'dense', labels
 				is not None, bins or 1, n_jobs)
 			n_threads = max(1, min(n_jobs, len(tasks)))
-		buffers = n_threads if summing and self.order == 'tracks' and n_threads \
-			> 1 else 0
+		# In position order a group's tasks sum straight into the output when
+		# they write disjoint cells: a label's cells are one per window base,
+		# and a window's two tiles fill different bases, but a bin that
+		# straddles a tile boundary is filled from two tiles, which may lie
+		# in two tasks, so such a read sums into a copy per thread, as track
+		# order does, unless its bins lie on the tile grid.
+		straddling = bins is not None and bins > 1 and (self.tile % bins != 0 or
+			(starts % bins != 0).any())
+		buffers = n_threads if summing and n_threads > 1 and (self.order ==
+			'tracks' or straddling) else 0
 
 		inner = None
 		if not sparse:
@@ -2860,7 +2868,7 @@ class FigWigReader:
 			if len(tasks) < n_threads:
 				tasks = _split_tasks(tasks, n_threads)
 
-		self._run(tasks, n_threads, out3 if mode == 'sum' else None)
+		self._run(tasks, n_threads, out3 if mode == 'sum' else None, buffers > 0)
 
 		if sparse:
 			return self._gather(tasks, copies, n, len(ids), width, dtype)
@@ -3167,17 +3175,18 @@ class FigWigReader:
 
 		return tasks
 
-	def _run(self, tasks, n_threads, summed=None):
+	def _run(self, tasks, n_threads, summed=None, copies=False):
 		"""Run the tasks on up to `n_threads` threads, the first on this
 		thread when a kernel has not been compiled yet, so that each is
 		compiled once before any thread starts.
 
 		Tasks that sum into `summed`, the output of a read with labels or
-		bins, run a group at a time in position order, since the tasks of
-		one group write disjoint cells and those of two groups do not; in
-		track order, where a track's blocks are spread over the tasks, each
-		thread sums into its own copy, and the copies are added to `summed`
-		at the end.
+		bins, run a group at a time when the tasks of one group write
+		disjoint cells (labels, and bins on the tile grid, in position
+		order), since those of two groups do not; with `copies`, where a
+		track's blocks are spread over the tasks in track order, or a bin
+		straddles two tiles, each thread sums into its own copy, and the
+		copies are added to `summed` at the end.
 		"""
 
 		if len(tasks) == 0:
@@ -3198,7 +3207,7 @@ class FigWigReader:
 			if n_threads == 1 or len(rest) <= 1:
 				for task in rest:
 					task.run(fd)
-			elif summed is None or self.order == 'positions':
+			elif summed is None or not copies:
 				pool = self._pool_for(n_threads)
 				if summed is None:
 					list(pool.map(lambda task: task.run(fd), rest))
@@ -3211,17 +3220,20 @@ class FigWigReader:
 						list(pool.map(lambda task: task.run(fd), rest[a:b]))
 						a = b
 			else:
+				# Each thread adds its copy as it finishes, under a lock, so
+				# the adds overlap the threads still reading.
 				pool = self._pool_for(n_threads)
-				buffers = [numpy.zeros_like(summed) for _ in range(n_threads)]
+				lock = threading.Lock()
 
 				def run_share(k):
+					buffer = numpy.zeros_like(summed)
 					for task in rest[k::n_threads]:
-						task.out = buffers[k]
+						task.out = buffer
 						task.run(fd)
+					with lock:
+						numpy.add(summed, buffer, out=summed)
 
 				list(pool.map(run_share, range(n_threads)))
-				for buffer in buffers:
-					summed += buffer
 		finally:
 			os.close(fd)
 

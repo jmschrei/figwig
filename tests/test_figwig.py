@@ -1242,6 +1242,14 @@ def test_dense_guard(fw, monkeypatch):
 	assert reader.read('chr1', [0], 1000, out=out) is out
 	assert reader.read('chr1', [0], 1000, sparse=True).shape == (1, 5, 1000)
 
+	# A binned read whose bins straddle tiles counts its copies per thread.
+	monkeypatch.setattr(figwig.figwig, '_MAX_DENSE_BYTES', 100000)
+	monkeypatch.setattr(figwig.figwig, '_CHUNKS_PER_THREAD', 1)
+	with pytest.raises(ValueError, match="copies for the threads"):
+		reader.read('chr1', [1], 4992, bins=3, dtype='float64', n_jobs=4)
+	assert reader.read('chr1', [1], 4992, bins=3, dtype='float64', n_jobs=1
+		).shape == (1, 5, 1664)
+
 
 def test_read_entries(fw, ref):
 	reader = FigWigReader(fw)
@@ -1772,6 +1780,42 @@ def test_bins_sum_each_window(fw, ref):
 	y = reader.read(chroms, starts, 256, bins=64, n_jobs=1)
 	numpy.testing.assert_allclose(y, dense.reshape(60, 5, -1, 64).sum(-1),
 		rtol=1e-5)
+
+
+def test_bins_that_straddle_tiles_on_threads(fw, ref, read_batching,
+	monkeypatch):
+	"""A bin that straddles a tile boundary is filled from two tiles, which
+	may lie in two tasks, so the read sums into a copy per thread and the
+	threads give the one-thread result; bins on the tile grid, bins of one
+	base and labels write disjoint cells and sum without copies."""
+
+	reader = FigWigReader(fw)
+	seen = []
+	run = reader._run
+
+	def spy(tasks, n_threads, summed=None, copies=False):
+		seen.append(copies)
+		return run(tasks, n_threads, summed, copies)
+
+	monkeypatch.setattr(reader, '_run', spy)
+	width = 4992
+	dense = expected(ref, numpy.array(['chr1']), numpy.array([1]), width,
+		list(range(5)), numpy.float64)
+	for bins in (width, 1664, 96, 3):
+		for _ in range(3):
+			y = reader.read('chr1', [1], width, bins=bins, dtype='float64',
+				n_jobs=4)
+			numpy.testing.assert_array_equal(y, dense.reshape(1, 5, -1, bins).sum(
+				-1))
+	assert seen and all(seen)
+
+	seen.clear()
+	reader.read('chr1', [0], width, bins=32, dtype='float64', n_jobs=4)
+	reader.read('chr1', [1], width, bins=32, dtype='float64', n_jobs=4)
+	reader.read('chr1', [1], width, bins=1, dtype='float64', n_jobs=4)
+	reader.read('chr1', [1, 3], width, labels=[0, 0, 1, 1, 1], dtype='float64',
+		n_jobs=4)
+	assert seen == [False, True, False, False]
 
 
 def test_bins_in_track_order(track_fw, fw):

@@ -199,7 +199,11 @@ window's total per track, which a count loss takes:
 
 ``bins`` must divide ``width``; the sums are taken without laying the
 window's bases out, from a scratch tile each chunk is decoded into once,
-and bases past the end of a chromosome count as 0. ``bins`` and ``labels``
+and bases past the end of a chromosome count as 0. A bin that straddles
+two tiles is summed from both, which may lie on different threads, so a
+read whose bins do not lie on the tile grid sums into a copy of its
+output per thread, which the memory guard counts; its output is
+``width / bins`` times smaller than a dense one. ``bins`` and ``labels``
 can be given together.
 
 ``read_entries(tracks, chroms)`` gives every nonzero base of some tracks
