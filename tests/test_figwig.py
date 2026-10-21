@@ -2217,18 +2217,25 @@ def test_append_writes_in_place(tmp_path, ref):
 	assert_identical(twice.read(chroms, starts, 300, tracks=list(range(5)),
 		dtype='float64'), old)
 
-	# A copy of the file holds only its chunks, at new offsets.
+	# A copy of the file holds only its chunks, at new offsets; a file with
+	# no chunks at all has none to copy.
+	empty = str(tmp_path / 'empty.fw')
+	with FigWigWriter(empty, CHROM_SIZES, ['nothing'], tile=TILE):
+		pass
 	copied = str(tmp_path / 'copied.fw')
 	with FigWigWriter(copied, CHROM_SIZES, None, tile=TILE) as writer:
+		writer.add_file(empty)
 		writer.add_file(path)
+	assert FigWigReader(copied).tracks[0]['name'] == 'nothing'
 	assert os.path.getsize(copied) < os.path.getsize(path)
 	reader = FigWigReader(copied, verify=True)
-	assert_identical(reader.read(chroms, starts, 300, tracks=list(range(5)),
+	assert_identical(reader.read(chroms, starts, 300, tracks=list(range(1, 6)),
 		dtype='float64'), old)
 	assert reader.read('chr2', [0], 10, tracks='third')[0, 7] == 9
-	numpy.testing.assert_array_equal(reader.tile_sums(), twice.tile_sums())
+	numpy.testing.assert_array_equal(reader.tile_sums()[1:], twice.tile_sums())
 	for field in reader.stats.dtype.names:
-		numpy.testing.assert_array_equal(reader.stats[field], twice.stats[field])
+		numpy.testing.assert_array_equal(reader.stats[field][1:], twice.stats[
+			field])
 
 
 def test_add_file_copies_tracks(tmp_path, ref, cells):

@@ -942,7 +942,8 @@ class FigWigWriter:
 			starts) else numpy.zeros(0, dtype=numpy.bool_)
 		firsts = numpy.flatnonzero(new)
 		starts = starts[firsts]
-		ends = ends[numpy.append(firsts[1:] - 1, len(ends) - 1)]
+		if len(firsts):
+			ends = ends[numpy.append(firsts[1:], len(ends)) - 1]
 		dests = numpy.zeros(len(starts), dtype=numpy.int64)
 
 		fd = _open_read(source.path)
@@ -2006,6 +2007,8 @@ def _moved(offsets, sizes, extents):
 
 	starts, dests = extents
 	offsets = numpy.asarray(offsets, dtype=numpy.int64)
+	if len(starts) == 0:
+		return numpy.full(len(offsets), _HEADER.itemsize, dtype=numpy.int64)
 	k = numpy.searchsorted(starts, offsets, side='right') - 1
 	moved = dests[numpy.maximum(k, 0)] + offsets - starts[numpy.maximum(k, 0)]
 	return numpy.where(numpy.asarray(sizes) > 0, moved, _HEADER.itemsize)
