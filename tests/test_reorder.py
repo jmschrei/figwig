@@ -61,3 +61,23 @@ def test_errors(tmp_path, fw):
 	with pytest.raises(SystemExit, match="power of two"):
 		main(['reorder', fw, str(tmp_path / 'o.fw'), '--order', 'positions', '-t',
 			'100'])
+
+
+def test_layout_is_kept_and_a_file_can_be_written_over_itself(tmp_path, fw):
+	"""The tile, groups and level default to the input's, and the output
+	may be the input's own path."""
+
+	path = str(tmp_path / 'same.fw')
+	main(['reorder', fw, path, '--order', 'positions', '-t', '128', '--groups',
+		'3', '-l', '1'])
+	before = FigWigReader(path)
+	assert before.tile == 128 and before._level == 1
+	main(['reorder', path, path, '--order', 'positions'])
+	after = FigWigReader(path)
+	assert after.tile == 128 and after._level == 1 and [t['group'] for t in
+		after.tracks] == [t['group'] for t in before.tracks]
+	assert_same_values(FigWigReader(fw), after)
+	main(['reorder', path, path, '--order', 'tracks'])
+	by_track = FigWigReader(path)
+	assert by_track.order == 'tracks'
+	assert_same_values(FigWigReader(fw), by_track)

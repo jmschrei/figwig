@@ -722,7 +722,8 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 
 
 @numba.njit(nogil=True, cache=True)
-def _read_windows(words, blocks, windows, out, signal, failed, missing):
+def _read_windows(words, blocks, windows, out, signal, failed, missing,
+	keep_nan):
 	"""Write the per-base values of bigWig windows into rows of `out`.
 
 	`words` holds decompressed data blocks, one after another, as 32-bit
@@ -736,7 +737,7 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing):
 	Each base of a window is given the value of the item that covers it,
 	`missing`, a float32, when no item does, and NaN past the end of the
 	chromosome. Items with a NaN value are skipped, so their bases are
-	`missing`. A window is not written, and is marked in `failed`, when one
+	`missing`, or NaN with `keep_nan`. A window is not written, and is marked in `failed`, when one
 	of its blocks fails `_check_block` or has an item that overlaps an item
 	of an earlier block. A window's blocks are consecutive in the index, so
 	comparing each block's first item with the furthest end of the blocks
@@ -832,7 +833,7 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing):
 					if item_start >= end:
 						break
 
-					if not numpy.isnan(value):
+					if keep_nan or not numpy.isnan(value):
 						for p in range(max(item_start, start) - start,
 								min(item_end, end) - start):
 							out[row, signal, p] = value

@@ -141,28 +141,25 @@ def _trim_counts(reads, chrom_sizes, unstranded):
 def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
 	"""Write one file's counts, strands['+'] and strands['-'] or strands['+']
 	alone, as the tracks `names`, chromosome by chromosome, each count times
-	`scale_factor` and divided by `read_depth` unless it is None."""
+	`scale_factor` and divided by `read_depth` unless it is None. The
+	counts are nonzero bases, so they go in as entries, which the writer
+	encodes on its threads."""
 
 	for chrom, _ in chrom_sizes:
 		parts = [strands[key][chrom] for key in ('+', '-') if key in strands]
-		# Each strand's positions are sorted, so a stable sort of the two
-		# together merges them; numpy.unique hashes, which is far slower here.
 		positions = numpy.concatenate([p for p, _ in parts])
 		if len(positions) == 0:
 			continue
-		positions.sort(kind='stable')
-		positions = positions[numpy.concatenate([[True], positions[1:] !=
-			positions[:-1]])]
-
-		values = numpy.zeros((len(positions), len(parts), 1), dtype=numpy.float64)
-		for k, (p, counts) in enumerate(parts):
-			values[numpy.searchsorted(positions, p), k, 0] = counts
-
+		tracks = numpy.concatenate([numpy.full(len(p), k, dtype=numpy.int64)
+			for k, (p, _) in enumerate(parts)])
+		values = numpy.concatenate([counts for _, counts in parts]).astype(
+			numpy.float64)
 		values *= scale_factor
 		if read_depth is not None:
 			values /= read_depth
 
-		writer.write(chrom, positions, values, tracks=names)
+		writer.write_sparse(chrom, positions, writer._select(names)[0][tracks],
+			values)
 
 
 def main(argv=None, prog='figwig bam2fw'):

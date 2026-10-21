@@ -7,8 +7,9 @@ Each bigWig becomes one track, named after its file unless a metadata table
 names it, and the table's other columns become the track's attributes. The
 tracks are read a group at a time, each chromosome in pieces, with
 `read_bigwig`, and written with `FigWigWriter`, so that a bigWig's values
-read back from the figwig file exactly as `read_bigwig` gives them with
-`missing=0.0`.
+read back from the figwig file as `read_bigwig` gives them with
+`missing=0.0` and `keep_nan=True`: a base no interval covers is 0, or the
+value `--missing` gives, and an interval whose value is NaN is NaN.
 """
 
 import argparse
@@ -64,6 +65,11 @@ def _parser(prog):
 	parser.add_argument('-l', '--level', default=6, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"6.")
+	parser.add_argument('--missing', default=0.0, type=float, help="The value "
+		"of a base that no interval of a bigWig covers: 0, or nan to keep it "
+		"apart from a measured 0, as for methylation or conservation, at the "
+		"cost of a float32 track. An interval whose value is NaN is NaN either "
+		"way. Default is 0.")
 	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
 		"number of threads to read and compress on. Default is 1.")
 	parser.add_argument('-v', '--verbose', action='store_true')
@@ -96,13 +102,33 @@ def _tracks_from_table(filenames, metadata, dtype=None):
 
 
 def _shared_chrom_sizes(readers, sizes=None):
-	"""The chromosomes of the output: those of the sizes file, or every
-	chromosome of the bigWigs in order of first appearance, which must agree
-	on each one's length."""
+	"""The chromosomes of the output: those of the sizes file, which must
+	agree with the bigWigs on the length of every chromosome they share,
+	or every chromosome of the bigWigs in order of first appearance, which
+	must agree on each one's length. A chromosome of a bigWig that the sizes
+	file leaves out is named in a warning, since its values are dropped."""
 
 	if sizes is not None:
 		from .bam2bw import read_chrom_sizes
-		return read_chrom_sizes(sizes)
+		chrom_sizes = read_chrom_sizes(sizes)
+		lengths = dict(chrom_sizes)
+		dropped = []
+		for reader in readers:
+			for name, length in reader.chrom_sizes.items():
+				if name not in lengths:
+					dropped.append(name)
+				elif lengths[name] != length:
+					raise ValueError("{} gives {} a length of {}, but the sizes "
+						"file gives it {}; the bigWigs and the sizes must be on one "
+						"assembly.".format(reader.path, name, length, lengths[name]))
+		if dropped:
+			dropped = sorted(set(dropped))
+			warnings.warn("{} chromosome{} of the bigWigs {} not in the sizes "
+				"file, and {} values are left out: {}{}".format(len(dropped), "s"
+				if len(dropped) > 1 else "", "are" if len(dropped) > 1 else "is",
+				"their" if len(dropped) > 1 else "its", ", ".join(dropped[:5]),
+				", ..." if len(dropped) > 5 else "."), stacklevel=2)
+		return chrom_sizes
 
 	chrom_sizes = {}
 	for reader in readers:
@@ -116,7 +142,7 @@ def _shared_chrom_sizes(readers, sizes=None):
 
 
 def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
-	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False):
+	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False, missing=0.0):
 	"""Write the bigWigs `filenames` as the tracks of `output`."""
 
 	readers = [BigWigReader(filename) for filename in filenames]
@@ -138,7 +164,7 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 		with warnings.catch_warnings():
 			warnings.simplefilter('ignore')
 			return read_bigwig(group, [chrom] * len(starts), starts, width,
-				n_jobs=n_jobs)
+				n_jobs=n_jobs, missing=missing, keep_nan=True)
 
 	# Each piece is read while the one before it is written: the writer
 	# encodes and compresses on its own threads, and the arrays read here
@@ -178,6 +204,6 @@ def main(argv=None, prog='figwig bw2fw'):
 		chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
-			n_jobs=args.parallel, verbose=args.verbose)
+			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))

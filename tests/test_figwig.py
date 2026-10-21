@@ -377,9 +377,11 @@ def test_pickle(fw):
 	reader = FigWigReader(fw)
 	reader.read('chr1', [0], 10, tracks=['signal'])
 	copy = pickle.loads(pickle.dumps(reader))
-	assert copy._index[1] is not None and copy._index[0] is None
+	# A pickled reader carries no index, and reads it again where it lands.
+	assert copy._index[1] is None and copy._index[0] is None
 	assert_identical(copy.read('chr2', [100], 500), reader.read('chr2', [100],
 		500))
+	assert copy._index[1] is not None
 
 
 def test_read_from_several_threads(fw):
@@ -623,8 +625,9 @@ def test_declared_dtypes_are_checked(tmp_path):
 	([0, 0], 'uint8'), ([1, 255], 'uint8'), ([256, 7], 'uint16'),
 	([65536, 1], 'uint32'), ([4294967295, 0], 'uint32'),
 	([-1, 127], 'int8'), ([-129, 5], 'int16'), ([-40000, 2], 'int32'),
-	([-1, 2147483648], 'float32'), ([1.5, 2], 'float32'),
-	([numpy.nan, 1], 'float32'), ([4294967296, 0], 'float32')])
+	([-1, 2147483648], 'float64'), ([1.5, 2], 'float32'),
+	([numpy.nan, 1], 'float32'), ([4294967296, 0], 'float64'),
+	([16777217, 0.5], 'float32'), ([0.1, 1e-50], 'float32')])
 def test_inferred_dtype(tmp_path, values, dtype):
 	path = str(tmp_path / 'i.fw')
 	write_figwig(path, {'chr1': 32}, ['a'], 'chr1', [0], numpy.array(values,
@@ -643,13 +646,25 @@ def test_chunk_kinds(tmp_path):
 	path = str(tmp_path / 'k.fw')
 	values = numpy.zeros((1, 2, 256))
 	values[0, 0, 70] = 3                 # tile 1: sparse, uint8
-	values[0, :, 128:192] = 70000        # tile 2: dense, uint32
+	values[0, :, 128:192] = 70000 + numpy.arange(64)   # tile 2: dense, uint32
 	values[0, 1, 200] = -2               # tile 3: sparse, int8
 	write_figwig(path, {'chr1': 256}, ['a', 'b'], 'chr1', [0], values, tile=64)
 	reader = FigWigReader(path)
 	kinds, sizes, raws, offsets = reader._group_index(0)
-	assert [(int(k & 3), int(k >> 2)) for k in kinds] == [(0, 0), (2, 0),
-		(1, 2), (2, 3)]
+	assert [(int(k & 7), int((k >> 3) & 15)) for k in kinds] == [(0, 0),
+		(2, 0), (1, 2), (2, 3)]
+	assert sizes[0] == 0 and (sizes[1:] > 0).all() and (raws[1:] > 0).all()
+	numpy.testing.assert_array_equal(reader.read('chr1', [0], 256,
+		dtype='float64')[0], values[0])
+
+	# A tile of one value is stored as runs, and a filled tile of a few
+	# values too, when that is smaller than storing every base.
+	values[0, :, 128:192] = 70000
+	write_figwig(path, {'chr1': 256}, ['a', 'b'], 'chr1', [0], values, tile=64)
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets = reader._group_index(0)
+	assert (int(kinds[2] & 7), int((kinds[2] >> 3) & 15)) == (4, 2)
+	assert raws[2] < 64
 	assert sizes[0] == 0 and (sizes[1:] > 0).all() and (raws[1:] > 0).all()
 	numpy.testing.assert_array_equal(reader.read('chr1', [0], 256,
 		dtype='float64')[0], values[0])
@@ -685,7 +700,13 @@ def test_writer_arguments(tmp_path):
 	with pytest.raises(ValueError, match="'group' key"):
 		FigWigWriter(path, {'chr1': 10}, [{'name': 'a', 'group': 0}])
 	with pytest.raises(ValueError, match="dtype of track 'a' must be one of"):
-		FigWigWriter(path, {'chr1': 10}, [{'name': 'a', 'dtype': 'float64'}])
+		FigWigWriter(path, {'chr1': 10}, [{'name': 'a', 'dtype': 'float16'}])
+	with pytest.raises(ValueError, match="NaN and infinity are not JSON"):
+		FigWigWriter(path, {'chr1': 10}, [{'name': 'a', 'x': float('nan')}])
+	with pytest.raises(ValueError, match="longer than 65535 bytes"):
+		FigWigWriter(path, {'c' * 70000: 10}, ['a'])
+	with pytest.raises(ValueError, match="holds at most"):
+		FigWigWriter(path, {'chr1': 2 ** 32 - 1}, ['a'], tile=16)
 	with pytest.raises(TypeError, match="not a dtype"):
 		FigWigWriter(path, {'chr1': 10}, [{'name': 'a', 'dtype': 3.5}])
 	with pytest.raises(TypeError, match="JSON serializable"):
@@ -737,8 +758,10 @@ def test_abandoned_file_is_not_a_figwig(tmp_path):
 			writer.write('chr1', [0], numpy.ones((1, 1, 10)))
 			raise RuntimeError('stop')
 
-	with pytest.raises(ValueError, match="not a figwig file"):
-		FigWigReader(path)
+	# The partial file is removed, and the path holds what it held before:
+	# here, nothing.
+	assert not os.path.exists(path)
+	assert not any(name.endswith('.partial') for name in os.listdir(tmp_path))
 
 
 def test_empty_file_round_trip(tmp_path):
@@ -817,7 +840,11 @@ def corrupt_cases(fw):
 		return bytes(copy.tobytes()) + bytes(data[128:])
 
 	cases['bad_magic'] = with_header(magic=1)
-	cases['bad_version'] = with_header(version=2)
+	cases['bad_version'] = with_header(version=1)
+	cases['newer_version'] = with_header(version=3)
+	cases['huge_metadata'] = with_header(metadata_length=2 ** 50)
+	cases['huge_tracks'] = with_header(n_tracks=2 ** 32 - 1)
+	cases['huge_groups'] = with_header(n_groups=2 ** 32 - 1)
 	cases['bad_tile'] = with_header(tile=100)
 	cases['bad_codec'] = with_header(codec=7)
 	cases['long_length'] = with_header(length=len(data) + 1)
@@ -939,11 +966,12 @@ def test_encode_tiles_layout():
 	kinds = numpy.zeros(2, dtype=numpy.uint8)
 	stats = numpy.zeros((2, 5))
 	stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
+	classes = numpy.zeros(2, dtype=numpy.int64)
 
 	n = _encode_tiles(tile, tiles, lo, hi, starts, ends, values, True, buffer,
-		False, False, True, out, bounds, kinds, stats)
+		False, False, classes, True, False, out, bounds, kinds, stats)
 	assert n == 2 and not buffer.any()
-	assert kinds[0] == 1 | (0 << 2) and kinds[1] == 2 | (1 << 2)
+	assert kinds[0] == 1 | (0 << 3) and kinds[1] == 2 | (1 << 3)
 	# The sparse chunk: the entries in all, the bytes of each track's
 	# offsets, three one-byte varints padded to 4, three uint16 values,
 	# padded to 8.
@@ -970,14 +998,61 @@ def test_encode_tiles_varints_and_ones():
 	bounds = numpy.zeros(2, dtype=numpy.int64)
 	kinds = numpy.zeros(1, dtype=numpy.uint8)
 	stats = numpy.zeros((1, 5))
+	classes = numpy.zeros(1, dtype=numpy.int64)
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
 		numpy.array([0]), numpy.array([1024]), values, True, buffer, False,
-		False, True, out, bounds, kinds, stats)
-	assert kinds[0] == 2 | (7 << 2)
+		False, classes, True, False, out, bounds, kinds, stats)
+	assert kinds[0] == 2 | (7 << 3)
 	assert out[:8].view(numpy.uint32).tolist() == [4, 5]
 	# The differences 0, 127 and 1 take a byte each, and 895 two.
 	assert out[8:14].tolist() == [0, 127, 1, 0x80 | (895 & 127), 895 >> 7, 0]
 	assert bounds[1] == 16 and stats[0].tolist() == [4, 4, 0, 1, 0]
+
+
+def test_encode_tiles_runs_and_float64():
+	"""A tile of one value is stored as runs: the changes of value, as
+	varints, then the value from each change on. An integer above 2**24
+	next to a fraction makes the chunk float64."""
+
+	tile = 64
+	values = numpy.zeros((1, 2, 64))
+	values[0, 0, :] = 3                 # one run
+	values[0, 1, 10:20] = 2.5           # a run, back to 0, then a run
+	values[0, 1, 40:50] = 2.5
+	buffer = numpy.zeros((2, tile))
+	out = numpy.zeros(1000, dtype=numpy.uint8)
+	bounds = numpy.zeros(2, dtype=numpy.int64)
+	kinds = numpy.zeros(1, dtype=numpy.uint8)
+	stats = numpy.zeros((2, 5))
+	classes = numpy.zeros(2, dtype=numpy.int64)
+	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
+		False, classes, True, False, out, bounds, kinds, stats)
+	assert kinds[0] == 4 | (6 << 3)
+	# Five changes: the bytes of each track's varints, the varints (0; 10,
+	# 10, 20, 10), padding to 4, five float32 values.
+	assert out[:12].view(numpy.uint32).tolist() == [5, 1, 4]
+	assert out[12:17].tolist() == [0, 10, 10, 20, 10]
+	assert out[20:40].view(numpy.float32).tolist() == [3, 2.5, 0, 2.5, 0]
+	assert bounds[1] == 40 and stats[:, 1].tolist() == [64, 20]
+
+	values[0, 0, 5] = 16777217
+	kinds[:] = 0
+	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
+		False, classes, True, False, out, bounds, kinds, stats)
+	assert kinds[0] == 4 | (8 << 3)
+	assert out[20:28].view(numpy.float64).tolist() == [3]
+	assert out[28:36].view(numpy.float64).tolist() == [16777217]
+
+	# A float32 track keeps float32's rounding of the same value.
+	classes[0] = 1
+	kinds[:] = 0
+	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
+		False, classes, True, False, out, bounds, kinds, stats)
+	assert kinds[0] == 4 | (6 << 3)
+	assert out[24:28].view(numpy.float32).tolist() == [16777216]
 
 
 def test_encode_tiles_keeps_an_open_tile():
@@ -988,20 +1063,25 @@ def test_encode_tiles_keeps_an_open_tile():
 	bounds = numpy.zeros(3, dtype=numpy.int64)
 	kinds = numpy.zeros(2, dtype=numpy.uint8)
 	stats = numpy.zeros((1, 5))
+	classes = numpy.zeros(1, dtype=numpy.int64)
 	n = _encode_tiles(tile, numpy.array([0, 1]), numpy.array([0, 0]),
 		numpy.array([1, 1]), numpy.array([0]), numpy.array([24]), values, True,
-		buffer, False, True, True, out, bounds, kinds, stats)
-	assert n == 1 and kinds[0] == 1 and buffer[0, :8].sum() == 8
+		buffer, False, True, classes, True, False, out, bounds, kinds, stats)
+	# A tile of ones is one run: its change at 0, to 1, as uint8.
+	assert n == 1 and kinds[0] == 4 and buffer[0, :8].sum() == 8
+	assert out[:8].view(numpy.uint32).tolist() == [1, 1]
+	assert out[8:13].tolist() == [0, 0, 0, 0, 1]
 	assert buffer[0, 8:].sum() == 0 and stats[0, 1] == 16
 
 	# The open tile is then encoded by scanning the buffer, with the values
-	# a later call adds.
+	# a later call adds: two runs.
 	more = numpy.full((1, 1, 8), 2.0)
 	n = _encode_tiles(tile, numpy.array([1]), numpy.array([0]), numpy.array([1]),
 		numpy.array([24]), numpy.array([32]), more, True, buffer, True, False,
-		True, out, bounds, kinds, stats)
-	assert n == 1 and kinds[0] == 1 and not buffer.any()
-	numpy.testing.assert_array_equal(out[:16], [1] * 8 + [2] * 8)
+		classes, True, False, out, bounds, kinds, stats)
+	assert n == 1 and kinds[0] == 4 and not buffer.any()
+	assert out[:8].view(numpy.uint32).tolist() == [2, 2]
+	assert out[8:14].tolist() == [0, 8, 0, 0, 1, 2]
 	assert stats[0, 1] == 32 and stats[0, 0] == 40
 
 
@@ -1052,7 +1132,7 @@ def test_read_tiles_zero_chunk_writes_zeros():
 	_read_tiles(16, numpy.zeros(8, dtype=numpy.uint8), numpy.zeros(0,
 		dtype=numpy.int64), numpy.zeros(0, dtype=numpy.uint8), 2,
 		numpy.array([1, -1]), numpy.array([-1]), numpy.array([0]),
-		numpy.array([4]), numpy.array([0]), out, False)
+		numpy.array([4]), numpy.array([0]), out, False, numpy.zeros((0, 0)), 1)
 	numpy.testing.assert_array_equal(out[0, 1], 0)
 	numpy.testing.assert_array_equal(out[0, 0], 9)
 
@@ -1142,7 +1222,7 @@ def test_labels_sum_tracks(fw, ref, read_batching):
 
 	with pytest.raises(ValueError, match="one integer per track"):
 		reader.read(chroms, starts, 150, labels=[0, 1])
-	with pytest.raises(ValueError, match="cannot both"):
+	with pytest.raises(ValueError, match="sparse cannot be given"):
 		reader.read(chroms, starts, 150, labels=labels, sparse=True)
 	with pytest.raises(ValueError, match="-1 or from 0"):
 		reader.read(chroms, starts, 150, labels=[0, 0, 0, -2, 0])
@@ -1278,7 +1358,7 @@ def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
 	ref, entries, paths = cells
 	reader = FigWigReader(paths['positions', 120])
 	kinds, sizes, raws, offsets = reader._group_index(0)
-	counts = numpy.bincount(kinds & 3, minlength=4)
+	counts = numpy.bincount(kinds & 7, minlength=5)
 	assert counts[3] > 0
 
 	# Without matrix chunks the same uncompressed values take more bytes,
@@ -1291,12 +1371,12 @@ def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
 			writer.write_sparse(chrom, positions, which, values)
 	old = FigWigReader(path)
 	kinds, _, _, _ = old._group_index(0)
-	assert numpy.bincount(kinds & 3, minlength=4)[3] == 0
+	assert numpy.bincount(kinds & 7, minlength=5)[3] == 0
 	assert os.path.getsize(path) > os.path.getsize(paths['positions', 120])
 	y = reader.read('chr1', [0], 5000, dtype='float64')
 	assert_identical(old.read('chr1', [0], 5000, dtype='float64'), y)
 	kinds, _, _, _ = FigWigReader(paths['positions', 8])._group_index(0)
-	assert numpy.bincount(kinds & 3, minlength=4)[3] == 0
+	assert numpy.bincount(kinds & 7, minlength=5)[3] == 0
 
 
 def test_write_sparse_arguments(tmp_path):
@@ -1477,3 +1557,422 @@ def test_labels_sum_the_same_on_threads(cells, monkeypatch):
 		for _ in range(5):
 			many = reader.read(chroms, starts, 300, labels=labels, n_jobs=8)
 			assert_identical(many, one)
+
+
+###
+# The format's second round: groups in any order, exact integers, runs,
+# stored chunks, sums per bin, and the writer's and reader's guards
+
+
+def test_groups_in_any_order_keep_their_tracks(tmp_path):
+	"""A group listed in another order than the file's tracks still reads
+	each track under its own name."""
+
+	path = str(tmp_path / 'g.fw')
+	values = numpy.zeros((1, 3, 1000))
+	values[0, 0, :10] = 5
+	values[0, 1, 500:] = 7
+	values[0, 2, 100] = 1
+	write_figwig(path, {'chr1': 1000}, ['a', 'b', 'c'], 'chr1', [0], values,
+		groups=[['c', 'b', 'a']], tile=64)
+	reader = FigWigReader(path)
+	assert [t['group'] for t in reader.tracks] == [0, 0, 0]
+	for name, k in (('a', 0), ('b', 1), ('c', 2)):
+		numpy.testing.assert_array_equal(reader.read('chr1', [0], 1000,
+			tracks=name)[0], values[0, k])
+	numpy.testing.assert_array_equal(reader.stats['sum'], [50, 3500, 1])
+
+
+def test_integers_next_to_floats_stay_exact(tmp_path):
+	"""A chunk that holds a fraction and an integer above 2**24 is stored
+	as float64, so a uint32 track grouped with a float track keeps its
+	integers; a float32 track keeps float32's rounding; integers beyond
+	uint32 are inferred float64; and a value beyond float32 raises."""
+
+	path = str(tmp_path / 'e.fw')
+	tracks = [{'name': 'counts', 'dtype': 'uint32'}, {'name': 'fold',
+		'dtype': 'float32'}, {'name': 'wide'}, {'name': 'exact', 'dtype':
+		'float64'}]
+	values = numpy.zeros((1, 4, 64))
+	values[0, 0, 3] = 16777217
+	values[0, 0, 4] = 3000000001
+	values[0, 1, 3] = 16777217
+	values[0, 1, 5] = 0.1
+	values[0, 2, 7] = 4294967297
+	values[0, 3, 8] = 0.1
+	write_figwig(path, {'chr1': 64}, tracks, 'chr1', [0], values, groups=4,
+		tile=64)
+	reader = FigWigReader(path)
+	assert [t['dtype'] for t in reader.tracks] == ['uint32', 'float32',
+		'float64', 'float64']
+	kinds, _, _, _ = reader._group_index(0)
+	assert (kinds[0] >> 3) & 15 == 8
+	y = reader.read('chr1', [0], 64, dtype='float64')[0]
+	assert y[0, 3] == 16777217 and y[0, 4] == 3000000001
+	assert y[1, 3] == 16777216 and y[1, 5] == numpy.float32(0.1)
+	assert y[2, 7] == 4294967297 and y[3, 8] == 0.1
+	assert reader.read('chr1', [3], 1, tracks='counts')[0, 0] == 16777217
+	assert reader.stats['max'].tolist() == [3000000001, 16777216, 4294967297,
+		0.1]
+	found = reader.read('chr1', [0], 64, sparse=True)
+	assert found.values.dtype == numpy.float64 and found.values[0] == 16777217
+	entries = reader.read_entries()
+	assert entries.values.dtype == numpy.float64 and 3000000001 in \
+		entries.values
+
+	# A float32 track with a fraction and a uint32 track in one chunk, with
+	# nothing above 2**24 and no float64 value, stays float32.
+	values[0, 0, 3:5] = 100
+	values[0, 2, 7] = 0
+	values[0, 3, 8] = 0
+	write_figwig(path, {'chr1': 64}, tracks, 'chr1', [0], values, groups=4,
+		tile=64)
+	kinds, _, _, _ = FigWigReader(path)._group_index(0)
+	assert (kinds[0] >> 3) & 15 == 6
+
+	with pytest.raises(ValueError, match="beyond float32's range"):
+		write_figwig(path, {'chr1': 64}, ['a'], 'chr1', [0], numpy.full((1, 1,
+			64), 1e39), tile=64)
+	write_figwig(path, {'chr1': 64}, [{'name': 'a', 'dtype': 'float64'}],
+		'chr1', [0], numpy.full((1, 1, 64), 1e39), tile=64)
+	assert FigWigReader(path).read('chr1', [0], 1)[0, 0] == 1e39
+
+	# A value too small for float32 is 0, and not counted as nonzero.
+	write_figwig(path, {'chr1': 64}, ['a'], 'chr1', [0], numpy.full((1, 1,
+		64), 1e-50), tile=64)
+	assert FigWigReader(path).stats['nonzero'][0] == 0
+
+
+def test_negative_zero_reads_as_zero(tmp_path):
+	path = str(tmp_path / 'z.fw')
+	values = numpy.zeros((1, 1, 128))
+	values[0, 0, :64] = -0.0
+	values[0, 0, 64:] = numpy.arange(64) * 0.5
+	values[0, 0, 70] = -0.0
+	write_figwig(path, {'chr1': 128}, ['a'], 'chr1', [0], values, tile=64)
+	y = FigWigReader(path).read('chr1', [0], 128)[0, 0]
+	assert not numpy.signbit(y).any()
+
+
+def test_runs_chunks_hold_binned_signal(tmp_path):
+	"""Intervals of one value over many bases are stored as runs, read
+	back exactly in windows and as entries, and take far less than a
+	dense chunk."""
+
+	path = str(tmp_path / 'r.fw')
+	rng = numpy.random.default_rng(3)
+	length = 50000
+	starts = numpy.arange(0, length, 5000)
+	ends = numpy.minimum(starts + 5000, length)
+	values = rng.normal(size=(len(starts), 2)).astype(numpy.float32)
+	values[3, 0] = 0
+	with FigWigWriter(path, {'chr1': length}, ['a', 'b'], tile=4096) as writer:
+		writer.write('chr1', starts, values, ends=ends)
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets = reader._group_index(0)
+	assert set((kinds & 7).tolist()) == {4} and (raws < 100).all()
+	assert os.path.getsize(path) < 4000
+
+	dense = numpy.repeat(values.T, 5000, axis=1)[:, :length]
+	numpy.testing.assert_array_equal(reader.read('chr1', [0], length)[0],
+		dense)
+	windows = rng.integers(0, length, 300)
+	y = reader.read('chr1', windows, 777, dtype='float32')
+	for j, start in enumerate(windows):
+		piece = dense[:, start:start + 777]
+		numpy.testing.assert_array_equal(y[j, :, :piece.shape[1]], piece)
+		assert numpy.isnan(y[j, :, piece.shape[1]:]).all()
+	found = reader.read('chr1', windows, 777, sparse=True)
+	assert_identical(sparse_to_dense(found, 'float32'), numpy.nan_to_num(y))
+	entries = reader.read_entries()
+	assert len(entries.values) == int((dense != 0).sum())
+	y = reader.read('chr1', windows, 777, labels=[0, 0])
+	numpy.testing.assert_allclose(numpy.nan_to_num(y[:, 0]), numpy.nan_to_num(
+		reader.read('chr1', windows, 777, dtype='float64').sum(axis=1)),
+		rtol=1e-6)
+
+
+def test_small_chunks_are_stored_raw(tmp_path):
+	"""A chunk that deflate would grow is stored as it is, which the kind
+	byte marks, and the file is smaller than with every chunk deflated."""
+
+	path = str(tmp_path / 's.fw')
+	values = numpy.zeros((1, 1, 64 * 40))
+	values[0, 0, ::64] = 1
+	values[0, 0, 1::64] = 2
+	write_figwig(path, {'chr1': 64 * 40}, ['a'], 'chr1', [0], values, tile=64)
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets = reader._group_index(0)
+	stored = (kinds & 128) > 0
+	assert stored.all() and (sizes == raws).all()
+	numpy.testing.assert_array_equal(reader.read('chr1', [0], 64 * 40)[0, 0],
+		values[0, 0])
+	level0 = str(tmp_path / 'l0.fw')
+	write_figwig(level0, {'chr1': 64 * 40}, ['a'], 'chr1', [0], values, tile=64,
+		level=0)
+	# The chunks take the same bytes either way; the index's kind bytes
+	# differ, which deflate may put in a byte or two.
+	assert abs(os.path.getsize(path) - os.path.getsize(level0)) <= 8
+
+
+def test_matrix_chunks_in_compressed_files(tmp_path):
+	"""With thousands of tracks of which a few have a value in a tile, a
+	compressed file stores the tile as a matrix chunk, whose size follows
+	the values rather than the tracks."""
+
+	n_tracks = 3000
+	path = str(tmp_path / 'm.fw')
+	names = ['c{}'.format(i) for i in range(n_tracks)]
+	rng = numpy.random.default_rng(5)
+	positions = rng.choice(5000, 200, replace=False)
+	cells = rng.integers(0, n_tracks, 200)
+	with FigWigWriter(path, {'chr1': 5000}, names, tile=256, groups=n_tracks,
+			level=1) as writer:
+		writer.write_sparse('chr1', positions, cells, numpy.ones(200))
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets = reader._group_index(0)
+	assert set((kinds[kinds > 0] & 7).tolist()) == {3}
+	assert int(sizes.sum()) < 10000
+	found = reader.read('chr1', [0], 5000, sparse=True)
+	assert sorted(zip(found.channels.tolist(), found.offsets.tolist())) == \
+		sorted(zip(cells.tolist(), positions.tolist()))
+	y = reader.read('chr1', [0], 5000, labels=numpy.zeros(n_tracks, dtype=int))
+	assert y[0, 0].sum() == 200
+
+
+def test_bins_sum_each_window(fw, ref):
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(11)
+	chroms, starts = random_windows(rng, 60, 256)
+	dense = numpy.nan_to_num(reader.read(chroms, starts, 256, dtype='float64'))
+	for bins in (1, 32, 256):
+		y = reader.read(chroms, starts, 256, bins=bins)
+		assert y.shape == (60, 5, 256 // bins) and y.dtype == numpy.float32
+		numpy.testing.assert_allclose(y, dense.reshape(60, 5, -1, bins).sum(-1),
+			rtol=1e-5)
+	y = reader.read(chroms, starts, 256, bins=64, tracks='atac_plus')
+	assert y.shape == (60, 4)
+	numpy.testing.assert_allclose(y, dense[:, 0].reshape(60, -1, 64).sum(-1))
+	y = reader.read(chroms, starts, 256, bins=64, labels=[0, 0, -1, 1, 1],
+		dtype='float64')
+	expected = numpy.stack([dense[:, :2].sum(1), dense[:, 3:].sum(1)], 1)
+	numpy.testing.assert_allclose(y, expected.reshape(60, 2, -1, 64).sum(-1))
+	y = reader.read(chroms, starts, 256, bins=256, tracks=['atac_plus',
+		'atac_minus'], dtype='int64')
+	numpy.testing.assert_array_equal(y[:, :, 0], dense[:, :2].sum(-1))
+	with pytest.raises(ValueError, match="divisor of the width"):
+		reader.read(chroms, starts, 256, bins=100)
+	with pytest.raises(ValueError, match="divisor of the width"):
+		reader.read(chroms, starts, 256, bins=0)
+	with pytest.raises(TypeError, match="bins must be an integer"):
+		reader.read(chroms, starts, 256, bins=2.0)
+	with pytest.raises(ValueError, match="sparse cannot be given"):
+		reader.read(chroms, starts, 256, bins=2, sparse=True)
+	y = reader.read(chroms, starts, 256, bins=64, n_jobs=1)
+	numpy.testing.assert_allclose(y, dense.reshape(60, 5, -1, 64).sum(-1),
+		rtol=1e-5)
+
+
+def test_bins_in_track_order(track_fw, fw):
+	rng = numpy.random.default_rng(12)
+	chroms, starts = random_windows(rng, 40, 512)
+	a = FigWigReader(fw).read(chroms, starts, 512, bins=128, dtype='float64')
+	b = FigWigReader(track_fw).read(chroms, starts, 512, bins=128,
+		dtype='float64')
+	numpy.testing.assert_allclose(a, b)
+	b = FigWigReader(track_fw).read(chroms, starts, 512, bins=128, labels=[0,
+		0, 1, 1, 1], dtype='float64', n_jobs=3)
+	numpy.testing.assert_allclose(b[:, 0], a[:, 0] + a[:, 1])
+
+
+def test_sums_into_an_integer_type_are_checked(fw):
+	reader = FigWigReader(fw)
+	with pytest.raises(ValueError, match="outside what uint8 holds"):
+		reader.read('chr1', [0], 5000, tracks=['atac_plus', 'atac_minus'],
+			labels=[0, 0], dtype='uint8')
+	with pytest.raises(ValueError, match="outside what int16 holds"):
+		reader.read('chr1', [0], 5000, tracks='atac_plus', bins=5000,
+			dtype='int16')
+	y = reader.read('chr1', [0], 5000, tracks='atac_plus', bins=5000,
+		dtype='int64')
+	assert y[0, 0] == reader.stats['sum'][0] - reader.read('chr2', [0], 3001,
+		tracks='atac_plus', dtype='int64').sum() - reader.read('chrM', [0], 70,
+		tracks='atac_plus', dtype='int64').sum()
+
+
+def test_many_windows_in_one_tile(fw, ref):
+	"""Windows packed into one tile are decoded from a scratch tile, on
+	every thread, and read the same values."""
+
+	reader = FigWigReader(fw)
+	starts = numpy.concatenate([numpy.full(3000, 128), numpy.arange(100, 180)])
+	y = reader.read('chr1', starts, 20, n_jobs=4)
+	assert_identical(y, expected(ref, ['chr1'] * len(starts), starts, 20,
+		list(range(5)), y.dtype))
+	y = reader.read('chr1', starts, 20, labels=[0, 1, 1, 0, 0], n_jobs=4)
+	dense = reader.read('chr1', starts, 20, dtype='float64')
+	numpy.testing.assert_array_equal(y[:, 0], dense[:, [0, 3, 4]].sum(1))
+	assert_identical(y[:, 1], (dense[:, 1] + dense[:, 2]).astype(numpy.float32))
+
+
+def test_write_sparse_that_raises_writes_nothing(tmp_path):
+	"""A write_sparse call refused for a tile that write left open leaves
+	the writer as it was, so the tile can still be finished by write."""
+
+	path = str(tmp_path / 'o.fw')
+	with FigWigWriter(path, {'chr1': 1000}, ['a', 'b'], groups=1, tile=64) \
+			as writer:
+		writer.write('chr1', [0], numpy.full((1, 2, 30), 2))
+		with pytest.raises(ValueError, match="was begun by write"):
+			writer.write_sparse('chr1', [40, 200], ['a', 'b'], [9, 9])
+		writer.write('chr1', [30], numpy.full((1, 2, 34), 3))
+		writer.write_sparse('chr1', [200], 'b', [9])
+	y = FigWigReader(path).read('chr1', [0], 1000)[0]
+	assert y[0, :30].tolist() == [2] * 30 and y[0, 30:64].tolist() == [3] * 34
+	assert y[1, 200] == 9 and y[:, 64:200].sum() == 0 and y[:, 201:].sum() == 0
+
+
+def test_failed_writer_leaves_the_path_as_it_was(tmp_path):
+	path = str(tmp_path / 'p.fw')
+	write_figwig(path, {'chr1': 100}, ['a'], 'chr1', [0], numpy.ones((1, 1,
+		100)), tile=16)
+	with open(path, 'rb') as handle:
+		before = handle.read()
+	with pytest.raises(ValueError):
+		with FigWigWriter(path, {'chr1': 100}, ['a'], tile=16) as writer:
+			writer.write('chr1', [0], numpy.ones((1, 1, 10)))
+			writer.write('chr1', [5], numpy.ones((1, 1, 10)))
+	with open(path, 'rb') as handle:
+		assert handle.read() == before
+	assert not any(name.endswith('.partial') for name in os.listdir(tmp_path))
+
+	# A file can be written over itself: the reader holds the old inode
+	# until the writer is done.
+	reader = FigWigReader(path)
+	with FigWigWriter(path, {'chr1': 100}, ['a'], tile=16) as writer:
+		writer.write('chr1', [0], reader.read('chr1', [0], 100) * 2)
+	assert FigWigReader(path).read('chr1', [0], 100).sum() == 200
+	with pytest.raises(ValueError, match="replaced or rewritten"):
+		reader.read('chr1', [0], 100)
+
+
+def test_unclosed_writer_warns(tmp_path):
+	import gc
+	path = str(tmp_path / 'u.fw')
+	writer = FigWigWriter(path, {'chr1': 100}, ['a'], tile=16)
+	writer.write('chr1', [0], numpy.ones((1, 1, 10)))
+	with pytest.warns(ResourceWarning, match="never closed"):
+		del writer
+		gc.collect()
+	assert not os.path.exists(path)
+	assert not any(name.endswith('.partial') for name in os.listdir(tmp_path))
+
+
+def test_reader_keeps_to_the_file_it_opened(tmp_path):
+	path = str(tmp_path / 'c.fw')
+	write_figwig(path, {'chr1': 100}, ['a'], 'chr1', [0], numpy.ones((1, 1,
+		100)), tile=16)
+	reader = FigWigReader(path)
+	copy = pickle.loads(pickle.dumps(reader))
+	write_figwig(path, {'chr1': 100}, ['a'], 'chr1', [0], numpy.full((1, 1,
+		100), 2), tile=16, level=0)
+	for r in (reader, copy):
+		with pytest.raises(ValueError, match="replaced or rewritten"):
+			r.read('chr1', [0], 100)
+	os.remove(path)
+	with pytest.raises(ValueError, match="cannot be read"):
+		reader.read('chr1', [0], 100)
+
+	# An absolute path survives a change of directory.
+	write_figwig(path, {'chr1': 100}, ['a'], 'chr1', [0], numpy.ones((1, 1,
+		100)), tile=16)
+	cwd = os.getcwd()
+	os.chdir(tmp_path)
+	try:
+		reader = FigWigReader('c.fw')
+		os.chdir(cwd)
+		assert reader.path == os.path.abspath(path)
+		assert reader.read('chr1', [0], 100).sum() == 100
+	finally:
+		os.chdir(cwd)
+
+
+def test_crafted_counts_raise_value_errors(tmp_path, fw):
+	"""A count in the header or the index that the file could not hold
+	raises a ValueError before any memory is asked for."""
+
+	with open(fw, 'rb') as handle:
+		data = bytearray(handle.read())
+	header = numpy.frombuffer(bytes(data[:128]), dtype=figwig.figwig._HEADER)
+	index = int(header['index'][0])
+	for name, mutate in (('n_runs', lambda d: d.__setitem__(slice(index + 24,
+			index + 28), (2 ** 32 - 1).to_bytes(4, 'little'))), ('chrom_length',
+			lambda d: d.__setitem__(slice(int(header['chroms'][0]) + 6, int(
+			header['chroms'][0]) + 14), (2 ** 63).to_bytes(8, 'little')))):
+		copy = bytearray(data)
+		mutate(copy)
+		path = str(tmp_path / (name + '.fw'))
+		with open(path, 'wb') as handle:
+			handle.write(bytes(copy))
+		with pytest.raises(ValueError):
+			FigWigReader(path).read('chr1', [0], 100)
+
+	copy = bytearray(data)
+	copy[4:6] = (1).to_bytes(2, 'little')
+	path = str(tmp_path / 'v1.fw')
+	with open(path, 'wb') as handle:
+		handle.write(bytes(copy))
+	with pytest.raises(ValueError, match="earlier figwig"):
+		FigWigReader(path)
+
+
+def test_track_order_rejects_overlap_across_calls(tmp_path):
+	path = str(tmp_path / 't.fw')
+	with FigWigWriter(path, {'chr1': 1000}, ['a'], tile=64, order='tracks') \
+			as writer:
+		values = numpy.zeros((1, 1, 100))
+		values[0, 0, 10] = 1
+		writer.write('chr1', [0], values)
+		with pytest.raises(ValueError, match="before the end of what was"):
+			writer.write('chr1', [50], numpy.ones((1, 1, 100)))
+		writer.write('chr1', [100], numpy.ones((1, 1, 100)))
+
+
+def test_index_of_empty_groups_is_small(tmp_path):
+	"""A group's index is deflated and holds only the tiles with values,
+	so a file of many empty groups on a long genome stays small."""
+
+	path = str(tmp_path / 'i.fw')
+	names = ['t{}'.format(i) for i in range(64)]
+	with FigWigWriter(path, {'chr1': 2 ** 28}, names, groups=1, tile=4096) \
+			as writer:
+		writer.write('chr1', [2 ** 27], numpy.ones((1, 64, 10)))
+	assert os.path.getsize(path) < 64 * 400
+	reader = FigWigReader(path)
+	assert reader.read('chr1', [2 ** 27 - 2], 14).sum() == 640
+	kinds, sizes, raws, offsets = reader._group_index(5)
+	assert sizes.dtype == numpy.uint32 and (kinds > 0).sum() == 1
+	copy = pickle.loads(pickle.dumps(reader))
+	assert all(index is None for index in copy._index)
+
+
+def test_same_stats_whatever_the_call_split(tmp_path):
+	"""The sum of a float track is compensated, so splitting the values
+	between calls differently gives the same statistics table."""
+
+	rng = numpy.random.default_rng(8)
+	values = rng.normal(size=(1, 1, 200000)).astype(numpy.float32) * 1000
+	sums = []
+	for width in (200000, 7000, 1000):
+		path = str(tmp_path / '{}.fw'.format(width))
+		starts = numpy.arange(0, 200000, width)
+		pieces = numpy.full((len(starts), 1, width), numpy.nan)
+		for j, start in enumerate(starts):
+			piece = values[0, :, start:start + width]
+			pieces[j, :, :piece.shape[1]] = piece
+		with FigWigWriter(path, {'chr1': 200000}, ['a'], tile=4096) as writer:
+			for j in range(len(starts)):
+				writer.write('chr1', starts[j:j + 1], pieces[j:j + 1])
+		sums.append(float(FigWigReader(path).stats['sum'][0]))
+	assert sums[0] == sums[1] == sums[2]
+	assert abs(sums[0] - float(values.astype(numpy.float64).sum())) < 1e-6

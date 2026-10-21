@@ -160,7 +160,8 @@ def test_sizes_file_sets_the_chromosomes(tmp_path, bigwigs):
 	sizes = tmp_path / 'sizes.txt'
 	sizes.write_text("chr2\t120000\nchrZ\t5000\n")
 	out = str(tmp_path / 'out.fw')
-	main(['bw2fw', '-o', out, '-s', str(sizes)] + bigwigs[:1])
+	with pytest.warns(UserWarning, match="not in the sizes file"):
+		main(['bw2fw', '-o', out, '-s', str(sizes)] + bigwigs[:1])
 	reader = FigWigReader(out)
 	assert reader.chrom_sizes == {'chr2': 120_000, 'chrZ': 5000}
 	assert_identical(reader.read('chr2', [0], 120_000, dtype='float32'),
@@ -224,3 +225,30 @@ def test_command_line(tmp_path, bigwigs):
 	assert result.returncode == 0, result.stderr
 	assert 'group 1 of 1' in result.stderr
 	assert len(FigWigReader(out).tracks) == 3
+
+
+def test_sizes_must_agree_with_the_bigwigs(tmp_path, bigwigs):
+	sizes = tmp_path / 'sizes.txt'
+	sizes.write_text("chr1\t5000\nchr2\t130000\nchrM\t70\n")
+	with pytest.raises(SystemExit, match="on one assembly"):
+		main(['bw2fw', '-o', str(tmp_path / 'out.fw'), '-s', str(sizes)] +
+			bigwigs[:1])
+
+
+def test_nan_intervals_are_kept(tmp_path):
+	"""An interval whose value is NaN is NaN in the figwig file, and with
+	--missing nan the bases no interval covers are NaN too."""
+
+	from .writers import write_bigwig
+	bw = tmp_path / 'n.bw'
+	write_bigwig(bw, {'chr1': 300}, [('chr1', 10, 20, float('nan')), ('chr1',
+		100, 110, 2.0), ('chr1', 200, 210, 0.0)])
+	bw = str(bw)
+	out = str(tmp_path / 'n.fw')
+	main(['bw2fw', '-o', out, bw])
+	y = FigWigReader(out).read('chr1', [0], 300, tracks=0)[0]
+	assert numpy.isnan(y[10:20]).all() and y[100] == 2 and y[0] == 0
+	assert FigWigReader(out).tracks[0]['dtype'] == 'float32'
+	main(['bw2fw', '-o', out, '--missing', 'nan', bw])
+	y = FigWigReader(out).read('chr1', [0], 300, tracks=0)[0]
+	assert numpy.isnan(y[:100]).all() and y[200] == 0 and y[100] == 2

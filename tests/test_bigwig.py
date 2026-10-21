@@ -123,9 +123,14 @@ def test_special_values(tmp_path):
 	X = BigWigReader(path).read('chr1', starts, 25)
 	assert_identical(X, reference(str(path), 'chr1', starts, 25))
 
-	# An interval whose value is NaN covers nothing, so its bases are 0.
+	# An interval whose value is NaN covers nothing, so its bases are 0,
+	# unless keep_nan asks for the NaN.
 	numpy.testing.assert_array_equal(BigWigReader(path).read('chr1', [0], 5)[0],
 		0)
+	assert numpy.isnan(BigWigReader(path).read('chr1', [0], 5, keep_nan=True)[
+		0]).all()
+	assert numpy.isnan(read_bigwig([path, path], 'chr1', [0], 5,
+		keep_nan=True)).all()
 	assert numpy.signbit(BigWigReader(path).read('chr1', [30], 1)[0, 0])
 
 

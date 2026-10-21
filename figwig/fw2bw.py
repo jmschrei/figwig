@@ -8,8 +8,8 @@ named after the track, and a metadata table beside them records each
 track's name, dtype and attributes, so that `figwig bw2fw` can make the
 figwig file again. Tracks are read a group at a time, each chromosome in
 pieces, and their bases that are 0 are left out of the bigWigs, as
-`BigWigWriter.write` leaves them out with `missing=0.0`; a NaN in a float32
-track is left out too.
+`BigWigWriter.write` leaves them out with `missing=0.0`, or their bases
+that are NaN with `--missing nan`; a NaN is left out either way.
 """
 
 import argparse
@@ -44,6 +44,9 @@ def _parser(prog):
 		"levels to write in each bigWig. Default is 0.")
 	parser.add_argument('-l', '--level', default=6, type=int, help="The "
 		"compression level of the bigWigs. Default is 6.")
+	parser.add_argument('--missing', default=0.0, type=float, help="The value "
+		"left out of the bigWigs: 0, or nan for a figwig file written with "
+		"bw2fw --missing nan, whose zeros are then written. Default is 0.")
 	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
 		"number of threads to read and compress on. Default is 1.")
 	parser.add_argument('-v', '--verbose', action='store_true')
@@ -88,7 +91,8 @@ def _bigwig_name(track):
 	return name + '.bw'
 
 
-def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
+def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
+	missing=0.0):
 	"""Write the tracks `ids` of the figwig file `path` as bigWigs in
 	`directory`, and the metadata table. Returns the table's path."""
 
@@ -121,10 +125,12 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False):
 						dtype='float32', n_jobs=n_jobs)
 					if pool is None:
 						for k, i in enumerate(members):
-							writers[i].write(chrom, starts, values[:, k], missing=0.0)
+							writers[i].write(chrom, starts, values[:, k],
+								missing=missing)
 					else:
 						list(pool.map(lambda k: writers[members[k]].write(chrom,
-							starts, values[:, k], missing=0.0), range(len(members))))
+							starts, values[:, k], missing=missing), range(len(
+							members))))
 				if verbose:
 					print("{}: group {}, {}".format(path, g, chrom), file=sys.stderr)
 
@@ -178,6 +184,6 @@ def main(argv=None, prog='figwig fw2bw'):
 		reader = FigWigReader(args.figwig)
 		ids = _selected_tracks(reader, args.tracks, args.select)
 		_convert(args.figwig, args.output, ids, zooms=args.zooms, level=args.level,
-			n_jobs=args.parallel, verbose=args.verbose)
+			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))
