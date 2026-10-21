@@ -35,9 +35,9 @@ its own while the piece before it is encoded and compressed on ``-p``
 threads, and the arrays read are handed to the writer without a copy. The
 output is written beside its path and moved there when it is complete, so
 a failed conversion leaves what the path held. ``--append`` adds the
-bigWigs as tracks to the figwig file at the output, in new groups after
-its tracks, copying the file's chunks; its chromosomes, tile and level are
-kept, and ``-s``, ``-t`` and ``-l`` are refused with it.
+bigWigs as tracks to the figwig file at the output, in place, in new
+groups after its tracks; its chromosomes, tile and level are kept, and
+``-s``, ``-t`` and ``-l`` are refused with it.
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its

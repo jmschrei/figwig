@@ -254,6 +254,56 @@ Both read the BAM the same way, and ``figwig bam2fw`` writes its counts as
 entries on the same cores; it took longer only on 32, where its sort of
 each chromosome's entries stays on one.
 
+Compression levels and codecs
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The six tracks were written at each libdeflate level, and read as the
+8,192 windows above, on one and eight threads:
+
+=====  ========  ===================  ========  =========
+level  file      ``bw2fw -p 8``       1 thread  8 threads
+=====  ========  ===================  ========  =========
+0      412.3 MB  7.6 s                0.062 s   0.047 s  
+1      230.1 MB  7.3 s                0.121 s   0.055 s  
+3      232.9 MB  7.5 s                0.119 s   0.056 s  
+6      227.3 MB  7.3 s                0.123 s   0.048 s  
+9      225.2 MB  7.3 s                0.124 s   0.053 s  
+12     217.6 MB  9.0 s                0.122 s   0.050 s  
+=====  ========  ===================  ========  =========
+
+Every other chunk of the uncompressed file, 205 MB of payload, was then
+compressed through each codec's Python binding on one thread, and
+decompressed:
+
+==========================  =====  ==========  ============
+codec                       ratio  compress    decompress  
+==========================  =====  ==========  ============
+zlib 6                      0.547  5.6 s       0.88 s      
+libdeflate 1                0.554  1.1 s       0.45 s      
+libdeflate 6, the default   0.547  2.0 s       0.45 s      
+libdeflate 12               0.524  23.7 s      0.44 s      
+ISA-L 0                     0.752  0.3 s       0.37 s      
+ISA-L 1                     0.558  1.2 s       0.55 s      
+ISA-L 3                     0.566  1.3 s       0.54 s      
+zstd 3                      0.542  0.8 s       0.36 s      
+zstd 19                     0.523  25.0 s      0.35 s      
+shuffle by 4, libdeflate 6  0.556  2.3 s       0.47 s      
+==========================  =====  ==========  ============
+
+The level makes little difference: 1 to 12 span 230 to 218 MB and read in
+the same time, and the uncompressed file is 1.8 times larger and twice as
+fast to read on one thread, the same on eight. ISA-L's streams are 2%
+larger than libdeflate's and inflate 20% slower, so the reader keeps
+libdeflate; zstd's are 1% smaller at level 3 and 4% at 19 and inflate 25%
+faster, which, with the inflate about half of a one-thread read and none
+of an eight-thread one, would be at most a tenth of a one-thread read for
+another dependency. A byte shuffle before deflate grows the chunks, which
+are varints and bytes. The bytes are the values: each of the six count
+tracks takes 1.1 to 1.7 bytes per nonzero base as sparse chunks of uint8
+(the PRO-cap tracks 3.5, on a fifth as many bases), and choosing dense or
+sparse by the compressed rather than the raw size would have saved nothing
+on 20,000 sampled tiles of each of three of them.
+
 Many tracks, sparse reads and the two orders
 --------------------------------------------
 

@@ -306,7 +306,9 @@ stores every chunk uncompressed, which decodes fastest and costs four bytes
 per base of a dense float track, so a genome-wide conservation track that
 is 75 MB compressed is 150 MB at level 0, and a track of 5 kb bins, 21 MB
 compressed, is 11 GB. Reads inflate chunks with libdeflate as well where it
-is installed, about twice as fast as zlib, and with zlib otherwise. The
+is installed, about twice as fast as zlib, and with zlib otherwise; the
+level barely changes the file's size or its reads, and :doc:`benchmarks`
+measures the levels and other codecs. The
 chunks depend on the values and on which calls wrote which groups, not on
 the number of threads or on how the values were split between calls; the
 sum in the statistics table is a compensated float64, which splits may move
@@ -336,18 +338,23 @@ Adding tracks to a file
         fw.add_file("k562.fw")
         fw.add_file("hepg2.fw")
 
-``append=True`` starts from the tracks of the file at the path, whose
-chunks are copied as they are, and adds the tracks given after them, in
-new groups; the file's chromosomes, tile, level and order are taken, and
+``append=True`` adds the tracks given to the file at the path, in place,
+in new groups after its own: the file's chunks stay where they are, the
+new chunks are written after its end, and the tables, the index and last
+the header are written when the writer closes, so that until then the
+file reads as it did, a writer that fails cuts it back to what it was,
+and a process killed part way leaves a file whose header still describes
+the old one. The file's chromosomes, tile, level and order are taken, and
 ``chrom_sizes``, ``tile``, ``level`` and ``order`` must agree with them or
-be left at None. ``add_file`` adds every track of another file written
-with the same chromosomes, tile, level and order, by copying its chunks,
-with its attributes, dtypes, statistics and summaries; ``figwig merge``
-does that from the command line. Tracks that came from a file cannot be
-written to, and ``write`` with ``tracks=None`` means every track given to
-the writer itself. Appending copies the file's chunks once, so a file that
-grows by a track at a time costs a copy per track; ``add_file`` of several
-files into one new file costs one copy each.
+be left at None. Appending costs the new chunks alone, and leaves the
+old tables and index behind as dead bytes between the chunks, about the
+size of the index, which ``figwig merge`` of the file into a new path
+drops. ``add_file`` adds every track of another file written with the
+same chromosomes, tile, level and order, by copying its chunks, with its
+attributes, dtypes, statistics and summaries; ``figwig merge`` does that
+from the command line. Tracks that came from a file cannot be written to,
+and ``write`` with ``tracks=None`` means every track given to the writer
+itself.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------
@@ -452,9 +459,12 @@ they were written; the chromosome table; a table of each track's sum,
 nonzero bases, minimum and maximum; the metadata, a JSON document with the
 genome, the file's attributes, its order and every track's record; and the
 index. Every integer is little-endian, and every chunk starts on an 8-byte
-boundary of the file. A reader checks each table and each chunk it decodes
-against the file's length and the format before asking for memory, so a
-truncated or corrupt file raises a ``ValueError`` that says what it found.
+boundary of the file. The index finds every chunk by its offset, so a
+file appended to holds its old tables and index between its chunks, and
+bytes past the header's ``length`` are ignored. A reader checks each
+table and each chunk it decodes against the file's length and the format
+before asking for memory, so a truncated or corrupt file raises a
+``ValueError`` that says what it found.
 
 The header, 128 bytes:
 

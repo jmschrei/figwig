@@ -2126,8 +2126,13 @@ def test_append_adds_tracks_to_a_file(tmp_path, ref):
 def test_append_in_track_order(tmp_path, ref):
 	path = str(tmp_path / 'grow_t.fw')
 	write_reference(path, ref, order='tracks')
+	with open(path, 'rb') as handle:
+		before = handle.read()
 	with FigWigWriter(path, None, ['more'], append=True) as writer:
 		writer.write_sparse('chr2', [5, 2999], 'more', [4, 5])
+	with open(path, 'rb') as handle:
+		after_bytes = handle.read()
+	assert after_bytes[128:len(before)] == before[128:]
 	after = FigWigReader(path, verify=True)
 	assert after.order == 'tracks' and len(after.tracks) == 6
 	rng = numpy.random.default_rng(10)
@@ -2137,6 +2142,93 @@ def test_append_in_track_order(tmp_path, ref):
 		numpy.float64))
 	y = after.read('chr2', [0], 3001, tracks='more')[0]
 	assert y[5] == 4 and y[2999] == 5 and y.sum() == 9
+
+	# A copy of the file leaves its old index behind and moves its blocks.
+	copied = str(tmp_path / 'copied_t.fw')
+	with FigWigWriter(copied, CHROM_SIZES, None, tile=TILE, order='tracks',
+			level=6) as \
+			writer:
+		writer.add_file(path)
+	assert os.path.getsize(copied) < os.path.getsize(path)
+	reader = FigWigReader(copied, verify=True)
+	assert_identical(reader.read(chroms, starts, 300, tracks=list(range(5)),
+		dtype='float64'), expected(ref, chroms, starts, 300, list(range(5)),
+		numpy.float64))
+	assert_identical(reader.read('chr2', [0], 3001, tracks='more'), y[None])
+
+
+def test_append_writes_in_place(tmp_path, ref):
+	"""append=True extends the file itself: its chunks stay where they are,
+	the old tables and index are left behind them, the header is written
+	last, a writer that fails leaves the file as it was, bytes and
+	modification time, and a reader open across an append that finished is
+	told to open the file again."""
+
+	path = str(tmp_path / 'inplace.fw')
+	write_reference(path, ref, tile=TILE)
+	with open(path, 'rb') as handle:
+		before = handle.read()
+	reader = FigWigReader(path)
+	rng = numpy.random.default_rng(12)
+	chroms, starts = random_windows(rng, 50, 300)
+	old = expected(ref, chroms, starts, 300, list(range(5)), numpy.float64)
+
+	with pytest.raises(RuntimeError, match="part way"):
+		with FigWigWriter(path, None, ['more'], append=True) as writer:
+			writer.write('chr1', [0], numpy.full((1, 1, 2 * TILE), 3.0))
+			writer._write(len(writer._inflight))
+			writer._file.flush()
+			assert os.path.getsize(path) > len(before)
+			raise RuntimeError("stopped part way")
+	with open(path, 'rb') as handle:
+		assert handle.read() == before
+	assert_identical(reader.read(chroms, starts, 300, dtype='float64'), old)
+
+	# Bytes past the header's length, as a killed append leaves, are
+	# ignored by a reader and written over by the next append.
+	with open(path, 'ab') as handle:
+		handle.write(b'\xff' * 1000)
+	assert_identical(FigWigReader(path).read(chroms, starts, 300,
+		dtype='float64'), old)
+	with FigWigWriter(path, None, ['more'], append=True) as writer:
+		writer.write('chr1', [10], numpy.full((1, 1, 20), 3.0))
+	with open(path, 'rb') as handle:
+		after = handle.read()
+	assert after[128:len(before)] == before[128:]
+	header = numpy.frombuffer(after[:128], dtype=figwig.figwig._HEADER)[0]
+	assert int(header['chroms']) > len(before)
+	assert int(header['length']) == len(after)
+	with pytest.raises(ValueError, match="open it again"):
+		reader.read(chroms, starts, 300)
+
+	grown = FigWigReader(path, verify=True)
+	assert [t['name'] for t in grown.tracks] == [t['name'] for t in TRACKS] + \
+		['more']
+	assert_identical(grown.read(chroms, starts, 300, tracks=list(range(5)),
+		dtype='float64'), old)
+	numpy.testing.assert_array_equal(grown.read('chr1', [0], 40, tracks='more')[
+		0], [0] * 10 + [3] * 20 + [0] * 10)
+
+	with FigWigWriter(path, None, ['third'], append=True) as writer:
+		writer.write_sparse('chr2', [7], 'third', [9])
+	twice = FigWigReader(path, verify=True)
+	assert [t['group'] for t in twice.tracks] == [0, 0, 1, 2, 2, 3, 4]
+	assert twice.read('chr2', [0], 10, tracks='third')[0, 7] == 9
+	assert_identical(twice.read(chroms, starts, 300, tracks=list(range(5)),
+		dtype='float64'), old)
+
+	# A copy of the file holds only its chunks, at new offsets.
+	copied = str(tmp_path / 'copied.fw')
+	with FigWigWriter(copied, CHROM_SIZES, None, tile=TILE) as writer:
+		writer.add_file(path)
+	assert os.path.getsize(copied) < os.path.getsize(path)
+	reader = FigWigReader(copied, verify=True)
+	assert_identical(reader.read(chroms, starts, 300, tracks=list(range(5)),
+		dtype='float64'), old)
+	assert reader.read('chr2', [0], 10, tracks='third')[0, 7] == 9
+	numpy.testing.assert_array_equal(reader.tile_sums(), twice.tile_sums())
+	for field in reader.stats.dtype.names:
+		numpy.testing.assert_array_equal(reader.stats[field], twice.stats[field])
 
 
 def test_add_file_copies_tracks(tmp_path, ref, cells):

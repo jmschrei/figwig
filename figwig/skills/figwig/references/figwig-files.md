@@ -51,7 +51,9 @@ write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genom
 other order, keeping its tile, groups and level; `out.fw` may be `in.fw`.
 `figwig merge -o all.fw a.fw b.fw` copies several files' tracks into one
 (same chromosomes, tile, level and order; `reorder` first otherwise).
-`FigWigWriter(path, None, new_tracks, append=True)` adds tracks to a file;
+`FigWigWriter(path, None, new_tracks, append=True)` adds tracks to a file in
+place (the new chunks are written after its end; its old index stays behind
+as dead bytes, which `merge` into a new path drops);
 `tile_sums()` is the file's coarse profile, in place of zoom levels, kept
 while tracks x tiles x 4 bytes is at most 256 MB.
 

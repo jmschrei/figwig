@@ -467,9 +467,11 @@ class FigWigWriter:
 
 	Tracks of another figwig file written with the same chromosomes, tile,
 	compression level and order can be added whole with `add_file`, which
-	copies its chunks rather than decoding them, and `append=True` starts
-	from the tracks of the file at `path` itself, so that a file grows by a
-	track at a time. The file keeps each track's sum over every tile, for
+	copies its chunks rather than decoding them, and `append=True` adds
+	tracks to the file at `path` itself, in place: its chunks stay where
+	they are, the new ones go after its end, and new tables, index and
+	header are written at `close`, so that a file grows by a track at a
+	time at the cost of the new chunks alone. The file keeps each track's sum over every tile, for
 	`FigWigReader.tile_sums`, as long as those sums take at most 256 MB,
 	and a CRC-32 of every chunk, which `FigWigReader(path, verify=True)`
 	checks.
@@ -478,7 +480,8 @@ class FigWigWriter:
 	----------
 	path: str or os.PathLike
 		The file to write. It is written beside its final name and moved
-		there when the writer closes.
+		there when the writer closes, or, with `append=True`, extended in
+		place.
 
 	chrom_sizes: dict, list of (str, int), or None
 		The chromosomes and their lengths: a dict such as
@@ -535,9 +538,13 @@ class FigWigWriter:
 		over the genome. Default is 'positions'.
 
 	append: bool, optional
-		Whether to start from the tracks of the figwig file at `path`, whose
-		chunks are copied, so that `tracks` are added to it; its
-		chromosomes, tile, level and order are taken, and `chrom_sizes`,
+		Whether to add `tracks` to the figwig file at `path`, in place: its
+		chunks stay where they are, and the new chunks, the tables, the
+		index and last the header are written after them, so that until
+		`close` returns the file reads as it did, a writer that fails cuts
+		it back to what it was, and its old tables and index are left
+		behind as dead bytes, which `figwig merge` into a new path drops.
+		Its chromosomes, tile, level and order are taken, and `chrom_sizes`,
 		`tile`, `level` and `order` must agree with them or be left at None.
 		Default is False.
 	"""
@@ -550,6 +557,8 @@ class FigWigWriter:
 		self._file = None
 		self._pool = None
 		self._partial = None
+		self._length = None
+		self._times = None
 		self._written = False
 		self._adopted = set()
 
@@ -653,9 +662,18 @@ class FigWigWriter:
 		self._copies = True
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
 
-		self._partial = _temporary_path(self.path)
-		self._file = open(self._partial, 'w+b')
-		self._file.write(bytes(_HEADER.itemsize))
+		if source is None:
+			self._partial = _temporary_path(self.path)
+			self._file = open(self._partial, 'w+b')
+			self._file.write(bytes(_HEADER.itemsize))
+		else:
+			# The file itself: the new chunks go after what the header says
+			# is its end, and the tables, the index and last the header are
+			# written at close, so the file reads as it did until then.
+			self._length = source._file_size
+			self._times = os.stat(self.path)
+			self._file = open(self.path, 'r+b')
+			self._file.seek(self._length)
 
 		if self.n_jobs > 1:
 			self._pool = ThreadPoolExecutor(self.n_jobs)
@@ -685,13 +703,25 @@ class FigWigWriter:
 			self._abandon()
 
 	def _abandon(self):
-		"""Stop without finishing the file: the partial file is removed, and
-		the path holds what it held before the writer was made."""
+		"""Stop without finishing the file: the partial file is removed, or
+		the file appended to is cut back to its length, and the path holds
+		what it held before the writer was made."""
 
 		if self._pool is not None:
 			self._pool.shutdown(cancel_futures=True)
 			self._pool = None
 		if self._file is not None:
+			if self._length is not None:
+				# Cut back to the file as it was, with its modification time,
+				# since its bytes are what they were and a reader open on it
+				# need not be told otherwise.
+				try:
+					self._file.truncate(self._length)
+					self._file.close()
+					os.utime(self.path, ns=(self._times.st_atime_ns,
+						self._times.st_mtime_ns))
+				except OSError:
+					pass
 			self._file.close()
 			self._file = None
 		if self._partial is not None:
@@ -768,7 +798,8 @@ class FigWigWriter:
 		tile, compression level and order, and its track names must not be
 		this writer's. Its tracks come after those written so far, in their
 		own groups, with their attributes, dtypes and statistics, and cannot
-		be written to here.
+		be written to here. Only its chunks are copied, so a file grown by
+		`append=True` loses the tables and indexes it left behind.
 
 		Parameters
 		----------
@@ -781,10 +812,11 @@ class FigWigWriter:
 		self._adopt(FigWigReader(path), first=False)
 
 	def _adopt(self, source, first):
-		"""Copy the chunks of `source` into the file and take over its
-		tracks, groups, runs or blocks, live tiles, summaries and
-		statistics: before this writer's own tracks with `first`, as a file
-		appended to keeps its tracks first, and after them otherwise."""
+		"""Take over the tracks, groups, runs or blocks, live tiles,
+		summaries and statistics of `source`: with `first`, the file being
+		appended to in place, whose chunks stay where they are and whose
+		tracks come before this writer's own; otherwise another file, whose
+		chunks are copied in and whose tracks come after."""
 
 		if source.chrom_sizes != self.chrom_sizes:
 			raise ValueError("{} was written with other chromosomes or lengths."
@@ -800,22 +832,11 @@ class FigWigWriter:
 			raise ValueError("track {!r} of {} is already one of the writer's."
 				.format(sorted(taken)[0], source.path))
 
-		# The chunks are copied whole; the runs and blocks keep their
-		# layout, moved by where the copy landed.
+		# A file appended to keeps its chunks where they are; another file's
+		# are copied whole, and its runs and blocks keep their layout, moved
+		# to where the copy landed.
 		self._write(len(self._inflight))
-		shift = self._file.tell() - _HEADER.itemsize
-		fd = _open_read(source.path)
-		try:
-			position = _HEADER.itemsize
-			end = source._data_end
-			while position < end:
-				piece = _pread(fd, min(1 << 24, end - position), position)
-				if not piece:
-					raise ValueError("{} ends inside its chunks.".format(source.path))
-				self._file.write(piece)
-				position += len(piece)
-		finally:
-			os.close(fd)
+		extents = None if first else self._copy_chunks(source)
 
 		n_groups, n_tracks = len(source._groups), len(source.tracks)
 		if first:
@@ -848,7 +869,8 @@ class FigWigWriter:
 				'dtype'], _INTEGER) for i in members], dtype=numpy.int64))
 			if self.order == 'tracks':
 				found = source._group_index(g).copy()
-				found['offset'] += shift
+				if extents is not None:
+					found['offset'] = _moved(found['offset'], found['size'], extents)
 				blocks.append([found])
 				live.append([])
 				runs.append([])
@@ -860,8 +882,11 @@ class FigWigWriter:
 					sizes[tiles]
 				record['raw'], record['crc'] = raws[tiles], crcs[tiles]
 				live.append([record])
-				runs.append([[int(r['first']), int(r['last']), int(r['offset']) +
-					shift, int(r['bytes'])] for r in source._runs[g]])
+				found = source._runs[g]
+				at = found['offset'] if extents is None else _moved(found['offset'],
+					found['bytes'], extents)
+				runs.append([[int(r['first']), int(r['last']), int(at[k]), int(r[
+					'bytes'])] for k, r in enumerate(found)])
 				blocks.append([])
 			summary = source._tile_sums_of(g)
 			sums.append([] if summary is None else [summary])
@@ -891,6 +916,51 @@ class FigWigWriter:
 		if any(not sums[k] for k in range(n_groups)) or len(self.tracks) * \
 				self._n_tiles * 4 > _SUMMARY_BYTES:
 			self._summaries = False
+
+	def _copy_chunks(self, source):
+		"""Copy every chunk of `source` into the file, each stretch of
+		adjacent chunks in one piece, and return where the stretches lay and
+		landed, for `_moved`: a file appended to in place holds its old
+		tables and index between its chunks, which the copy leaves out."""
+
+		ranges = []
+		for g in range(len(source._groups)):
+			index = source._group_index(g)
+			found = index if source.order == 'tracks' else source._runs[g]
+			ranges.append(numpy.stack([found['offset'].astype(numpy.int64), found[
+				'size' if source.order == 'tracks' else 'bytes'].astype(
+				numpy.int64)], axis=1))
+		ranges = numpy.concatenate(ranges) if ranges else numpy.zeros((0, 2),
+			dtype=numpy.int64)
+		ranges = ranges[ranges[:, 1] > 0]
+		ranges = ranges[numpy.argsort(ranges[:, 0], kind='stable')]
+		starts, ends = ranges[:, 0], ranges[:, 0] + ranges[:, 1]
+		if (starts[1:] < ends[:-1]).any():
+			raise ValueError("{} cannot be read as a figwig file: two of its "
+				"chunks overlap.".format(source.path))
+		new = numpy.concatenate([[True], starts[1:] > ends[:-1]]) if len(
+			starts) else numpy.zeros(0, dtype=numpy.bool_)
+		firsts = numpy.flatnonzero(new)
+		starts = starts[firsts]
+		ends = ends[numpy.append(firsts[1:] - 1, len(ends) - 1)]
+		dests = numpy.zeros(len(starts), dtype=numpy.int64)
+
+		fd = _open_read(source.path)
+		try:
+			for k in range(len(starts)):
+				dests[k] = self._file.tell()
+				position = int(starts[k])
+				while position < ends[k]:
+					piece = _pread(fd, min(1 << 24, int(ends[k]) - position), position)
+					if not piece:
+						raise ValueError("{} ends inside its chunks.".format(
+							source.path))
+					self._file.write(piece)
+					position += len(piece)
+		finally:
+			os.close(fd)
+
+		return starts, dests
 
 	def _check_chroms(self, chroms, n):
 		names, codes = _chrom_codes(chroms, n)
@@ -1911,15 +1981,34 @@ class FigWigWriter:
 			header['metadata'] = metadata_offset
 			header['metadata_length'] = len(metadata)
 			header['length'] = length
+			if self._length is not None:
+				# The header is the one write over the file as it was, so
+				# everything it points to is on disk before it.
+				self._file.flush()
+				os.fsync(self._file.fileno())
 			self._file.seek(0)
 			self._file.write(header.tobytes())
 			self._file.flush()
 			self._file.close()
 			self._file = None
-			os.replace(self._partial, self.path)
-			self._partial = None
+			self._length = None
+			if self._partial is not None:
+				os.replace(self._partial, self.path)
+				self._partial = None
 		finally:
 			self._abandon()
+
+
+def _moved(offsets, sizes, extents):
+	"""Where chunks at `offsets` of `sizes` bytes lie after `_copy_chunks`
+	moved the stretches `extents`; an empty chunk's offset is the header's
+	end."""
+
+	starts, dests = extents
+	offsets = numpy.asarray(offsets, dtype=numpy.int64)
+	k = numpy.searchsorted(starts, offsets, side='right') - 1
+	moved = dests[numpy.maximum(k, 0)] + offsets - starts[numpy.maximum(k, 0)]
+	return numpy.where(numpy.asarray(sizes) > 0, moved, _HEADER.itemsize)
 
 
 def _crcs(data, cuts):
@@ -2163,7 +2252,6 @@ class FigWigReader:
 		self.chrom_sizes = dict(chroms)
 		self._codec = codec
 		self._level = int(header['level'])
-		self._data_end = offsets[0]
 		self._file_size = length
 		self._identity = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
 		self._directory = numpy.frombuffer(directory, dtype='<u8').astype(

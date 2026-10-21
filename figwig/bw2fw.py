@@ -45,9 +45,9 @@ def _parser(prog):
 	parser.add_argument('-o', '--output', required=True, help="The figwig file "
 		"to write.")
 	parser.add_argument('-a', '--append', action='store_true', help="Add the "
-		"bigWigs as tracks to the figwig file at the output, which must exist; "
-		"its chromosomes, tile and level are kept, and -s, -t and -l are "
-		"refused.")
+		"bigWigs as tracks to the figwig file at the output, which must exist, "
+		"in place; its chromosomes, tile and level are kept, and -s, -t and -l "
+		"are refused.")
 	parser.add_argument('-m', '--metadata', default=None, help="A tab- or "
 		"comma-separated table with a header and one row per bigWig, matched "
 		"on its first column by the path given here or its base name. A "
