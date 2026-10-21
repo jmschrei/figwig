@@ -1171,7 +1171,7 @@ class FigWigWriter:
 		# at the end of the chromosome.
 		last_full = int(ends[-1]) == (last_tile + 1) * tile or \
 			int(ends[-1]) == int(self._lengths[tid])
-		bound = n_tracks * tile * 8 + 16
+		bound = n_tracks * tile * 4 + 16
 		per_batch = max(1, _BATCH_BYTES // bound)
 
 		# Whole tiles belong to the window that covers them, and the segments
@@ -1315,14 +1315,27 @@ class FigWigWriter:
 		n_tracks = len(self._groups[g])
 		tile = self.tile
 		n = len(tiles)
-		out = numpy.empty(n * (n_tracks * tile * 8 + 16), dtype=numpy.uint8)
-		bounds = numpy.zeros(n + 1, dtype=numpy.int64)
-		kinds = numpy.zeros(n, dtype=numpy.uint8)
 		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
-		_encode_dense_tiles(tile, values, items, columns, self._classes[g],
-			self._matrix, self.level > 0, out, bounds, kinds, stats)
-		return self._compress(g, tid, tiles, n, out, bounds, kinds) + (stats,)
+		parts = []
+		t = 0
+		# The buffer holds every tile at four bytes per value and one more
+		# at eight; a batch with float64 chunks is encoded in several goes.
+		while t < n:
+			out = numpy.empty((n - t) * (n_tracks * tile * 4 + 16) + n_tracks *
+				tile * 4, dtype=numpy.uint8)
+			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
+			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
+			done = _encode_dense_tiles(tile, values, items[t:], columns[t:],
+				self._classes[g], self._matrix, self.level > 0, out, bounds, kinds,
+				stats)
+			parts.append(self._compress(g, tid, tiles[t:], done, out, bounds,
+				kinds))
+			t += done
+		if len(parts) == 1:
+			return parts[0] + (stats,)
+		return tuple(numpy.concatenate([part[k] for part in parts]) for k in
+			range(5)) + (stats,)
 
 	def _encode(self, g, tid, tiles, lo, hi, items, preset, keep_last):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
@@ -1343,26 +1356,38 @@ class FigWigWriter:
 			starts, ends, values, by_base = items
 
 		n = len(tiles)
-		out = numpy.empty(n * (n_tracks * tile * 8 + 16), dtype=numpy.uint8)
-		bounds = numpy.zeros(n + 1, dtype=numpy.int64)
-		kinds = numpy.zeros(n, dtype=numpy.uint8)
 		stats = self._stats[self._groups[g]]
-		n_done = _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base,
-			self._buffers[g], preset, keep_last, self._classes[g], self._matrix,
-			self.level > 0, out, bounds, kinds, stats)
+		expected = n - 1 if keep_last else n
+		t = 0
+		while True:
+			# The encoder runs at least once, to fill the buffer with a tile
+			# it keeps. The buffer holds every tile at four bytes per value
+			# and one more at eight; the encoder stops before a tile that
+			# might not fit, and is called again from there with the buffer
+			# clear.
+			out = numpy.empty((n - t) * (n_tracks * tile * 4 + 16) + n_tracks *
+				tile * 4, dtype=numpy.uint8)
+			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
+			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
+			n_done = _encode_tiles(tile, tiles[t:], lo[t:], hi[t:], starts, ends,
+				values, by_base, self._buffers[g], preset and t == 0, keep_last,
+				self._classes[g], self._matrix, self.level > 0, out, bounds, kinds,
+				stats)
+			live = numpy.flatnonzero(kinds[:n_done])
+			if len(live) > 0:
+				args = (g, tid, tiles[t:], n_done, out, bounds, kinds)
+				if self._pool is None:
+					self._inflight.append((self._compress(*args), g, None))
+				else:
+					self._inflight.append((self._pool.submit(self._compress, *args),
+						g, None))
+			t += n_done
+			if t >= expected:
+				break
+			if n_done == 0:
+				raise RuntimeError("a tile did not fit an empty encode buffer.")
 		self._stats[self._groups[g]] = stats
 		self._check_overflow(self._groups[g])
-
-		live = numpy.flatnonzero(kinds[:n_done])
-		if len(live) == 0:
-			return
-
-		args = (g, tid, tiles, n_done, out, bounds, kinds)
-		if self._pool is None:
-			self._inflight.append((self._compress(*args), g, None))
-		else:
-			self._inflight.append((self._pool.submit(self._compress, *args), g,
-				None))
 
 	def _check_overflow(self, rows):
 		flagged = numpy.flatnonzero(self._stats[rows, 4].astype(numpy.int64) &

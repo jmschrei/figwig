@@ -355,12 +355,38 @@ def _dense_payload(out, position, block, c0, width, code, classes):
 
 
 @numba.njit(nogil=True, cache=True)
+def _scan_row(row, width):
+	"""One pass over a row without a branch: its nonzero bases, and its
+	changes of value from an implicit 0 before it (a NaN counts as a change
+	at every base, which only makes a runs chunk less likely)."""
+
+	nz = 0
+	points = 0
+	if width > 0:
+		nz += row[0] != 0.0
+		points += row[0] != 0.0
+	for p in range(1, width):
+		nz += row[p] != 0.0
+		points += row[p] != row[p - 1]
+	return nz, points
+
+
+@numba.njit(nogil=True, cache=True, inline='always')
+def _overflows(v, cls):
+	"""Whether a track of class `cls` cannot hold v: a finite value beyond
+	float32, for any track but a float64 one."""
+
+	return cls != _FLOAT64 and numpy.isinf(numpy.float32(v)) and not \
+		numpy.isinf(v)
+
+
+@numba.njit(nogil=True, cache=True)
 def _collect(row, width, cls, offs, vals, d, g, nnz, mins, maxs, sums, flags,
-	dbytes, npts, rbytes):
+	dbytes):
 	"""Scan one track's row for its nonzero bases, with a branch per base:
-	their offsets go to offs[d:] and their values to vals[d:], and the
-	track's statistics, offset bytes, changes of value and the bytes of
-	their offsets are set. Returns the entries found."""
+	their offsets go to offs[d:] and their values, as the track keeps them,
+	to vals[d:], and the track's statistics and offset bytes are set.
+	Returns the entries found."""
 
 	lo = 0.0
 	hi = 0.0
@@ -370,32 +396,23 @@ def _collect(row, width, cls, offs, vals, d, g, nnz, mins, maxs, sums, flags,
 	last = 0
 	db = 0
 	d0 = d
-	prev = 0.0
-	last_change = 0
-	rb = 0
-	points = 0
 	for p in range(width):
-		v = numpy.float64(row[p])
-		over |= cls != _FLOAT64 and numpy.isinf(numpy.float32(v)) and not \
-			numpy.isinf(v)
-		v = _as_stored(v, cls)
-		changed = v != prev and not (numpy.isnan(v) and numpy.isnan(prev))
-		points += changed
-		rb += _varint_bytes(p - last_change) if changed else 0
-		last_change = p if changed else last_change
-		prev = v
-		if v != 0.0:
-			offs[d] = p
-			vals[d] = v
-			d += 1
-			s += v
-			if v < lo:
-				lo = v
-			if v > hi:
-				hi = v
-			frac |= v != numpy.floor(v)
-			db += _varint_bytes(p - last)
-			last = p
+		raw = numpy.float64(row[p])
+		if raw != 0.0:
+			over |= _overflows(raw, cls)
+			v = _as_stored(raw, cls)
+			if v != 0.0:
+				offs[d] = p
+				vals[d] = v
+				d += 1
+				s += v
+				if v < lo:
+					lo = v
+				if v > hi:
+					hi = v
+				frac |= v != numpy.floor(v)
+				db += _varint_bytes(p - last)
+				last = p
 	nnz[g] = d - d0
 	mins[g] = lo
 	maxs[g] = hi
@@ -404,37 +421,26 @@ def _collect(row, width, cls, offs, vals, d, g, nnz, mins, maxs, sums, flags,
 		-2147483648.0 or hi >= 4294967296.0) else 0) | (_FLAG_OVERFLOW if over
 		else 0)
 	dbytes[g] = db
-	npts[g] = points
-	rbytes[g] = rb
 	return d - d0
 
 
 @numba.njit(nogil=True, cache=True)
-def _survey(row, width, cls, g, nnz, mins, maxs, sums, flags, npts, rbytes):
+def _survey(row, width, cls, g, nnz, mins, maxs, sums, flags):
 	"""One track's statistics from its row, without a branch per base, for
-	a row with many nonzero bases. Zeros do not move a minimum or maximum
-	that starts at zero, nor a sum."""
+	a row with many nonzero bases, of the values as the track keeps them.
+	Zeros do not move a minimum or maximum that starts at zero, nor a
+	sum."""
 
 	lo = 0.0
 	hi = 0.0
 	s = 0.0
 	frac = False
 	over = False
-	prev = 0.0
-	last_change = 0
-	rb = 0
-	points = 0
 	count = 0
 	for p in range(width):
-		v = numpy.float64(row[p])
-		over |= cls != _FLOAT64 and numpy.isinf(numpy.float32(v)) and not \
-			numpy.isinf(v)
-		v = _as_stored(v, cls)
-		changed = v != prev and not (numpy.isnan(v) and numpy.isnan(prev))
-		points += changed
-		rb += _varint_bytes(p - last_change) if changed else 0
-		last_change = p if changed else last_change
-		prev = v
+		raw = numpy.float64(row[p])
+		over |= _overflows(raw, cls)
+		v = _as_stored(raw, cls)
 		s += v
 		count += v != 0.0
 		lo = v if v < lo else lo
@@ -447,8 +453,23 @@ def _survey(row, width, cls, g, nnz, mins, maxs, sums, flags, npts, rbytes):
 	flags[g] = (_FLAG_FRACTION if frac else 0) | (_FLAG_WIDE if (lo <
 		-2147483648.0 or hi >= 4294967296.0) else 0) | (_FLAG_OVERFLOW if over
 		else 0)
-	npts[g] = points
-	rbytes[g] = rb
+
+
+@numba.njit(nogil=True, cache=True)
+def _run_bytes(row, width, cls):
+	"""The bytes the varints of a row's changes of value take, as
+	`_collect_runs` would write them."""
+
+	prev = 0.0
+	last = 0
+	total = 0
+	for p in range(width):
+		v = _as_stored(numpy.float64(row[p]), cls)
+		if v != prev and not (numpy.isnan(v) and numpy.isnan(prev)):
+			total += _varint_bytes(p - last)
+			last = p
+		prev = v
+	return total
 
 
 @numba.njit(nogil=True, cache=True)
@@ -567,7 +588,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	`position` of `out`. Returns its kind byte, 0 for a tile whose values
 	are all zero, and where the chunk ends.
 
-	Each track's row is scanned for its nonzero bases, which are collected
+	Each track's row is scanned once without a branch for its nonzero bases
+	and changes of value, then for its nonzero bases, which are collected
 	in `offs` and `vals`, scratch of a tile of every track, when the row
 	has few, and surveyed for its statistics when it has many; the
 	statistics are folded into `stats`. `classes` gives each track's class.
@@ -577,12 +599,11 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	n_tracks = block.shape[0]
 	total = 0
 	n_present = 0
+	n_points = 0
 	collected = True
 	for g in range(n_tracks):
 		row = block[g, c0:c0 + width]
-		nz = 0
-		for p in range(width):
-			nz += row[p] != 0
+		nz, points = _scan_row(row, width)
 		if nz == 0:
 			nnz[g] = 0
 			mins[g] = 0.0
@@ -595,12 +616,14 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 			continue
 
 		n_present += 1
+		npts[g] = points
+		n_points += points
+		rbytes[g] = -1
 		if nz < _SPARSE_SCAN * width:
 			total += _collect(row, width, classes[g], offs, vals, total, g, nnz,
-				mins, maxs, sums, flags, dbytes, npts, rbytes)
+				mins, maxs, sums, flags, dbytes)
 		else:
-			_survey(row, width, classes[g], g, nnz, mins, maxs, sums, flags,
-				npts, rbytes)
+			_survey(row, width, classes[g], g, nnz, mins, maxs, sums, flags)
 			dbytes[g] = -1
 			total += nnz[g]
 			collected = False
@@ -610,11 +633,22 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 
 	code, total = _chunk_code(n_tracks, classes, nnz, mins, maxs, sums, flags)
 	w = _WIDTHS[code]
-	n_points = 0
+
+	# A runs chunk can only win when its changes, at a byte each at least,
+	# would take fewer bytes than the smallest of the other kinds; only
+	# then are the bytes its varints really take counted.
+	_, least = _pick_kind(n_tracks, n_present, total, total, w, width, 0, 0,
+		True, allow_matrix, False, compressed)
+	counts = 4 * n_tracks
+	if compressed:
+		counts = counts // _DEFLATED_COUNTS + 4
+	allow_runs = 4 + counts + n_points * (1 + max(w, 1)) < least
 	run_bytes = 0
-	for g in range(n_tracks):
-		n_points += npts[g]
-		run_bytes += rbytes[g]
+	if allow_runs:
+		for g in range(n_tracks):
+			if nnz[g] > 0:
+				rbytes[g] = _run_bytes(block[g, c0:c0 + width], width, classes[g])
+				run_bytes += rbytes[g]
 
 	# A surveyed track's offsets have not been counted; unless the chunk is
 	# dense even if every offset took one byte, its entries are collected
@@ -622,13 +656,13 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	kind = _DENSE
 	if not collected:
 		kind, _ = _pick_kind(n_tracks, n_present, total, total, w, width,
-			n_points, run_bytes, True, allow_matrix, True, compressed)
+			n_points, run_bytes, True, allow_matrix, allow_runs, compressed)
 		if kind != _DENSE:
 			d = 0
 			for g in range(n_tracks):
 				if dbytes[g] < 0:
 					_collect(block[g, c0:c0 + width], width, classes[g], offs, vals,
-						d, g, nnz, mins, maxs, sums, flags, dbytes, npts, rbytes)
+						d, g, nnz, mins, maxs, sums, flags, dbytes)
 				d += nnz[g]
 			collected = True
 	if collected:
@@ -636,7 +670,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 		for g in range(n_tracks):
 			delta_bytes += dbytes[g]
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, width,
-			n_points, run_bytes, True, allow_matrix, True, compressed)
+			n_points, run_bytes, True, allow_matrix, allow_runs, compressed)
 
 	if kind == _DENSE:
 		if code == _ONE:
@@ -699,7 +733,10 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	`allow_matrix`, a tile may be stored as a matrix chunk; `compressed`
 	says whether the chunks will be deflated.
 
-	Returns the number of tiles encoded, which is len(tiles) or one fewer.
+	Returns the number of tiles encoded: len(tiles), one fewer with
+	`keep_last`, or fewer still when a tile might not fit the rest of
+	`out`, as a float64 chunk of eight bytes per value might not, in which
+	case the caller continues from the tile returned with a fresh `out`.
 	"""
 
 	n_tracks, width = buffer.shape
@@ -715,8 +752,11 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	offs = numpy.empty(n_tracks * width, dtype=numpy.int64)
 	vals = numpy.empty(n_tracks * width, dtype=numpy.float64)
 	position = bounds[0]
+	need = n_tracks * width * 8 + 16
 
 	for t in range(n_tiles):
+		if position + need > out.shape[0]:
+			return t
 		base = tiles[t] * tile
 		for i in range(lo[t], hi[t]):
 			a = max(starts[i], base)
@@ -757,7 +797,8 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 	Tile t is values[items[t], :, columns[t]:columns[t] + tile], where
 	`values` holds the windows' values, (windows, tracks, width), so no
 	scratch buffer is filled or cleared. The chunks, `bounds`, `kinds` and
-	`stats` are as in `_encode_tiles`, and every tile is encoded.
+	`stats` are as in `_encode_tiles`; encoding stops before a tile that
+	might not fit the rest of `out`, and returns the tiles encoded.
 	"""
 
 	n_tracks = values.shape[1]
@@ -773,8 +814,11 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 	offs = numpy.empty(n_tracks * tile, dtype=numpy.int64)
 	vals = numpy.empty(n_tracks * tile, dtype=numpy.float64)
 	position = bounds[0]
+	need = n_tracks * tile * 8 + 16
 
 	for t in range(n_tiles):
+		if position + need > out.shape[0]:
+			return t
 		kinds[t], end = _encode_block(values[items[t]], columns[t], tile,
 			classes, allow_matrix, compressed, False, out, position, offs, vals,
 			nnz, mins, maxs, sums, flags, dbytes, npts, rbytes, stats)
@@ -834,8 +878,7 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		for e in range(e0, e1):
 			g = tracks[e]
 			v = values[e]
-			if classes[g] != _FLOAT64 and numpy.isinf(numpy.float32(v)) and not \
-					numpy.isinf(v):
+			if _overflows(v, classes[g]):
 				flags[g] |= _FLAG_OVERFLOW
 			v = _as_stored(v, classes[g])
 			if v == 0.0:
@@ -910,8 +953,7 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 		over = False
 		for e in range(e0, e1):
 			v = values[e]
-			over |= cls != _FLOAT64 and numpy.isinf(numpy.float32(v)) and not \
-				numpy.isinf(v)
+			over |= _overflows(v, cls)
 			v = _as_stored(v, cls)
 			values[e] = v
 			s += v

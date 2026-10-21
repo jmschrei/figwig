@@ -994,7 +994,7 @@ def test_encode_tiles_varints_and_ones():
 	values = numpy.zeros((1, 1, 1024))
 	values[0, 0, [0, 127, 128, 1023]] = 1
 	buffer = numpy.zeros((1, tile))
-	out = numpy.zeros(100, dtype=numpy.uint8)
+	out = numpy.zeros(10000, dtype=numpy.uint8)
 	bounds = numpy.zeros(2, dtype=numpy.int64)
 	kinds = numpy.zeros(1, dtype=numpy.uint8)
 	stats = numpy.zeros((1, 5))
@@ -1020,7 +1020,7 @@ def test_encode_tiles_runs_and_float64():
 	values[0, 1, 10:20] = 2.5           # a run, back to 0, then a run
 	values[0, 1, 40:50] = 2.5
 	buffer = numpy.zeros((2, tile))
-	out = numpy.zeros(1000, dtype=numpy.uint8)
+	out = numpy.zeros(4000, dtype=numpy.uint8)
 	bounds = numpy.zeros(2, dtype=numpy.int64)
 	kinds = numpy.zeros(1, dtype=numpy.uint8)
 	stats = numpy.zeros((2, 5))
@@ -1059,7 +1059,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	tile = 16
 	values = numpy.ones((1, 1, 24))
 	buffer = numpy.zeros((1, tile))
-	out = numpy.zeros(100, dtype=numpy.uint8)
+	out = numpy.zeros(400, dtype=numpy.uint8)
 	bounds = numpy.zeros(3, dtype=numpy.int64)
 	kinds = numpy.zeros(2, dtype=numpy.uint8)
 	stats = numpy.zeros((1, 5))
@@ -1976,3 +1976,27 @@ def test_same_stats_whatever_the_call_split(tmp_path):
 		sums.append(float(FigWigReader(path).stats['sum'][0]))
 	assert sums[0] == sums[1] == sums[2]
 	assert abs(sums[0] - float(values.astype(numpy.float64).sum())) < 1e-6
+
+
+def test_encode_tiles_stops_before_a_tile_that_might_not_fit():
+	"""The encoder returns the tiles it encoded when the next might not fit
+	its buffer, and goes on from there in the next call."""
+
+	tile = 16
+	values = numpy.ones((1, 1, 64)) * 3
+	buffer = numpy.zeros((1, tile))
+	out = numpy.zeros(160, dtype=numpy.uint8)      # one tile at 8 bytes + 16
+	bounds = numpy.zeros(5, dtype=numpy.int64)
+	kinds = numpy.zeros(4, dtype=numpy.uint8)
+	stats = numpy.zeros((1, 5))
+	classes = numpy.zeros(1, dtype=numpy.int64)
+	tiles, lo, hi = numpy.arange(4), numpy.zeros(4, dtype=numpy.int64), \
+		numpy.ones(4, dtype=numpy.int64)
+	n = _encode_tiles(tile, tiles, lo, hi, numpy.array([0]), numpy.array([64]),
+		values, True, buffer, False, False, classes, True, False, out, bounds,
+		kinds, stats)
+	assert n == 2 and (kinds[:n] > 0).all() and not buffer.any()
+	m = _encode_tiles(tile, tiles[n:], lo[n:], hi[n:], numpy.array([0]),
+		numpy.array([64]), values, True, buffer, False, False, classes, True,
+		False, out, bounds, kinds, stats)
+	assert m == 2 and stats[0, 1] == 64
