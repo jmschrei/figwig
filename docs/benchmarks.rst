@@ -172,29 +172,29 @@ configuration ran in its own process, which warmed up on 1,000 windows,
 then opened the files again and timed one read, opening included; the
 table gives the median of three. Every configuration of one N gave the same
 values. Other jobs loaded the machine during these runs: its load average
-was between 47 and 128 while the windows were read, and reached 300 at
-times during the conversions, which were therefore run three times and are
-given as the lowest run.
+was between 44 and 66 while the windows were read, and between 48 and 112
+during the conversions, which were run once each with the kernels
+compiled.
 
-======  =======  =============  ==========  ==========
-tracks  threads  bigWigs, f32   figwig      figwig, f32
-======  =======  =============  ==========  ==========
-1       1        0.195 s        0.037 s     0.039 s
-1       8        0.043 s        0.021 s     0.029 s
-1       32       0.028 s        0.035 s     0.037 s
-2       1        0.396 s        0.054 s     0.056 s
-2       8        0.067 s        0.025 s     0.037 s
-2       32       0.040 s        0.039 s     0.044 s
-6       1        0.939 s        0.124 s     0.136 s
-6       8        0.159 s        0.044 s     0.055 s
-6       32       0.115 s        0.052 s     0.059 s
-24      1        3.479 s        0.358 s     0.402 s
-24      8        0.535 s        0.107 s     0.123 s
-24      32       0.338 s        0.130 s     0.140 s
-96      1        13.197 s       1.353 s     1.488 s
-96      8        1.975 s        0.390 s     0.420 s
-96      32       1.117 s        0.419 s     0.489 s
-======  =======  =============  ==========  ==========
+======  =======  ============  =======  ===========
+tracks  threads  bigWigs, f32  figwig   figwig, f32
+======  =======  ============  =======  ===========
+1       1        0.197 s       0.041 s  0.044 s    
+1       8        0.040 s       0.032 s  0.042 s    
+1       32       0.029 s       0.039 s  0.040 s    
+2       1        0.380 s       0.060 s  0.061 s    
+2       8        0.072 s       0.042 s  0.042 s    
+2       32       0.039 s       0.046 s  0.045 s    
+6       1        0.907 s       0.130 s  0.141 s    
+6       8        0.170 s       0.051 s  0.054 s    
+6       32       0.124 s       0.059 s  0.061 s    
+24      1        3.419 s       0.367 s  0.406 s    
+24      8        0.521 s       0.116 s  0.132 s    
+24      32       0.312 s       0.184 s  0.145 s    
+96      1        13.223 s      1.369 s  1.543 s    
+96      8        1.970 s       0.443 s  0.496 s    
+96      32       1.233 s       0.497 s  0.517 s    
+======  =======  ============  =======  ===========
 
 On one thread the figwig file read 5.3 to 9.8 times faster than the
 bigWigs, and on 8 threads 2.0 to 5.1 times. A read of 8,192 windows from a
@@ -208,30 +208,31 @@ The pattern of a PyTorch DataLoader worker, 32 batches of 64 windows read
 one after another on one thread, is where the figwig file gains most, since
 a batch of windows on a sparse track shares few bigWig blocks:
 
-======  ===============  ===========
-tracks  bigWigs, f32     figwig
-======  ===============  ===========
-1       0.131 s          0.014 s
-2       0.262 s          0.019 s
-6       0.558 s          0.039 s
-24      2.749 s          0.111 s
-96      10.950 s         0.350 s
-======  ===============  ===========
+======  ============  =======
+tracks  bigWigs, f32  figwig 
+======  ============  =======
+1       0.128 s       0.019 s
+2       0.260 s       0.025 s
+6       0.544 s       0.043 s
+24      2.600 s       0.113 s
+96      10.814 s      0.415 s
+======  ============  =======
 
-Sizes, and the conversions each way, the lowest of three runs:
+Sizes, and the conversions each way:
 
-======  ==============  =============  ====================================  ====================================
-tracks  bigWigs         figwig file    ``bw2fw``, 1 / 8 / 32 threads         ``fw2bw``, 1 / 8 / 32 threads
-======  ==============  =============  ====================================  ====================================
-1       36.9 MB         26.9 MB        3.1 s / 1.9 s / 1.7 s                 5.7 s / 5.8 s / 5.9 s
-2       73.9 MB         48.3 MB        5.3 s / 2.7 s / 2.8 s                 12.4 s / 7.4 s / 8.2 s
-6       971.4 MB        225.7 MB       14.5 s / 6.6 s / 6.7 s                38.3 s / 21.0 s / 12.2 s
-24      2,195.1 MB      891.0 MB       49.3 s / 16.6 s / 16.9 s              154.2 s / 74.6 s / 38.6 s
-96      7,089.9 MB      3,564.7 MB     199.9 s / 64.3 s / 66.7 s             614.3 s / 297.4 s / 163.2 s
-======  ==============  =============  ====================================  ====================================
+======  ==========  ===========  =============================  =============================
+tracks  bigWigs     figwig file  ``bw2fw``, 1 / 8 / 32 threads  ``fw2bw``, 1 / 8 / 32 threads
+======  ==========  ===========  =============================  =============================
+1       36.9 MB     25.2 MB      3.0 s / 1.7 s / 2.2 s          5.7 s / 4.2 s / 4.5 s        
+2       73.9 MB     46.9 MB      5.0 s / 2.9 s / 3.1 s          11.2 s / 5.4 s / 6.0 s       
+6       971.4 MB    224.8 MB     13.3 s / 7.1 s / 7.2 s         38.9 s / 21.8 s / 12.9 s     
+24      2,195.1 MB  888.7 MB     55.4 s / 20.3 s / 20.8 s       162.1 s / 82.7 s / 47.3 s    
+96      7,089.9 MB  3,555.3 MB   216.8 s / 68.6 s / 71.8 s      604.5 s / 302.2 s / 174.8 s  
+======  ==========  ===========  =============================  =============================
 
 The six real tracks are 4.3 times smaller as a figwig file, most of the
-gain on the two ENCODE tracks written as bedGraph, 883 MB of the 971; the
+gain on the two ENCODE tracks written as bedGraph, 883 MB of the 971, and
+1.8 times smaller than the same tracks as bigWigs figwig writes; the
 rolled copies past six are bigWigs figwig wrote as varStep, and the figwig
 file is half their size. ``bw2fw`` reads each piece of a chromosome on a
 thread of its own while the writer encodes and compresses the piece before
@@ -240,19 +241,18 @@ laying each track's windows out as bigWig sections, on one thread per
 track. ``figwig fw2bw`` wrote the six tracks back as 408 MB of bigWigs.
 
 ``figwig bam2fw`` and ``figwig bam2bw`` converted the 2.4 GB ATAC-seq BAM
-ENCFF877LRY, on tmpfs, to one figwig file of two tracks and to two bigWigs,
-the lowest of three runs:
+ENCFF877LRY, on tmpfs, to one figwig file of two tracks and to two bigWigs:
 
-=================  ========  ========  ========  =========
-command            1 core    8 cores   32 cores  output
-=================  ========  ========  ========  =========
-``figwig bam2bw``  10.57 s   1.75 s    1.71 s    73.9 MB
-``figwig bam2fw``  12.87 s   5.02 s    4.83 s    48.9 MB
-=================  ========  ========  ========  =========
+=================  =======  =======  ========  =======
+command            1 core   8 cores  32 cores  output 
+=================  =======  =======  ========  =======
+``figwig bam2bw``  10.80 s  2.11 s   1.94 s    73.9 MB
+``figwig bam2fw``  10.60 s  2.32 s   2.58 s    47.4 MB
+=================  =======  =======  ========  =======
 
-Both read the BAM the same way; ``figwig bam2fw`` spends the difference
-merging the two strands' positions and encoding their tiles, which runs on
-the calling thread.
+Both read the BAM the same way, and ``figwig bam2fw`` writes its counts as
+entries on the same cores; it took longer only on 32, where its sort of
+each chromosome's entries stays on one.
 
 Many tracks, sparse reads and the two orders
 --------------------------------------------
@@ -266,51 +266,49 @@ tracks were the six count tracks above and the 96 of the previous section,
 on tmpfs, read as 8,192 windows of 2,114 bp on peak summits in one call on
 1 and 8 threads, and as 32 batches of 64 windows on one thread. Each
 configuration ran in its own process after a warm-up on 1,000 windows,
-opening included. Other jobs loaded the machine to between 50 and 300
-during these runs, so the set was run three times and the tables give the
-lowest of the nine repetitions, or of three for the reads of some of the
-cells, whose code changed between runs; every configuration of one set
-gave the same nonzero bases.
+opening included. Other jobs loaded the machine to between 34 and 126
+during these runs, and the tables give the lowest of three repetitions;
+every configuration of one set gave the same nonzero bases.
 
-======  =======================  ==========  ==========  =======================
-tracks  file and read            1 thread    8 threads   batches of 64, 1 thread
-======  =======================  ==========  ==========  =======================
-6       bigWigs                  0.939 s     0.159 s     0.558 s
-6       groups of 8, dense       0.123 s     0.045 s     0.037 s
-6       one group, dense         0.122 s     0.040 s     0.036 s
-6       one group raw, dense     0.064 s     0.033 s     0.019 s
-6       track order, dense       0.218 s     0.069 s     0.620 s
-6       one group, sparse        0.254 s     0.147 s
-6       one group raw, sparse    0.187 s     0.134 s
-6       groups of 8, 2 labels    0.127 s     0.144 s     0.036 s
-6       one group raw, 2 labels  0.069 s     0.133 s     0.019 s
-96      bigWigs                  13.197 s    1.975 s     10.950 s
-96      groups of 8, dense       1.308 s     0.306 s     0.355 s
-96      one group, dense         0.995 s     0.213 s     0.246 s
-96      one group raw, dense     0.587 s     0.142 s     0.128 s
-96      track order, dense       3.568 s     0.809 s     10.515 s
-96      groups of 8, sparse      2.013 s     0.982 s
-96      one group raw, sparse    1.095 s     0.601 s
-96      groups of 8, 6 labels    1.260 s     0.577 s     0.333 s
-96      one group raw, 6 labels  0.469 s     0.420 s     0.110 s
-======  =======================  ==========  ==========  =======================
+======  =======================  ========  =========  =======================
+tracks  file and read            1 thread  8 threads  batches of 64, 1 thread
+======  =======================  ========  =========  =======================
+6       bigWigs                  0.907 s   0.170 s    0.544 s                
+6       groups of 8, dense       0.131 s   0.053 s    0.041 s                
+6       one group, dense         0.128 s   0.052 s    0.042 s                
+6       one group raw, dense     0.070 s   0.039 s    0.024 s                
+6       track order, dense       0.227 s   0.076 s    0.779 s                
+6       one group, sparse        0.259 s   0.144 s                           
+6       one group raw, sparse    0.216 s   0.173 s                           
+6       groups of 8, 2 labels    0.135 s   0.051 s    0.041 s                
+6       one group raw, 2 labels  0.077 s   0.051 s    0.024 s                
+96      bigWigs                  13.223 s  1.970 s    10.814 s               
+96      groups of 8, dense       1.351 s   0.429 s    0.404 s                
+96      one group, dense         1.052 s   0.242 s    0.260 s                
+96      one group raw, dense     0.585 s   0.177 s    0.137 s                
+96      track order, dense       3.339 s   0.886 s    10.573 s               
+96      groups of 8, sparse      2.161 s   1.082 s                           
+96      one group raw, sparse    1.156 s   0.594 s                           
+96      groups of 8, 6 labels    1.349 s   0.586 s    0.401 s                
+96      one group raw, 6 labels  0.482 s   0.130 s    0.126 s                
+======  =======================  ========  =========  =======================
 
-An uncompressed file in one group reads dense windows 1.9 to 2.2 times
+An uncompressed file in one group reads dense windows 1.9 to 2.3 times
 faster than the compressed groups of 8 on one thread, and sums 96 tracks
-into 6 labels 2.7 times faster, at 1.8 times the size (414 MB against 227
-for the six tracks, 6.6 GB against 3.6 for the 96); compressed, one group
-of 96 is 6% smaller than groups of 8 and 24% faster. Sums per label on
-several threads go into one copy of the output per thread, which are added
-at the end, so they gain less from threads than dense reads do, and gain
-nothing on six tracks. The sparse return is slower than the dense one on
-count tracks this dense, since it lists and sorts millions of entries (4.6
-million for the six tracks), and is meant for tracks that are mostly zero.
-Track order reads windows across many tracks slowest, 10.5 s for the
-96-track batches where one group takes 0.25 s, since every window searches
-a block of every track; it is the order for the single-cell reads below.
-The files: six tracks 227 MB in groups of 8 or one group compressed, 414
-MB uncompressed, 961 MB in track order; 96 tracks 3,565, 3,365, 6,609 and
-15,369 MB. The bigWig rows are those of the previous section.
+into 6 labels 2.8 times faster, at 1.8 times the size (410 MB against 225
+for the six tracks, 6.5 GB against 3.6 for the 96); compressed, one group
+of 96 is 6% smaller than groups of 8 and 22% faster. Sums per label run a
+group's batches at a time, each into its own cells of the output, so they
+gain from threads as dense reads do. The sparse return is slower than the
+dense one on count tracks this dense, since it lists and sorts millions of
+entries (4.6 million for the six tracks), and is meant for tracks that are
+mostly zero. Track order reads windows across many tracks slowest, 10.6 s
+for the 96-track batches where one group takes 0.26 s, since every window
+searches a block of every track; it is the order for the single-cell reads
+below. The files: six tracks 225 MB in groups of 8 or one group
+compressed, 410 MB uncompressed, 961 MB in track order; 96 tracks 3,555,
+3,334, 6,538 and 15,369 MB. The bigWig rows are those of the previous
+section.
 
 Single cells
 ~~~~~~~~~~~~
@@ -324,32 +322,33 @@ order. The reads were 512 windows of 2,114 bp: the cells summed into 10
 labels (pseudobulks), in one call and as 32 batches of 64 windows; every
 cell's nonzero bases with ``sparse=True``; 100 cells densely and sparsely;
 and the genome-wide cuts of 20 cells with ``read_entries``. No bigWigs:
-10,246 of them is not a layout anyone keeps. The lowest repetition, as
-above, and the lowest of the day's builds of each file, on 8 threads;
-every configuration gave the same cuts.
+10,246 of them is not a layout anyone keeps. The lowest of three
+repetitions, and one build of each file on 8 threads; every configuration
+gave the same cuts.
 
-=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
-file                   MB       build    10 labels, 1 / 8 thr  10 labels, 32 batches    sparse, all, 1 / 8    dense, 100 cells, 1 / 8  sparse, 100 cells  20 cells, genome
-=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
-groups of 64           2,126    73 s     0.44 / 0.48 s         0.50 s                   0.54 / 0.40 s         0.19 / 0.20 s            0.18 s             3.79 s
-one group, compressed  1,255    37 s     0.13 / 0.07 s         0.13 s                   0.19 / 0.10 s         0.06 / 0.03 s            0.06 s             6.64 s
-one group, raw         2,490    33 s     0.07 / 0.06 s         0.08 s                   0.14 / 0.08 s         0.03 / 0.02 s            0.02 s             0.90 s
-track order            2,452    70 s     5.59 / 4.77 s         32.23 s                  5.61 / 4.79 s         0.09 / 0.09 s            0.09 s             0.15 s
-=====================  =======  =======  ====================  =======================  ====================  =======================  =================  =================
+=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
+file                   MB     build  10 labels, 1 / 8 thr  10 labels, 32 batches  sparse, all, 1 / 8  dense, 100 cells, 1 / 8  sparse, 100 cells  20 cells, genome
+=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
+groups of 64           1,928  88 s   0.92 / 0.67 s         1.03 s                 1.05 / 0.71 s       0.42 / 0.28 s            0.40 s             3.90 s          
+one group, compressed  1,255  56 s   0.13 / 0.05 s         0.17 s                 0.20 / 0.10 s       0.06 / 0.03 s            0.06 s             5.93 s          
+one group, raw         2,490  34 s   0.08 / 0.04 s         0.12 s                 0.14 / 0.09 s       0.03 / 0.03 s            0.03 s             0.85 s          
+track order            2,452  79 s   5.66 / 5.01 s         33.85 s                6.33 / 4.99 s       0.07 / 0.07 s            0.07 s             0.12 s          
+=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
 
 Every cell in one uncompressed group reads pseudobulks of 512 windows in
-0.07 s and its 32 batches in 0.08 s, 6 times faster than the groups of 64,
-whose chunks carry a count for every cell of the group in every tile; the
-compressed one-group file is the smallest, 1.26 GB for 488 million cuts,
-at about twice the read time. A tile of cut sites whose nonzero values are
-all 1 stores no values, which is why the uncompressed file is 2.5 GB for
-488 million cuts, about 5 bytes each with the index. Track order is 80
-times slower for pseudobulks, since every window searches a block of each
-of 10,246 cells, and 6 times faster than the uncompressed position order
-for 20 cells' cuts over the genome, which position order answers by
-decoding every chunk; compressed position order takes 6.6 s for that.
-These reads gain little from threads, since a read of 512 windows is a few
-tens of milliseconds of decoding.
+0.08 s and its 32 batches in 0.12 s, 9 to 12 times faster than the groups
+of 64, whose chunks carry a count for every cell of the group in every
+tile and whose 161 groups each cost about 5 ms to open; the compressed
+one-group file is the smallest, 1.26 GB for 488 million cuts, at about
+twice the read time. A tile of cut sites whose nonzero values are all 1
+stores no values, which is why the uncompressed file is 2.5 GB for 488
+million cuts, about 5 bytes each with the index. Track order is 70 times
+slower for pseudobulks, since every window searches a block of each of
+10,246 cells, and 7 times faster than the uncompressed position order for
+20 cells' cuts over the genome, which position order answers by decoding
+every chunk; compressed position order takes 5.9 s for that. These reads
+gain little from threads, since a read of 512 windows is a few tens of
+milliseconds of decoding.
 
 
 Thread scaling

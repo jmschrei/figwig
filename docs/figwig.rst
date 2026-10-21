@@ -31,7 +31,7 @@ many tracks. In *track order*, each track's nonzero bases lie in blocks per
 chromosome, so one track over the genome is a few slices and a window read
 searches each requested track's blocks. That is the order for reading a
 few of many tracks. Six genome-wide count tracks that take 971 MB as
-bigWigs take 227 MB as one figwig file (:doc:`benchmarks`).
+bigWigs take 225 MB as one figwig file (:doc:`benchmarks`).
 
 The examples on this page read ``k562.fw``, six genome-wide count tracks
 converted from bigWigs with ``figwig bw2fw`` and a metadata table: the two
@@ -366,7 +366,7 @@ of a few runs of one value, and larger for sparse low-depth counts, where a
 chunk of a few bases has a fixed cost that a bigWig's varStep item does
 not. The gain in size over a directory of bigWigs comes mostly from the
 tracks being in one file and in the narrowest type: six count tracks that
-are 971 MB as ENCODE's bigWigs are 408 MB as bigWigs figwig writes and 227
+are 971 MB as ENCODE's bigWigs are 408 MB as bigWigs figwig writes and 225
 MB as one figwig file. The gain in reading comes from the tile grid: a
 window's chunks are found by division, each is decoded once for every track
 in it, and the values arrive as uint8 or uint16, half or a quarter of the
