@@ -85,9 +85,13 @@ On a 10 GB BAM at `-p 1` the peak was 2.9 GB, and 4.9 GB with `-u -f`.
 ## The first call
 
 The first call in a new environment compiles figwig's numba kernels: 0.7 s
-for the reader, 1.1 s for `figwig bam2bw`. numba caches them next to the
-installed package, or in the user's cache directory, and later processes
-load them in well under a second. Warm up with a small read before timing.
+for the bigWig reader, 1.1 s for `figwig bam2bw`, and 27 s for the first
+dense read of a figwig file (sums per label and per bin share its kernels),
+with 21 s more for the first sparse read, 12 s for the first read into
+another output dtype, 12 s for track order and 8 s for the first write. numba
+caches them next to the installed package, or in the user's cache
+directory, and later processes load them in a tenth of a second. Warm up
+with a small read before timing, and before spawning DataLoader workers.
 On inputs bam2bw finishes in under half a second, `figwig bam2bw` took a
 median 0.12 s longer, mostly importing numba.
 

@@ -117,7 +117,7 @@ base                                        value
 ==========================================  ===================================
 covered by an interval                      the interval's value
 covered by no interval                      ``missing``, 0.0 unless given
-covered by an interval whose value is NaN   ``missing``
+covered by an interval whose value is NaN   ``missing``, or NaN with ``keep_nan=True``
 past the end of its chromosome              NaN
 on a chromosome the file does not have      ``missing``, with a warning
 ==========================================  ===================================

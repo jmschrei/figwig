@@ -43,10 +43,16 @@ faster.
 A figwig file is read the same way, in batches of chunks on up to
 ``n_jobs`` threads, each batch read with one ``pread`` per run of adjacent
 chunks and inflated by libdeflate, or by zlib where the ``deflate`` package
-is not installed; a read cuts its chunks into about eight batches per
-thread, so that a read of a few thousand windows shares out evenly. On the
-six-track file of :doc:`benchmarks`, 8,192 windows took 0.12 s on one
-thread and 0.044 s on 8, and nothing more was gained past 8.
+is not installed. A read uses one thread per 64 chunks it touches, up to
+``n_jobs``, since a read of a few dozen windows is done in under a
+millisecond and gains nothing from waking threads, and keeps its threads
+between reads; windows packed into a few tiles are cut over the threads by
+window rather than by chunk. On the six-track file of :doc:`benchmarks`,
+8,192 windows took 0.12 s on one thread and 0.044 s on 8, and nothing more
+was gained past 8. Sums per label and per bin run a group's batches at a
+time, each writing its own cells of the output, so they take no copy of
+the output per thread in position order; in track order they do, one per
+thread, which the 8 GiB guard counts.
 
 Writing
 -------
@@ -111,12 +117,21 @@ The first call
 --------------
 
 The first read in a new environment compiles figwig's numba kernels, which
-took 0.7 s on the machine above, and 1.1 s for ``figwig bam2bw``. numba
-caches them on disk, next to the installed package, or in the user's cache
-directory when the package directory cannot be written, and later processes
-load them in well under a second. Warm up with a small read before timing
-figwig. One ``BigWigReader`` can be read from several threads at once, and
-holds no open file between reads.
+took 0.7 s for the bigWig reader on the machine above, and 1.1 s for
+``figwig bam2bw``. A figwig file's kernels are larger, and compiled once per
+element type of a chunk: the first dense read compiled for 27 s, the first
+sparse read for 21 s more, the first read into another output dtype for
+12 s, the first track-order read for 12 s and the first write for 8 s,
+about 80 s in all for a process that reads and writes every way; sums per
+label and per bin share the dense read's kernels. numba caches them on
+disk, next to the installed package,
+or in the user's cache directory when the package directory cannot be
+written, and later processes load them in a tenth of a second. Warm up with
+a small read before timing figwig, and before starting DataLoader workers
+under ``spawn``, each of which loads the cache. One ``BigWigReader`` or
+``FigWigReader`` can be read from several threads at once, and holds no
+open file between reads; a ``FigWigReader`` keeps each group's index, 17
+bytes per tile of the genome, from the first read that touches it.
 
 Platforms
 ---------

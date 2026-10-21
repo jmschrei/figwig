@@ -7,10 +7,11 @@ model's predictions, or the cells of a single-cell experiment. It is read
 the way a bigWig is read with figwig, many windows of one width in one
 call, but from any subset of its tracks at once, into an array of shape
 ``(windows, tracks, width)``, and the values come back as the integers they
-were written as; the same read gives the nonzero bases as a sparse list, or
-the tracks summed per label. Each track carries a JSON record of
-attributes, such as its assay, biosample and strand, which ``select``
-matches, and the file names the reference genome it is on.
+were written as; the same read gives the nonzero bases as a sparse list,
+the tracks summed per label, or each window summed per bin. Each track
+carries a JSON record of attributes, such as its assay, biosample and
+strand, which ``select`` matches, and the file names the reference genome
+it is on.
 
 A file is written in one of two orders, chosen for how it will be read, as
 a sparse matrix is stored by rows or by columns. In *position order*, the
@@ -19,17 +20,18 @@ by default, so a window's tiles are found by division rather than a tree
 search. The tiles of a *group* of tracks at one position are one *chunk*: a
 chunk whose values are all zero takes no space; the others hold their
 values densely, as nonzero bases per track with their offsets as varints,
-or as a sparse matrix of the tracks present, whichever is smaller, in the
-narrowest integer type that holds them, float32 where they are not
-integers, or no values at all where every nonzero value is 1, as in a tile
-of single-cell cut sites; and the chunks are compressed with libdeflate or
-zlib, as bigWig blocks are. That is the order for reading windows across
-many tracks. In *track order*, each track's
-nonzero bases lie in blocks per chromosome, so one track over the genome
-is a few slices and a window read searches each requested track's blocks.
-That is the order for reading a few of many tracks. Six genome-wide count
-tracks that take 971 MB as bigWigs take 227 MB as one figwig file
-(:doc:`benchmarks`).
+as runs of one value, or as a sparse matrix of the tracks present,
+whichever is smallest, in the narrowest integer type that holds them,
+float32 where they are not integers, float64 where float32 would change an
+integer that must be kept, or no values at all where every nonzero value
+is 1, as in a tile of single-cell cut sites; and the chunks are compressed
+with libdeflate or zlib, as bigWig blocks are, or stored as they are when
+compression would grow them. That is the order for reading windows across
+many tracks. In *track order*, each track's nonzero bases lie in blocks per
+chromosome, so one track over the genome is a few slices and a window read
+searches each requested track's blocks. That is the order for reading a
+few of many tracks. Six genome-wide count tracks that take 971 MB as
+bigWigs take 227 MB as one figwig file (:doc:`benchmarks`).
 
 The examples on this page read ``k562.fw``, six genome-wide count tracks
 converted from bigWigs with ``figwig bw2fw`` and a metadata table: the two
@@ -74,11 +76,12 @@ chromosome it was written with, so an unknown name is an error rather than a
 warning. A base that was never written is 0, and a base past the end of its
 chromosome is NaN in a float output and 0 in an integer one.
 
-The output's dtype is the tracks' own when they share one, float32 when any
-of them is float32, and otherwise the smallest integer type that holds all
-of them; ``dtype=`` asks for another, and raises for an integer type that
-cannot hold a track's values. ``out=`` fills an array rather than
-allocating one, such as a numpy view of a pinned torch tensor:
+The output's dtype is the tracks' own when they share one, and otherwise
+the narrowest type that holds every one of them exactly: float32 for a
+uint8 or int16 track read with a float32 one, float64 for a uint32 or int32
+track read with a float32 one. ``dtype=`` asks for another, and raises for
+an integer type that cannot hold a track's values. ``out=`` fills an array
+rather than allocating one, such as a numpy view of a pinned torch tensor:
 
 .. code-block:: python
 
@@ -95,10 +98,22 @@ allocating one, such as a numpy view of a pinned torch tensor:
 
 A ``FigWigReader`` reads the file's tables and metadata when it is opened,
 and each group's index on the first read that touches it, after which the
-index is kept. It can be read from several threads at once and pickled, so
-it can go to DataLoader workers under any start method, as
-:doc:`reading` shows for bigWigs. ``read_figwig`` reads from a path or a
-reader in one call, as ``read_bigwig`` does.
+index is kept, 17 bytes per tile of the genome per group. A read uses one
+thread per 64 chunks it touches, up to ``n_jobs``, and keeps its threads
+between reads, so a read of 64 windows runs on the calling thread and a
+read of 8,192 on 8. A reader checks on every read that the file at its
+path is the one it opened, by size, modification time and inode, and
+raises if a conversion has replaced it; it can be read from several threads
+at once and pickled, so it can go to DataLoader workers under any start
+method, as :doc:`reading` shows for bigWigs, and a pickled reader carries
+no index, which each worker reads again. ``read_figwig`` reads from a path
+or a reader in one call, as ``read_bigwig`` does. The first read in a new
+environment compiles the kernels for that kind of read: about 27 s for the
+first dense read (sums per label and per bin share its kernels), 21 s more
+for the first sparse read, 12 s for the first read into another output
+dtype, 12 s for the first track-order read and 8 s for the first write;
+numba caches them on disk, and later processes load them in a tenth of a
+second (:doc:`threads`).
 
 Selecting tracks by their attributes
 ------------------------------------
@@ -118,18 +133,20 @@ Selecting tracks by their attributes
 
 ``select`` matches every keyword against the track records and returns the
 indices of the tracks that have them all, in the file's order, to pass as
-``tracks``. The records hold whatever attributes the tracks were written
-with, besides ``name``, ``dtype`` and ``group``. ``fw.stats`` is a
-structured array with each track's ``sum``, ``nonzero`` bases, ``min`` and
-``max``, which a count model normalizes by:
+``tracks``; it returns an empty array, which ``read`` refuses, when no
+track matches, as when a value is given as a number where the table it was
+read from held a string. The records hold whatever attributes the tracks
+were written with, besides ``name``, ``dtype`` and ``group``. ``fw.stats``
+is a structured array with each track's ``sum``, ``nonzero`` bases, ``min``
+and ``max``, which a count model normalizes by:
 
 .. code-block:: python
 
     print(fw.stats["sum"][fw.select(biosample="K562", assay="ATAC-seq")])
     # [22410840. 22410840.]
 
-Sparse reads and sums per label
--------------------------------
+Sparse reads, sums per label and sums per bin
+---------------------------------------------
 
 A read of thousands of tracks that are mostly zero, such as cells, should
 not come back dense: a batch of 64 windows of 2,114 bp over 10,000 cells
@@ -158,16 +175,37 @@ into one channel, which turns cells into pseudobulks in the read itself:
 An entry is a window's row, the track's channel, the base's offset in the
 window and its value, sorted by row, channel and offset; ``shape`` is what
 the dense array would have been, and ``scipy.sparse.coo_array`` or
-``torch.sparse_coo_tensor`` take the arrays as they are. ``labels`` gives
-one integer per track read, from 0, with -1 leaving a track out, and the
-sums come back as float32 unless ``dtype`` says otherwise. A dense read
-whose output would pass 8 GiB raises unless ``out`` is given, with a
-message pointing here.
+``torch.sparse_coo_tensor`` take the arrays as they are. A sparse read
+takes about 40 bytes of memory per entry while it sorts them, so it is for
+tracks that are mostly zero, not for dense ones, whose dense read is
+smaller. ``labels`` gives one integer per track read, from 0, with -1
+leaving a track out, and the sums come back as float32, or as float64 where
+float32 would round a track, unless ``dtype`` says otherwise; a sum asked
+for in an integer type is taken in int64 and checked against that type,
+since a sum can overflow a type that each track fits. A dense read whose
+output would pass 8 GiB raises unless ``out`` is given, with a message
+pointing here.
+
+``bins`` sums each window over bins of that many bases, which is the
+target of a model of binned coverage, and ``bins=width`` gives each
+window's total per track, which a count loss takes:
+
+.. code-block:: python
+
+    y = fw.read(chroms, starts, width=196_608, bins=128)
+    print(y.shape, y.dtype)
+    # (64, 6, 1536) float32
+    counts = fw.read(chroms, starts, width=2114, bins=2114)[:, :, 0]
+
+``bins`` must divide ``width``; the sums are taken without laying the
+window's bases out, from a scratch tile each chunk is decoded into once,
+and bases past the end of a chromosome count as 0. ``bins`` and ``labels``
+can be given together.
 
 ``read_entries(tracks, chroms)`` gives every nonzero base of some tracks
 over whole chromosomes as a ``SparseEntries`` of chromosome index,
-position, track index and value, which is the read a file in track order
-is laid out for.
+position, track index and value, in the narrowest type that holds every
+track exactly, which is the read a file in track order is laid out for.
 
 Writing
 -------
@@ -200,25 +238,36 @@ time. Items may come in any order within a call but must not overlap, and
 within each group a call's items come after earlier calls' on the same
 chromosome; a group may move to another chromosome in any order but cannot
 return to one it has left. A window may run past the end of its chromosome
-only where its values are NaN or 0. A base that is not written is 0.
+only where its values are NaN or 0. A base that is not written is 0, and a
+call that raises writes nothing.
 
 ``tracks`` are names, or dicts with a ``name``, an optional ``dtype`` and
-any JSON-serializable attributes. A track's ``dtype`` is what ``read``
-returns it as: given, it is checked against every value written; left out,
-it is set when the writer closes to the narrowest type that holds the
-track's values, uint8 here. Either way each chunk is stored as narrowly as
-its own values allow, so declaring ``uint32`` costs nothing on disk.
-``genome`` is a name or a URL, and ``attributes`` a dict for the file as a
-whole.
+any JSON-serializable attributes; NaN is not JSON and is refused. A track's
+``dtype`` is what ``read`` returns it as: given, it is checked against
+every value written; left out, it is set when the writer closes to the
+narrowest type that holds the track's values, uint8 here, float32 where a
+value is not an integer, and float64 where an integer lies beyond int32 and
+uint32, which float32 would round. Either way each chunk is stored as
+narrowly as its own values allow, so declaring ``uint32`` costs nothing on
+disk. The values a track keeps are those its dtype holds: a float32 track
+keeps float32's rounding of what it is given, as does a track left
+undeclared that turns out to hold fractions, so a value too small for
+float32 is 0 and not counted as nonzero, and a value beyond float32's range
+is an error unless the track is declared ``float64``; -0.0 is 0. ``genome``
+is a name or a URL, and ``attributes`` a dict for the file as a whole.
 
 ``groups`` says which tracks' tiles are stored together: a number of
-consecutive tracks, 8 by default, or a list of groups of names. A read of
-any track in a group decodes the whole group's chunk, so the tracks of a
-group should be those read together, such as the strands of one assay; a
-file of cells read as pseudobulks wants every cell in one group, and a
-file read a few tracks at a time wants track order. A ``write`` call
-covers whole groups. ``write_figwig`` writes one call's worth to a new
-file:
+consecutive tracks, 8 by default, or a list of groups of names, each of
+which may list its tracks in any order, since a group's tracks lie in the
+file's track order within its chunks. A read of any track in a group
+decodes the whole group's chunk, so the tracks of a group should be those
+read together, such as the strands of one assay, and tracks of one kind,
+since a chunk's element type is chosen for the whole group: a count track
+grouped with a conservation track costs float32 bytes per count before
+compression, and its reads decode the conservation values too. A file of
+cells read as pseudobulks wants every cell in one group, and a file read a
+few tracks at a time wants track order. A ``write`` call covers whole
+groups. ``write_figwig`` writes one call's worth to a new file:
 
 .. code-block:: python
 
@@ -230,11 +279,22 @@ Each tile is encoded as the writer reaches it, and a tile a call fills only
 part of waits for the next call, so predictions can be written a batch at a
 time. Chunks are compressed on ``n_jobs`` threads, with libdeflate when the
 ``deflate`` package is installed, as :doc:`writing` describes for bigWigs,
-and ``level=0`` stores them uncompressed, which decodes fastest. Reads
-inflate chunks with libdeflate as well where it is installed, about twice
-as fast as zlib, and with zlib otherwise. The file depends on the values
-and on which calls wrote which groups, not on the number of threads or on
-how the values were split between calls.
+and a chunk that compression would grow is stored as it is. ``level=0``
+stores every chunk uncompressed, which decodes fastest and costs four bytes
+per base of a dense float track, so a genome-wide conservation track that
+is 75 MB compressed is 150 MB at level 0, and a track of 5 kb bins, 21 MB
+compressed, is 11 GB. Reads inflate chunks with libdeflate as well where it
+is installed, about twice as fast as zlib, and with zlib otherwise. The
+chunks depend on the values and on which calls wrote which groups, not on
+the number of threads or on how the values were split between calls; the
+sum in the statistics table is a compensated float64, which splits may move
+in its last bits.
+
+The writer writes beside the path it was given and moves the file there
+when it closes, so a reader of that path never sees part of a file, a
+writer that raises or is never closed leaves the path as it was, and a
+converter may write over its own input. A writer that is garbage collected
+with values written and no ``close`` warns.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------
@@ -262,7 +322,9 @@ The groups of the tracks named are written over the tiles the entries fall
 in, with every other base 0, and no two entries may name one base of one
 track. Entries come after a group's earlier items on a chromosome, and in
 position order they seal the tile they end in, so that the windows and
-nonzero bases of one tile come in one call.
+nonzero bases of one tile come in one call. A call takes about 90 bytes of
+memory per entry besides the arrays given, so a genome's entries are best
+written a chromosome at a time, as above.
 
 ``order`` fixes the layout when the writer is made, since it decides the
 index and the chunks. ``'positions'`` (or ``'csc'``) is the tile layout
@@ -271,11 +333,11 @@ blocks of up to 65,536 per chromosome, uncompressed unless ``level`` is
 given, since a window read over many tracks decodes a block of each. Both
 orders take the same ``write`` and ``write_sparse``, return the same arrays
 from ``read``, and differ in what is fast: ``figwig reorder`` rewrites a
-file in the other order. In an uncompressed position-order file a tile
-whose few tracks have values is stored as a matrix chunk, whose size grows
-with the values rather than with the tracks; in a compressed file the
-per-track counts compress to almost nothing and the plain sparse chunk is
-used.
+file in the other order. A tile whose few tracks have values is stored as
+a matrix chunk, whose size grows with the values rather than with the
+tracks, in an uncompressed file, and in a compressed one when the sparse
+chunk's count per track, mostly zero, would not deflate to less, as with
+100,000 cells in one group.
 
 Converting
 ----------
@@ -285,11 +347,47 @@ the tracks of one figwig file, with a metadata table for their names and
 attributes; ``figwig fw2bw`` writes a figwig file's tracks back as bigWigs,
 with that table; ``figwig bam2fw`` counts reads or fragments as ``figwig
 bam2bw`` does, one pair of tracks per input file; and ``figwig reorder``
-writes a figwig file in the other order. A bigWig's
-values read from the figwig file exactly as ``read_bigwig`` gives them with
-``missing=0.0``, and a track written back to a bigWig reads the same way,
-with its zeros and a float32 track's NaN left out of the bigWig as
-``BigWigWriter.write`` leaves them out.
+writes a figwig file in the other order. A bigWig's values read from the
+figwig file as ``read_bigwig`` gives them with ``missing=0.0`` and
+``keep_nan=True``: a base no interval covers is 0, and an interval whose
+value is NaN is NaN; ``bw2fw --missing nan`` keeps the uncovered bases
+apart from 0 instead, for tracks where the two differ.
+
+What the format is for, and what it is not
+------------------------------------------
+
+The format is built for per-base signal read in windows across many tracks
+at once: counts and pileups, fold change and p-values, conservation and
+mappability, predictions, and cells. Measured on 60 bigWigs of the kinds
+the genomics test collection holds, a figwig file of one track is smaller
+than the bigWig figwig's own writer makes of it for dense per-base floats
+(a tenth to four fifths of the size), deep counts and coverage, and tracks
+of a few runs of one value, and larger for sparse low-depth counts, where a
+chunk of a few bases has a fixed cost that a bigWig's varStep item does
+not. The gain in size over a directory of bigWigs comes mostly from the
+tracks being in one file and in the narrowest type: six count tracks that
+are 971 MB as ENCODE's bigWigs are 408 MB as bigWigs figwig writes and 227
+MB as one figwig file. The gain in reading comes from the tile grid: a
+window's chunks are found by division, each is decoded once for every track
+in it, and the values arrive as uint8 or uint16, half or a quarter of the
+bytes of float32 (:doc:`benchmarks`).
+
+A figwig file has no "no data". A base that was not written, a base an
+interval of 0 covers and a base outside every interval are the same 0, so
+a bigWig whose zeros mean something other than its gaps, as a methylation
+track's 0% sites do against its unsequenced sites, or a conservation
+track's unaligned bases, loses that distinction through ``bw2fw`` unless
+``--missing nan`` is given, which writes the uncovered bases as NaN and the
+track as float32. There are no zoom levels: a summary over a megabase
+decodes every chunk under it, which is 5 times slower than a bigWig's
+zoom records for a genome-wide table of 1 Mb bins and 60 times faster at
+1 kb bins, where a bigWig's zooms do not help; a genome browser needs the
+tracks written back with ``fw2bw -z``. Every value is at most float64, and
+there are no string or categorical tracks. A read from a remote file would
+need the group's index, a few tens of KB for a genome-wide track, before
+its first chunk; the reader does not read over HTTP. The format is
+little-endian, and read and written by this package alone; the layout
+below is complete enough to read it without it.
 
 The layout
 ----------
@@ -298,21 +396,121 @@ A figwig file is, in order: a 128-byte header; the chunks or blocks, as
 they were written; the chromosome table; a table of each track's sum,
 nonzero bases, minimum and maximum; the metadata, a JSON document with the
 genome, the file's attributes, its order and every track's record; and the
-index. In position order the index holds one record per group with the
-kind byte and the compressed and uncompressed sizes of every tile and the
-runs of tiles that lie back to back in the file; in track order, one record
-per track with its blocks' chromosome, first and last position, entries,
-offset and size. The header names the file's order, tile size, codec and
-every table's offset, and a reader checks each table and each chunk it
-decodes against the file's length and the format, so a truncated or
-corrupt file raises a ``ValueError`` that says what it found.
+index. Every integer is little-endian, and every chunk starts on an 8-byte
+boundary of the file. A reader checks each table and each chunk it decodes
+against the file's length and the format before asking for memory, so a
+truncated or corrupt file raises a ``ValueError`` that says what it found.
 
-The position-order index is a flat array per group of 9 bytes per tile,
-read on a group's first use: for hg38 at a tile of 16,384 bases, 1.7 MB per
-group on disk, and about 17 bytes per tile in memory once the chunk offsets
-are laid out. A file of hundreds of tracks in groups of one, read in a few
-groups at a time, keeps only those groups' indexes in memory; read all at
-once, it wants larger groups, a tile of 65,536, or track order.
+The header, 128 bytes:
 
-Reserved fields hold a place for zoom levels, which the format does not
-write yet.
+=================  ====  ==================================================
+field              type  meaning
+=================  ====  ==================================================
+magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
+version            u2    2; a reader refuses any other
+flags              u2    bit 0 set for track order
+tile               u4    bases per tile, a power of two from 16 to 65,536
+codec              u2    0 for uncompressed chunks, 1 for zlib streams
+level              u2    the compression level the chunks were written at
+n_chroms           u4    chromosomes in the chromosome table
+n_tracks           u4    tracks
+n_groups           u4    groups, which is n_tracks in track order
+reserved           u4    0
+chroms             u8    offset of the chromosome table
+tracks             u8    offset of the statistics table
+index              u8    offset of the index
+data               u8    offset of the first chunk, 128
+metadata           u8    offset of the metadata
+metadata_length    u8    bytes of the metadata
+zooms              u8    0, a place held for zoom levels
+length             u8    bytes of the file
+padding            32    0
+=================  ====  ==================================================
+
+The chromosome table is, for each chromosome in the file's order, the
+length of its UTF-8 name as a u2, the name, and its length in bases as a
+u8, from 1 to 2**32 - 1. The statistics table is one 32-byte record per
+track: the sum (f8), the nonzero bases (u8), the minimum (f8) and the
+maximum (f8) of the values written, the minimum and maximum 0 for a track
+with no nonzero base. The metadata is UTF-8 JSON with the keys ``genome``
+(a string or null), ``attributes`` (an object), ``order`` (``positions``
+or ``tracks``) and ``tracks``, a list with one object per track in order,
+each with its ``name``, its ``dtype`` (one of ``uint8``, ``uint16``,
+``uint32``, ``int8``, ``int16``, ``int32``, ``float32``, ``float64``), its
+``group`` (an integer from 0) and its attributes; a reader takes the
+records' order as the track order and, within a group, as the order of the
+group's tracks in its chunks.
+
+The index starts with a directory of ``n_groups`` u8 offsets, one per
+group's record. In position order a record is ``n_runs`` (u4), then that
+many 32-byte runs of ``first`` tile, ``last`` tile, ``offset`` in the file
+and ``bytes`` (all u8), then ``n_live`` (u4), ``n_bytes`` (u4) and a zlib
+stream of ``n_bytes`` that inflates to ``13 * n_live`` bytes: the live
+tiles' numbers (u4 each, ascending), then their kind bytes (u1 each), then
+their compressed sizes (u4 each), then their uncompressed sizes (u4 each).
+Tiles are numbered over the genome in order, each chromosome's tiles after
+the one before's, and a tile not listed holds only zeros. A run holds the
+chunks of tiles ``first`` to ``last``, back to back from ``offset`` for
+``bytes`` bytes, so a chunk's offset is its run's plus the compressed
+sizes of the run's earlier tiles. A group written chromosome by chromosome
+has one run; groups written in turn have a run per switch. In track order
+a record is ``n_blocks`` (u4) then that many 40-byte blocks of
+``chrom`` (u4, an index into the chromosome table), ``first`` and
+``last`` position (u4), ``n`` entries (u4), ``offset`` (u8), compressed
+``size`` and uncompressed ``raw`` size (u4), ``kind`` (u4, the kind byte)
+and 4 bytes of padding.
+
+A chunk's kind byte holds its kind in bits 0-2: 0 for a tile that holds
+only zeros and has no chunk, 1 dense, 2 sparse, 3 matrix, 4 runs; its
+element code in bits 3-6: 0 uint8, 1 uint16, 2 uint32, 3 int8, 4 int16, 5
+int32, 6 float32, 7 "one", 8 float64; and in bit 7 whether the chunk is
+stored as it is in a compressed file, because deflating it would have made
+it larger, in which case its compressed and uncompressed sizes are equal.
+A compressed chunk is one zlib stream. A dense chunk holds every value of
+the tile, track after track in the group's order, in the element type. A
+sparse chunk holds the number of nonzero bases in all (u4), then for each
+track the bytes its offsets take (u4), then each track's nonzero offsets
+within the tile, the first as it is and the rest as differences from the
+one before, each as a LEB128 varint (seven bits per byte, low bits first,
+the high bit set on every byte but the last; at most three bytes), then
+padding to a multiple of 4 bytes, then each track's nonzero values in the
+element type; a track's number of bases is the number of its bytes whose
+high bit is clear. A runs chunk has the same layout, but its offsets are
+the bases where a track's value changes, and its values the value from
+each change up to the next, or to the end of the tile, with 0 before a
+track's first change. A matrix chunk holds the number of tracks present
+(u4), their positions in the group (u4 each, ascending), a u4 pointer per
+present track into the entries plus one at the end, the entries' offsets
+within the tile (u2 each, ascending within a track), padding to 4 bytes,
+and the values. The "one" element type stores no values, every nonzero
+value being 1; a dense or runs chunk never uses it. A chunk's bytes are
+padded to a multiple of 8. A track-order block holds its entries'
+positions on the chromosome (u4 each, ascending), padding to 8 bytes, and
+their values in the block's element type, padded to 8 bytes.
+
+A reader that follows this can read a figwig file with numpy and zlib
+alone, as one of the tests of the format does.
+
+Limits
+------
+
+=================================  ===================================================================
+what                               limit
+=================================  ===================================================================
+chromosome length                  2**32 - 1 bases
+chromosome name                    65,535 bytes of UTF-8
+tiles over the genome              2**26; the writer refuses a tile too small for the genome
+tracks per group                   2**29 / tile: 32,768 at the default tile, 131,072 at 4,096
+nonzero bases per track-order      65,536 per block, any number of blocks
+block
+dense read                         8 GiB unless ``out`` is given
+scratch for ``bins``               256 MB per thread: channels times tile times 8 bytes
+values                             integers to 2**53 exactly, float32 or float64 otherwise
+=================================  ===================================================================
+
+The position-order index on disk holds the tiles with values, so a group
+with little data costs a few bytes; in memory a group's index is 17 bytes
+per tile of the genome, 3.2 MB for hg38 at the default tile, kept from a
+group's first read on, so a file of thousands of groups read all at once
+holds thousands of those, and wants larger groups or track order. Reserved
+fields hold a place for zoom levels, which the format does not write.

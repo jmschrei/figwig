@@ -5,8 +5,8 @@
 ```python
 BigWigReader(path)        # reads the header and chromosome tree now
 reader.chrom_sizes        # {name: length} in the file's order; ENCODE's is chr1, chr10, chr11, ...
-reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0)
-read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0)
+reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)
+read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False)
 ```
 
 | `bigwigs` given as | Result, float32 |
@@ -50,7 +50,8 @@ print(y.shape)
 | Base | Value |
 |---|---|
 | covered by an interval | the interval's value, copied from the file's float32 |
-| covered by no interval, or by an interval whose value is NaN | `missing`, 0.0 unless given |
+| covered by no interval | `missing`, 0.0 unless given |
+| covered by an interval whose value is NaN | `missing`, or NaN with `keep_nan=True` |
 | past the end of its chromosome | NaN, whatever `missing` is |
 | on a chromosome the file does not have | `missing`, with one `UserWarning` per read |
 

@@ -18,14 +18,21 @@ order given, each named after its file without the ``.bw``, ``.bigWig`` or
 ``.bigwig`` extension. The chromosomes are every chromosome of the bigWigs,
 in order of first appearance, and the bigWigs must agree on each one's
 length; ``-s`` gives a chrom_sizes, ``.fai`` or FASTA file to take them
-from instead, and a bigWig without one of them is zero there. ``-g``
-records the reference genome, as a name or a URL. ``-t`` sets the tile
-size, ``--groups`` the consecutive tracks stored together (8 by default),
-``--dtype`` one dtype for every track, and ``-l`` the compression level,
-with 0 for uncompressed chunks. Each piece of a chromosome is read on one
-thread of its own while the piece before it is encoded and compressed on
-``-p`` threads, and the arrays read are handed to the writer without a
-copy.
+from instead, which must agree with the bigWigs on the length of every
+chromosome they share, so that a bigWig on another assembly is refused: a
+bigWig without one of the file's chromosomes is zero there, and a
+chromosome of a bigWig that the file leaves out is named in a warning,
+since its values are dropped. ``-g`` records the reference genome, as a
+name or a URL. ``-t`` sets the tile size, ``--groups`` the consecutive
+tracks stored together (8 by default; group tracks of one kind together,
+since a count track grouped with a float track is stored and decoded with
+it), ``--dtype`` one dtype for every track, and ``-l`` the compression
+level, with 0 for uncompressed chunks, which costs four bytes per base of
+a dense float track. Each piece of a chromosome is read on one thread of
+its own while the piece before it is encoded and compressed on ``-p``
+threads, and the arrays read are handed to the writer without a copy. The
+output is written beside its path and moved there when it is complete, so
+a failed conversion leaves what the path held.
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -41,8 +48,15 @@ was:
     atac.-.bw   atac.-    ATAC-seq  K562       -
     dnase.bw    dnase     DNase-seq K562
 
-A bigWig's values read from the figwig file exactly as ``read_bigwig``
-gives them with ``missing=0.0``: a base no interval covers is 0.
+A bigWig's values read from the figwig file as ``read_bigwig`` gives them
+with ``missing=0.0`` and ``keep_nan=True``: a base no interval covers is
+0, and an interval whose value is NaN, as the gaps of a Hi-C insulation or
+compartment track are, is NaN, which makes the track float32. ``--missing
+nan`` writes the bases no interval covers as NaN instead, for tracks whose
+zeros mean something other than their gaps, such as the 0% sites of a
+methylation track against its unsequenced sites, or the unaligned bases of
+a conservation track; the track is then float32 and dense, so it is larger.
+A value is equal as a number: -0.0 reads as 0.
 
 figwig fw2bw
 ------------
@@ -61,10 +75,12 @@ reads that table, so the two commands round-trip a file's tracks, names and
 attributes. ``-t`` names the tracks to write and ``--select`` takes
 ``KEY=VALUE`` pairs that their attributes must have. ``-z`` writes zoom
 levels into the bigWigs, for a genome browser, and ``-l`` sets their
-compression level. A track's bases that are 0, and a float32 track's NaN,
+compression level. A track's bases that are 0, and a float track's NaN,
 are left out of its bigWig, as ``BigWigWriter.write`` leaves them out with
 ``missing=0.0``, so reading the bigWig with ``read_bigwig`` gives the same
-numbers as reading the track, with NaN as 0.
+numbers as reading the track, with NaN as 0; ``--missing nan`` leaves the
+NaN bases out and writes the zeros, for a file ``bw2fw --missing nan``
+made.
 
 figwig bam2fw
 -------------
@@ -85,8 +101,9 @@ file's name without its extension unless the metadata table's ``name``
 column gives another; the table's other columns become attributes of the
 file's tracks, and stranded tracks carry a ``strand`` attribute. ``-r``
 divides each file's counts by that file's read depth. Counts are written
-at compression level 1, like ``figwig bam2bw``'s, unless ``-l`` says
-otherwise. A file's tracks read from the figwig file exactly as the bigWigs
+as entries with ``write_sparse``, which encodes them on the ``-p``
+threads, at compression level 1, like ``figwig bam2bw``'s, unless ``-l``
+says otherwise. A file's tracks read from the figwig file exactly as the bigWigs
 ``figwig bam2bw`` writes from that file alone read with ``read_bigwig``. It
 needs the ``bam2bw`` extra and runs on Linux and macOS.
 
@@ -112,5 +129,11 @@ chromosome, and writes it again in the order asked for, with the same
 tracks, attributes and genome: ``tracks`` (or ``csr``) for reading a few
 tracks over the genome, ``positions`` (or ``csc``) for reading windows
 across many tracks. In position order ``-t`` sets the tile size and
-``--groups`` the consecutive tracks per group; ``-l`` sets the compression
-level, 6 in position order and 0 in track order unless given.
+``--groups`` the consecutive tracks per group, which default to the
+input's when it is in position order and to 16,384 and 8 otherwise; ``-l``
+sets the compression level, which defaults to the input's when the output
+is in the input's order, and otherwise to 6 in position order and 0 in
+track order. The output may be the input's own path: the input is read
+whole before the output takes its place. The values are read in the
+narrowest type that holds every track exactly, so a uint32 track beside a
+float track keeps its integers.
