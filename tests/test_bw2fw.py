@@ -252,3 +252,19 @@ def test_nan_intervals_are_kept(tmp_path):
 	main(['bw2fw', '-o', out, '--missing', 'nan', bw])
 	y = FigWigReader(out).read('chr1', [0], 300, tracks=0)[0]
 	assert numpy.isnan(y[:100]).all() and y[200] == 0 and y[100] == 2
+
+
+def test_append_adds_bigwigs_to_a_file(tmp_path, bigwigs):
+	out = str(tmp_path / 'grow.fw')
+	main(['bw2fw', '-o', out] + bigwigs[:2])
+	main(['bw2fw', '-o', out, '--append'] + bigwigs[2:])
+	reader = FigWigReader(out)
+	assert len(reader.tracks) == 3 and [t['group'] for t in reader.tracks] == \
+		[0, 0, 1]
+	for i, bigwig in enumerate(bigwigs):
+		assert_identical(reader.read('chr1', [0], 5000, tracks=i,
+			dtype='float32'), read_bigwig(bigwig, 'chr1', [0], 5000))
+	with pytest.raises(SystemExit, match="cannot be given with --append"):
+		main(['bw2fw', '-o', out, '--append', '-t', '64', bigwigs[0]])
+	with pytest.raises(SystemExit, match="does not exist"):
+		main(['bw2fw', '-o', str(tmp_path / 'no.fw'), '--append', bigwigs[0]])

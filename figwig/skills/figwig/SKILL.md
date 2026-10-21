@@ -80,6 +80,7 @@ later.
 | converting BAM, SAM, BED or fragment files to bigWig | `references/bam2bw.md` |
 | a figwig file (`.fw`): many tracks in one file, read in windows by attribute; `FigWigReader`, `FigWigWriter`, `read_figwig`, `write_figwig` | `references/figwig-files.md` |
 | single-cell cut sites or any thousands of sparse tracks: `write_sparse`, `sparse=True`, `labels=` pseudobulks, `order='tracks'` vs `'positions'`, `figwig reorder` | `references/figwig-files.md` |
+| adding tracks to a figwig file (`append=True`, `add_file`, `figwig merge`, `bw2fw --append`), tile sums in place of zoom levels (`tile_sums`), checking a file (`verify=True`) | `references/figwig-files.md` |
 | converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
 
 ## Symptom → reference

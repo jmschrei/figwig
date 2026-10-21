@@ -1,9 +1,10 @@
-figwig bw2fw, fw2bw and bam2fw
-==============================
+figwig bw2fw, fw2bw, bam2fw, reorder and merge
+==============================================
 
-Four commands move tracks between bigWigs, reads and :doc:`figwig files
-<figwig>`, and between a figwig file's two orders. Each takes ``-p``, the
-number of threads to read and compress on, and ``-v`` for progress.
+Five commands move tracks between bigWigs, reads and :doc:`figwig files
+<figwig>`, between a figwig file's two orders, and between figwig files.
+Each but ``merge`` takes ``-p``, the number of threads to read and
+compress on, and all take ``-v`` for progress.
 
 figwig bw2fw
 ------------
@@ -12,6 +13,7 @@ figwig bw2fw
 
     figwig bw2fw -o k562.fw -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw
     figwig bw2fw -o k562.fw -m tracks.tsv -p 8 atac.+.bw atac.-.bw dnase.bw
+    figwig bw2fw -o k562.fw --append -p 8 h3k27ac.bw
 
 ``figwig bw2fw`` writes bigWigs as the tracks of one figwig file, in the
 order given, each named after its file without the ``.bw``, ``.bigWig`` or
@@ -32,7 +34,10 @@ a dense float track. Each piece of a chromosome is read on one thread of
 its own while the piece before it is encoded and compressed on ``-p``
 threads, and the arrays read are handed to the writer without a copy. The
 output is written beside its path and moved there when it is complete, so
-a failed conversion leaves what the path held.
+a failed conversion leaves what the path held. ``--append`` adds the
+bigWigs as tracks to the figwig file at the output, in new groups after
+its tracks, copying the file's chunks; its chromosomes, tile and level are
+kept, and ``-s``, ``-t`` and ``-l`` are refused with it.
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -137,3 +142,20 @@ track order. The output may be the input's own path: the input is read
 whole before the output takes its place. The values are read in the
 narrowest type that holds every track exactly, so a uint32 track beside a
 float track keeps its integers.
+
+figwig merge
+------------
+
+.. code-block:: bash
+
+    figwig merge -o all.fw k562.fw hepg2.fw gm12878.fw
+
+``figwig merge`` writes the tracks of several figwig files into one, in
+the order given, each file's groups after the one before's, with their
+attributes, dtypes, statistics and summaries. The files must have been
+written with the same chromosomes, tile, compression level and order, and
+their track names must differ; ``figwig reorder`` writes a file again with
+another tile, level or order first. The chunks are copied as they are, so
+a merge costs a read and a write of the bytes and no decoding. The output
+may be one of the inputs. ``-g`` records a reference genome; the first
+file's is kept otherwise.

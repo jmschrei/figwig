@@ -15,6 +15,7 @@ FigWigReader(path)
 reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
 	sparse=False, labels=None, bins=None)
 reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
+reader.tile_sums(tracks=None, chroms=None)  # -> float32 (tracks, tiles): sums per tile, no decoding
 reader.select(**attributes)          # -> int64 indices, for `tracks`
 reader.tracks                        # list of dicts: name, dtype, group, attributes
 reader.stats                         # structured array: sum, nonzero, min, max per track
@@ -23,10 +24,12 @@ read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=
 	n_jobs=8, sparse=False, labels=None, bins=None)
 
 FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=16384,
-	groups=8, level=None, engine='auto', n_jobs=8, order='positions')
+	groups=8, level=None, engine='auto', n_jobs=8, order='positions', append=False)
 writer.write(chroms, starts, values, ends=None, tracks=None)
 writer.write_sparse(chroms, positions, tracks, values)   # nonzero bases as entries
+writer.add_file(path)                # copy another file's tracks in (same chroms, tile, level, order)
 writer.close()                       # writes the tables and index; `with` calls it
+FigWigReader(path, verify=True)      # check every chunk's CRC-32; for uncompressed files
 write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genome=None,
 	attributes=None, tile=16384, groups=8, level=None, engine='auto', n_jobs=8,
 	order='positions')
@@ -46,6 +49,11 @@ write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genom
 
 `figwig reorder in.fw out.fw --order tracks|positions` rewrites a file in the
 other order, keeping its tile, groups and level; `out.fw` may be `in.fw`.
+`figwig merge -o all.fw a.fw b.fw` copies several files' tracks into one
+(same chromosomes, tile, level and order; `reorder` first otherwise).
+`FigWigWriter(path, None, new_tracks, append=True)` adds tracks to a file;
+`tile_sums()` is the file's coarse profile, in place of zoom levels, kept
+while tracks x tiles x 4 bytes is at most 256 MB.
 
 | `tracks` given to `read` | output shape | dtype |
 |---|---|---|
@@ -183,7 +191,9 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
 
 ```bash
 figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw
+figwig bw2fw -o k562.fw --append -p 8 h3k27ac.bw            # add tracks to a file
 figwig bw2fw -o wgbs.fw --missing nan -p 8 methylation.bw
+figwig merge -o all.fw k562.fw hepg2.fw                     # copy files' tracks into one
 figwig fw2bw k562.fw -o bigwigs -p 8 [--select assay=ATAC-seq | -t atac.+ atac.-]
 figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 ```
@@ -228,5 +238,9 @@ figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 | `has values from ... to ..., which uint8 does not hold` | `dtype=` too narrow for a track on read |
 | `is not one of the file's chromosomes` | a window on a chromosome the file was not written with |
 | `has been replaced or rewritten since this reader opened it` | the file changed under a reader; open it again |
-| `it is version 1 of the format` | a file written by a figwig before the format's release; write it again |
+| `it is version 1 of the format`, `version 2` | a file written by a figwig before the format's release; write it again |
+| `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB, or written by an earlier figwig |
+| `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
+| `was written with tile ..., level ... and ... order where this writer has` | `add_file` or `merge` of files with different layouts; `reorder` one first |
+| `does not match its checksum` | `verify=True` found a corrupt chunk |
 | `cannot be read as a figwig file`, `a chunk of ... cannot be read` | a truncated or corrupt file; every such case raises `ValueError` |

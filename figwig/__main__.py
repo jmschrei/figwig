@@ -8,8 +8,9 @@ tracks (see `figwig.bam2bw`), `figwig bam2fw` converts them into one figwig
 file (see `figwig.bam2fw`), `figwig bw2fw` and `figwig fw2bw` convert
 between bigWigs and figwig files (see `figwig.bw2fw` and `figwig.fw2bw`),
 `figwig reorder` writes a figwig file in the other order (see
-`figwig.reorder`), and `figwig install-skill` installs figwig's Claude Code
-skill (see `figwig.install_skill`).
+`figwig.reorder`), `figwig merge` writes the tracks of several figwig files
+into one (see `figwig.merge`), and `figwig install-skill` installs figwig's
+Claude Code skill (see `figwig.install_skill`).
 """
 
 import sys
@@ -37,6 +38,8 @@ def _parser():
 		"bigWig files; see figwig fw2bw -h.")
 	commands.add_parser('reorder', help="Write a figwig file again in "
 		"position order or in track order; see figwig reorder -h.")
+	commands.add_parser('merge', help="Write the tracks of several figwig "
+		"files into one, copying their chunks; see figwig merge -h.")
 
 	install = commands.add_parser('install-skill', help="Install figwig's "
 		"Claude Code skill into a skills directory.", description="Copy "
@@ -78,6 +81,10 @@ def main(argv=None):
 	if len(argv) > 0 and argv[0] == 'reorder':
 		from . import reorder
 		reorder.main(argv[1:], prog='figwig reorder')
+		return
+	if len(argv) > 0 and argv[0] == 'merge':
+		from . import merge
+		merge.main(argv[1:], prog='figwig merge')
 		return
 
 	args = _parser().parse_args(argv)

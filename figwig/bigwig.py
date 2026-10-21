@@ -281,8 +281,17 @@ class BigWigReader:
 
 		if (leaves['end_chrom'] != leaves['start_chrom']).any():
 			raise ValueError(error + ": a data block spans two chromosomes.")
-		if (ends < starts).any() or (starts[1:] < starts[:-1]).any() or \
-				(ends[1:] < ends[:-1]).any():
+		if (ends < starts).any():
+			raise ValueError(error + ": a data block ends before it starts.")
+
+		# Some writers lay the blocks of chr1, chr2, ... chr10 out in that order
+		# while the chromosome ids run chr1, chr10, chr2, so the leaves are put
+		# in id order here; the blocks of one chromosome must still be sorted.
+		if (starts[1:] < starts[:-1]).any():
+			order = numpy.argsort(starts, kind='stable')
+			leaves, chroms, starts, ends = leaves[order], chroms[order], \
+				starts[order], ends[order]
+		if (ends[1:] < ends[:-1]).any():
 			raise ValueError(error + ": its data blocks are unsorted.")
 
 		return {'starts': starts, 'ends': ends, 'chroms': chroms,

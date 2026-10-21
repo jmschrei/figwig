@@ -420,8 +420,10 @@ figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8         
 
 `figwig bw2fw` writes bigWigs as the tracks of one figwig file, named after
 their files or by a metadata table whose other columns become the tracks'
-attributes; `figwig fw2bw` writes a figwig file's tracks back as bigWigs
-with such a table; and `figwig bam2fw` takes `figwig bam2bw`'s arguments and
+attributes, or adds them to a file with `--append`; `figwig fw2bw` writes a
+figwig file's tracks back as bigWigs with such a table; `figwig merge`
+copies several files' tracks into one; and `figwig bam2fw` takes `figwig
+bam2bw`'s arguments and
 writes each input file as its own pair of stranded tracks. The
 [converters](https://figwig.readthedocs.io/en/latest/converters.html) page
 has the options.

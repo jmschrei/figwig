@@ -28,6 +28,7 @@ from .bigwig import BigWigReader
 from .bigwig import read_bigwig
 from .figwig import _DEFAULT_GROUPS
 from .figwig import _DEFAULT_TILE
+from .figwig import FigWigReader
 from .figwig import FigWigWriter
 
 # A chromosome is read and written this many bases at a time, as windows of
@@ -43,6 +44,10 @@ def _parser(prog):
 		"track, in the order the tracks take.")
 	parser.add_argument('-o', '--output', required=True, help="The figwig file "
 		"to write.")
+	parser.add_argument('-a', '--append', action='store_true', help="Add the "
+		"bigWigs as tracks to the figwig file at the output, which must exist; "
+		"its chromosomes, tile and level are kept, and -s, -t and -l are "
+		"refused.")
 	parser.add_argument('-m', '--metadata', default=None, help="A tab- or "
 		"comma-separated table with a header and one row per bigWig, matched "
 		"on its first column by the path given here or its base name. A "
@@ -109,8 +114,11 @@ def _shared_chrom_sizes(readers, sizes=None):
 	file leaves out is named in a warning, since its values are dropped."""
 
 	if sizes is not None:
-		from .bam2bw import read_chrom_sizes
-		chrom_sizes = read_chrom_sizes(sizes)
+		if isinstance(sizes, (str, os.PathLike)):
+			from .bam2bw import read_chrom_sizes
+			chrom_sizes = read_chrom_sizes(sizes)
+		else:
+			chrom_sizes = list(dict(sizes).items())
 		lengths = dict(chrom_sizes)
 		dropped = []
 		for reader in readers:
@@ -142,14 +150,21 @@ def _shared_chrom_sizes(readers, sizes=None):
 
 
 def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
-	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False, missing=0.0):
-	"""Write the bigWigs `filenames` as the tracks of `output`."""
+	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False, missing=0.0,
+	append=False):
+	"""Write the bigWigs `filenames` as the tracks of `output`, or add them
+	to it with `append`."""
 
 	readers = [BigWigReader(filename) for filename in filenames]
+	if append:
+		tile = level = None
 
 	def pieces(writer):
+		first = len(writer.tracks) - len(readers)
 		for g, members in enumerate(writer._groups):
-			group = [readers[i] for i in members.tolist()]
+			if g in writer._adopted:
+				continue
+			group = [readers[i - first] for i in members.tolist()]
 			names = [writer.tracks[i]['name'] for i in members.tolist()]
 			for chrom, length in chrom_sizes:
 				# A piece is read as windows of a tile's width, so that the
@@ -171,7 +186,7 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 	# are handed to it without a copy, since nothing here touches them
 	# again.
 	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
-			groups=groups, level=level, n_jobs=n_jobs) as writer, \
+			groups=groups, level=level, n_jobs=n_jobs, append=append) as writer, \
 			ThreadPoolExecutor(1) as reader:
 		writer._copies = False
 		ahead = None
@@ -201,9 +216,21 @@ def main(argv=None, prog='figwig bw2fw'):
 	try:
 		tracks = _tracks_from_table(args.bigwig, args.metadata, args.dtype)
 		readers = [BigWigReader(filename) for filename in args.bigwig]
-		chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
+		if args.append:
+			if args.sizes is not None or args.tile != _DEFAULT_TILE or \
+					args.level != 6:
+				raise ValueError("-s, -t and -l cannot be given with --append; the "
+					"file's chromosomes, tile and level are kept.")
+			if not os.path.isfile(args.output):
+				raise ValueError("{} does not exist, and --append adds to a figwig "
+					"file.".format(args.output))
+			chrom_sizes = _shared_chrom_sizes(readers, FigWigReader(args.output)
+				.chrom_sizes)
+		else:
+			chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
-			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing)
+			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
+			append=args.append)
 	except (ValueError, TypeError) as e:
 		raise SystemExit("{}: {}".format(prog, e))

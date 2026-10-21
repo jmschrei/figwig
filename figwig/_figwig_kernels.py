@@ -583,10 +583,11 @@ def _chunk_code(n_tracks, classes, nnz, mins, maxs, sums, flags):
 @numba.njit(nogil=True, cache=True)
 def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	out, position, offs, vals, nnz, mins, maxs, sums, flags, dbytes, npts,
-	rbytes, stats):
+	rbytes, stats, summary):
 	"""Encode block[:, c0:c0 + width], one tile of a group, as one chunk at
 	`position` of `out`. Returns its kind byte, 0 for a tile whose values
-	are all zero, and where the chunk ends.
+	are all zero, and where the chunk ends. `summary`, a float32 row of one
+	value per track, gets each track's sum over the tile.
 
 	Each track's row is scanned once without a branch for its nonzero bases
 	and changes of value, then for its nonzero bases, which are collected
@@ -628,6 +629,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 			total += nnz[g]
 			collected = False
 
+	for g in range(n_tracks):
+		summary[g] = numpy.float32(sums[g])
 	if total == 0:
 		return 0, position
 
@@ -711,7 +714,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 @numba.njit(nogil=True, cache=True)
 def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	preset, keep_last, classes, allow_matrix, compressed, out, bounds, kinds,
-	stats):
+	stats, tile_sums):
 	"""Encode the tiles of one group on one chromosome into chunks.
 
 	Tile t of this call is tile tiles[t] of the chromosome, the bases
@@ -729,7 +732,8 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	out[bounds[t]:bounds[t + 1]], padded to 8 bytes, with bounds[0] given,
 	and kinds[t] is its kind byte. A tile whose values are all zero takes no
 	bytes. stats[g] accumulates the sum, nonzero bases, minimum, maximum and
-	flags of the encoded values of track g, whose class is classes[g]. With
+	flags of the encoded values of track g, whose class is classes[g], and
+	tile_sums[t, g], float32, is track g's sum over tile t. With
 	`allow_matrix`, a tile may be stored as a matrix chunk; `compressed`
 	says whether the chunks will be deflated.
 
@@ -782,7 +786,7 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 
 		kinds[t], end = _encode_block(buffer, 0, width, classes, allow_matrix,
 			compressed, True, out, position, offs, vals, nnz, mins, maxs, sums,
-			flags, dbytes, npts, rbytes, stats)
+			flags, dbytes, npts, rbytes, stats, tile_sums[t])
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
 
@@ -791,7 +795,7 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 
 @numba.njit(nogil=True, cache=True)
 def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
-	compressed, out, bounds, kinds, stats):
+	compressed, out, bounds, kinds, stats, tile_sums):
 	"""Encode whole tiles that windows cover, straight from their values.
 
 	Tile t is values[items[t], :, columns[t]:columns[t] + tile], where
@@ -821,7 +825,8 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 			return t
 		kinds[t], end = _encode_block(values[items[t]], columns[t], tile,
 			classes, allow_matrix, compressed, False, out, position, offs, vals,
-			nnz, mins, maxs, sums, flags, dbytes, npts, rbytes, stats)
+			nnz, mins, maxs, sums, flags, dbytes, npts, rbytes, stats,
+			tile_sums[t])
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
 
@@ -830,7 +835,7 @@ def _encode_dense_tiles(tile, values, items, columns, classes, allow_matrix,
 
 @numba.njit(nogil=True, cache=True)
 def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
-	classes, allow_matrix, compressed, out, bounds, kinds, stats):
+	classes, allow_matrix, compressed, out, bounds, kinds, stats, tile_sums):
 	"""Encode tiles from their nonzero bases, given as entries.
 
 	The entries of tile t are first[t] to first[t + 1] - 1, sorted by track
@@ -902,6 +907,8 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			delta_bytes += _varint_bytes(p - last)
 			last = p
 
+		for g in range(n_tracks):
+			tile_sums[t, g] = numpy.float32(sums[g])
 		if total == 0:
 			kinds[t] = _ZERO
 			bounds[t + 1] = position

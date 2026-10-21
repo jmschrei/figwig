@@ -207,6 +207,28 @@ over whole chromosomes as a ``SparseEntries`` of chromosome index,
 position, track index and value, in the narrowest type that holds every
 track exactly, which is the read a file in track order is laid out for.
 
+Summaries
+---------
+
+The file keeps each track's sum over every tile, and ``tile_sums`` gives
+them without decoding a chunk:
+
+.. code-block:: python
+
+    sums = fw.tile_sums()                          # (6, tiles over the genome) float32
+    chr1 = fw.tile_sums("atac.+", "chr1")          # (15195,) at 16,384 bases per tile
+    per_mb = chr1[:15168].reshape(-1, 64).sum(-1)  # 1 Mb bins
+
+This is what a bigWig's zoom levels serve: a genome-wide profile at the
+resolution of the tiles, a per-chromosome total, or a coarser binning by
+a reshape, in the time it takes to inflate a few hundred kilobytes.
+Chromosome by chromosome, tile ``k`` holds bases ``[k * tile, (k + 1) *
+tile)`` and a chromosome of length ``L`` has ``ceil(L / tile)`` tiles. A
+NaN in a tile makes its sum NaN, as it makes the track's. The sums are
+kept while every track's take at most 256 MB together, which is 350 tracks
+on hg38 at the default tile; a file of thousands of cells keeps none, and
+``tile_sums`` says so.
+
 Writing
 -------
 
@@ -294,7 +316,38 @@ The writer writes beside the path it was given and moves the file there
 when it closes, so a reader of that path never sees part of a file, a
 writer that raises or is never closed leaves the path as it was, and a
 converter may write over its own input. A writer that is garbage collected
-with values written and no ``close`` warns.
+with values written and no ``close`` warns. Every chunk's CRC-32 goes into
+the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
+reads against it; a compressed chunk's zlib checksum is checked on every
+read either way, so ``verify`` is for uncompressed files, at the cost of a
+pass over the bytes read.
+
+Adding tracks to a file
+-----------------------
+
+.. code-block:: python
+
+    with FigWigWriter("k562.fw", None, [{"name": "h3k27ac", "assay": "ChIP-seq"}],
+            append=True) as fw:
+        for chrom, starts, values in batches:
+            fw.write(chrom, starts, values)
+
+    with FigWigWriter("all.fw", chrom_sizes, None, tile=16384) as fw:
+        fw.add_file("k562.fw")
+        fw.add_file("hepg2.fw")
+
+``append=True`` starts from the tracks of the file at the path, whose
+chunks are copied as they are, and adds the tracks given after them, in
+new groups; the file's chromosomes, tile, level and order are taken, and
+``chrom_sizes``, ``tile``, ``level`` and ``order`` must agree with them or
+be left at None. ``add_file`` adds every track of another file written
+with the same chromosomes, tile, level and order, by copying its chunks,
+with its attributes, dtypes, statistics and summaries; ``figwig merge``
+does that from the command line. Tracks that came from a file cannot be
+written to, and ``write`` with ``tracks=None`` means every track given to
+the writer itself. Appending copies the file's chunks once, so a file that
+grows by a track at a time costs a copy per track; ``add_file`` of several
+files into one new file costs one copy each.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------
@@ -346,8 +399,10 @@ Converting
 the tracks of one figwig file, with a metadata table for their names and
 attributes; ``figwig fw2bw`` writes a figwig file's tracks back as bigWigs,
 with that table; ``figwig bam2fw`` counts reads or fragments as ``figwig
-bam2bw`` does, one pair of tracks per input file; and ``figwig reorder``
-writes a figwig file in the other order. A bigWig's values read from the
+bam2bw`` does, one pair of tracks per input file; ``figwig reorder``
+writes a figwig file in the other order; and ``figwig merge`` writes the
+tracks of several files into one, copying their chunks, as ``figwig bw2fw
+--append`` adds bigWigs to a file. A bigWig's values read from the
 figwig file as ``read_bigwig`` gives them with ``missing=0.0`` and
 ``keep_nan=True``: a base no interval covers is 0, and an interval whose
 value is NaN is NaN; ``bw2fw --missing nan`` keeps the uncovered bases
@@ -378,16 +433,16 @@ a bigWig whose zeros mean something other than its gaps, as a methylation
 track's 0% sites do against its unsequenced sites, or a conservation
 track's unaligned bases, loses that distinction through ``bw2fw`` unless
 ``--missing nan`` is given, which writes the uncovered bases as NaN and the
-track as float32. There are no zoom levels: a summary over a megabase
-decodes every chunk under it, which is 5 times slower than a bigWig's
-zoom records for a genome-wide table of 1 Mb bins and 60 times faster at
-1 kb bins, where a bigWig's zooms do not help; a genome browser needs the
-tracks written back with ``fw2bw -z``. Every value is at most float64, and
-there are no string or categorical tracks. A read from a remote file would
-need the group's index, a few tens of KB for a genome-wide track, before
-its first chunk; the reader does not read over HTTP. The format is
-little-endian, and read and written by this package alone; the layout
-below is complete enough to read it without it.
+track as float32. The tile sums stand in for zoom levels at one
+resolution, the tile: a summary at 1 Mb bins is a reshape of them, and a
+summary finer than a tile decodes the chunks under it, through ``bins``,
+which is 60 times faster than a bigWig's zooms at 1 kb bins; a genome
+browser needs the tracks written back with ``fw2bw -z``. Every value is at
+most float64, and there are no string or categorical tracks. A read from a
+remote file would need the group's index, a few tens of KB for a
+genome-wide track, before its first chunk; the reader does not read over
+HTTP. The format is little-endian, and read and written by this package
+alone; the layout below is complete enough to read it without it.
 
 The layout
 ----------
@@ -407,7 +462,7 @@ The header, 128 bytes:
 field              type  meaning
 =================  ====  ==================================================
 magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
-version            u2    2; a reader refuses any other
+version            u2    3; a reader refuses any other
 flags              u2    bit 0 set for track order
 tile               u4    bases per tile, a power of two from 16 to 65,536
 codec              u2    0 for uncompressed chunks, 1 for zlib streams
@@ -445,9 +500,10 @@ The index starts with a directory of ``n_groups`` u8 offsets, one per
 group's record. In position order a record is ``n_runs`` (u4), then that
 many 32-byte runs of ``first`` tile, ``last`` tile, ``offset`` in the file
 and ``bytes`` (all u8), then ``n_live`` (u4), ``n_bytes`` (u4) and a zlib
-stream of ``n_bytes`` that inflates to ``13 * n_live`` bytes: the live
+stream of ``n_bytes`` that inflates to ``17 * n_live`` bytes: the live
 tiles' numbers (u4 each, ascending), then their kind bytes (u1 each), then
-their compressed sizes (u4 each), then their uncompressed sizes (u4 each).
+their compressed sizes (u4 each), then their uncompressed sizes (u4 each),
+then the CRC-32 of each chunk's bytes as they lie in the file (u4 each).
 Tiles are numbered over the genome in order, each chromosome's tiles after
 the one before's, and a tile not listed holds only zeros. A run holds the
 chunks of tiles ``first`` to ``last``, back to back from ``offset`` for
@@ -458,7 +514,12 @@ a record is ``n_blocks`` (u4) then that many 40-byte blocks of
 ``chrom`` (u4, an index into the chromosome table), ``first`` and
 ``last`` position (u4), ``n`` entries (u4), ``offset`` (u8), compressed
 ``size`` and uncompressed ``raw`` size (u4), ``kind`` (u4, the kind byte)
-and 4 bytes of padding.
+and the block's CRC-32 (u4). Either record ends with the group's summary:
+``n_sum`` (u4), ``n_sum_bytes`` (u4) and a zlib stream of that many bytes
+that inflates to ``n_sum * (4 + 4 * tracks)`` bytes, the numbers of the
+tiles with a nonzero sum (u4 each, ascending) then each of those tiles'
+sums per track of the group (f4 each, tile by tile); a group whose
+summary was not kept has ``n_sum_bytes`` of 0.
 
 A chunk's kind byte holds its kind in bits 0-2: 0 for a tile that holds
 only zeros and has no chunk, 1 dense, 2 sparse, 3 matrix, 4 runs; its
@@ -500,6 +561,7 @@ what                               limit
 chromosome length                  2**32 - 1 bases
 chromosome name                    65,535 bytes of UTF-8
 tiles over the genome              2**26; the writer refuses a tile too small for the genome
+tile sums                          kept while tracks x tiles x 4 bytes is at most 256 MB
 tracks per group                   2**29 / tile: 32,768 at the default tile, 131,072 at 4,096
 nonzero bases per track-order      65,536 per block, any number of blocks
 block

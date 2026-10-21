@@ -440,8 +440,8 @@ def test_same_bytes_whatever_threads_and_calls(tmp_path, ref):
 	write_reference(path, ref, n_jobs=3, calls=5, width=37)
 	one, five = FigWigReader(paths[0]), FigWigReader(path)
 	for g in range(3):
-		kinds, sizes, _, _ = one._group_index(g)
-		kinds_5, sizes_5, _, _ = five._group_index(g)
+		kinds, sizes, _, _, _ = one._group_index(g)
+		kinds_5, sizes_5, _, _, _ = five._group_index(g)
 		numpy.testing.assert_array_equal(kinds, kinds_5)
 		numpy.testing.assert_array_equal(sizes, sizes_5)
 
@@ -650,7 +650,7 @@ def test_chunk_kinds(tmp_path):
 	values[0, 1, 200] = -2               # tile 3: sparse, int8
 	write_figwig(path, {'chr1': 256}, ['a', 'b'], 'chr1', [0], values, tile=64)
 	reader = FigWigReader(path)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	assert [(int(k & 7), int((k >> 3) & 15)) for k in kinds] == [(0, 0),
 		(2, 0), (1, 2), (2, 3)]
 	assert sizes[0] == 0 and (sizes[1:] > 0).all() and (raws[1:] > 0).all()
@@ -662,7 +662,7 @@ def test_chunk_kinds(tmp_path):
 	values[0, :, 128:192] = 70000
 	write_figwig(path, {'chr1': 256}, ['a', 'b'], 'chr1', [0], values, tile=64)
 	reader = FigWigReader(path)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	assert (int(kinds[2] & 7), int((kinds[2] >> 3) & 15)) == (4, 2)
 	assert raws[2] < 64
 	assert sizes[0] == 0 and (sizes[1:] > 0).all() and (raws[1:] > 0).all()
@@ -691,8 +691,9 @@ def test_writer_arguments(tmp_path):
 		FigWigWriter(path, {'chr1': 10}, 'a')
 	with pytest.raises(TypeError, match="name or a dict"):
 		FigWigWriter(path, {'chr1': 10}, [1])
-	with pytest.raises(ValueError, match="at least one track"):
-		FigWigWriter(path, {'chr1': 10}, [])
+	with pytest.raises(ValueError, match="no tracks"):
+		with FigWigWriter(path, {'chr1': 10}, []):
+			pass
 	with pytest.raises(ValueError, match="non-empty string 'name'"):
 		FigWigWriter(path, {'chr1': 10}, [{'dtype': 'uint8'}])
 	with pytest.raises(ValueError, match="named twice"):
@@ -929,7 +930,7 @@ def test_truncated_chunk_raises(tmp_path, fw):
 	"""A file whose header is intact but whose chunks were cut short."""
 
 	reader = FigWigReader(fw)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	live = numpy.flatnonzero(kinds)
 	last = int(offsets[live[-1]] + sizes[live[-1]])
 	with open(fw, 'rb') as handle:
@@ -969,7 +970,7 @@ def test_encode_tiles_layout():
 	classes = numpy.zeros(2, dtype=numpy.int64)
 
 	n = _encode_tiles(tile, tiles, lo, hi, starts, ends, values, True, buffer,
-		False, False, classes, True, False, out, bounds, kinds, stats)
+		False, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 2 and not buffer.any()
 	assert kinds[0] == 1 | (0 << 3) and kinds[1] == 2 | (1 << 3)
 	# The sparse chunk: the entries in all, the bytes of each track's
@@ -1001,7 +1002,7 @@ def test_encode_tiles_varints_and_ones():
 	classes = numpy.zeros(1, dtype=numpy.int64)
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
 		numpy.array([0]), numpy.array([1024]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats)
+		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 2 | (7 << 3)
 	assert out[:8].view(numpy.uint32).tolist() == [4, 5]
 	# The differences 0, 127 and 1 take a byte each, and 895 two.
@@ -1027,7 +1028,7 @@ def test_encode_tiles_runs_and_float64():
 	classes = numpy.zeros(2, dtype=numpy.int64)
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
 		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats)
+		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (6 << 3)
 	# Five changes: the bytes of each track's varints, the varints (0; 10,
 	# 10, 20, 10), padding to 4, five float32 values.
@@ -1040,7 +1041,7 @@ def test_encode_tiles_runs_and_float64():
 	kinds[:] = 0
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
 		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats)
+		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (8 << 3)
 	assert out[20:28].view(numpy.float64).tolist() == [3]
 	assert out[28:36].view(numpy.float64).tolist() == [16777217]
@@ -1050,7 +1051,7 @@ def test_encode_tiles_runs_and_float64():
 	kinds[:] = 0
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
 		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats)
+		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (6 << 3)
 	assert out[24:28].view(numpy.float32).tolist() == [16777216]
 
@@ -1066,7 +1067,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	classes = numpy.zeros(1, dtype=numpy.int64)
 	n = _encode_tiles(tile, numpy.array([0, 1]), numpy.array([0, 0]),
 		numpy.array([1, 1]), numpy.array([0]), numpy.array([24]), values, True,
-		buffer, False, True, classes, True, False, out, bounds, kinds, stats)
+		buffer, False, True, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	# A tile of ones is one run: its change at 0, to 1, as uint8.
 	assert n == 1 and kinds[0] == 4 and buffer[0, :8].sum() == 8
 	assert out[:8].view(numpy.uint32).tolist() == [1, 1]
@@ -1078,7 +1079,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	more = numpy.full((1, 1, 8), 2.0)
 	n = _encode_tiles(tile, numpy.array([1]), numpy.array([0]), numpy.array([1]),
 		numpy.array([24]), numpy.array([32]), more, True, buffer, True, False,
-		classes, True, False, out, bounds, kinds, stats)
+		classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 1 and kinds[0] == 4 and not buffer.any()
 	assert out[:8].view(numpy.uint32).tolist() == [2, 2]
 	assert out[8:14].tolist() == [0, 8, 0, 0, 1, 2]
@@ -1357,7 +1358,7 @@ def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
 	monkeypatch):
 	ref, entries, paths = cells
 	reader = FigWigReader(paths['positions', 120])
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	counts = numpy.bincount(kinds & 7, minlength=5)
 	assert counts[3] > 0
 
@@ -1370,12 +1371,12 @@ def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
 		for chrom, (positions, which, values) in entries.items():
 			writer.write_sparse(chrom, positions, which, values)
 	old = FigWigReader(path)
-	kinds, _, _, _ = old._group_index(0)
+	kinds, _, _, _, _ = old._group_index(0)
 	assert numpy.bincount(kinds & 7, minlength=5)[3] == 0
 	assert os.path.getsize(path) > os.path.getsize(paths['positions', 120])
 	y = reader.read('chr1', [0], 5000, dtype='float64')
 	assert_identical(old.read('chr1', [0], 5000, dtype='float64'), y)
-	kinds, _, _, _ = FigWigReader(paths['positions', 8])._group_index(0)
+	kinds, _, _, _, _ = FigWigReader(paths['positions', 8])._group_index(0)
 	assert numpy.bincount(kinds & 7, minlength=5)[3] == 0
 
 
@@ -1605,7 +1606,7 @@ def test_integers_next_to_floats_stay_exact(tmp_path):
 	reader = FigWigReader(path)
 	assert [t['dtype'] for t in reader.tracks] == ['uint32', 'float32',
 		'float64', 'float64']
-	kinds, _, _, _ = reader._group_index(0)
+	kinds, _, _, _, _ = reader._group_index(0)
 	assert (kinds[0] >> 3) & 15 == 8
 	y = reader.read('chr1', [0], 64, dtype='float64')[0]
 	assert y[0, 3] == 16777217 and y[0, 4] == 3000000001
@@ -1627,7 +1628,7 @@ def test_integers_next_to_floats_stay_exact(tmp_path):
 	values[0, 3, 8] = 0
 	write_figwig(path, {'chr1': 64}, tracks, 'chr1', [0], values, groups=4,
 		tile=64)
-	kinds, _, _, _ = FigWigReader(path)._group_index(0)
+	kinds, _, _, _, _ = FigWigReader(path)._group_index(0)
 	assert (kinds[0] >> 3) & 15 == 6
 
 	with pytest.raises(ValueError, match="beyond float32's range"):
@@ -1669,7 +1670,7 @@ def test_runs_chunks_hold_binned_signal(tmp_path):
 	with FigWigWriter(path, {'chr1': length}, ['a', 'b'], tile=4096) as writer:
 		writer.write('chr1', starts, values, ends=ends)
 	reader = FigWigReader(path)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	assert set((kinds & 7).tolist()) == {4} and (raws < 100).all()
 	assert os.path.getsize(path) < 4000
 
@@ -1702,7 +1703,7 @@ def test_small_chunks_are_stored_raw(tmp_path):
 	values[0, 0, 1::64] = 2
 	write_figwig(path, {'chr1': 64 * 40}, ['a'], 'chr1', [0], values, tile=64)
 	reader = FigWigReader(path)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	stored = (kinds & 128) > 0
 	assert stored.all() and (sizes == raws).all()
 	numpy.testing.assert_array_equal(reader.read('chr1', [0], 64 * 40)[0, 0],
@@ -1730,7 +1731,7 @@ def test_matrix_chunks_in_compressed_files(tmp_path):
 			level=1) as writer:
 		writer.write_sparse('chr1', positions, cells, numpy.ones(200))
 	reader = FigWigReader(path)
-	kinds, sizes, raws, offsets = reader._group_index(0)
+	kinds, sizes, raws, offsets, _ = reader._group_index(0)
 	assert set((kinds[kinds > 0] & 7).tolist()) == {3}
 	assert int(sizes.sum()) < 10000
 	found = reader.read('chr1', [0], 5000, sparse=True)
@@ -1950,7 +1951,7 @@ def test_index_of_empty_groups_is_small(tmp_path):
 	assert os.path.getsize(path) < 64 * 400
 	reader = FigWigReader(path)
 	assert reader.read('chr1', [2 ** 27 - 2], 14).sum() == 640
-	kinds, sizes, raws, offsets = reader._group_index(5)
+	kinds, sizes, raws, offsets, _ = reader._group_index(5)
 	assert sizes.dtype == numpy.uint32 and (kinds > 0).sum() == 1
 	copy = pickle.loads(pickle.dumps(reader))
 	assert all(index is None for index in copy._index)
@@ -1994,9 +1995,183 @@ def test_encode_tiles_stops_before_a_tile_that_might_not_fit():
 		numpy.ones(4, dtype=numpy.int64)
 	n = _encode_tiles(tile, tiles, lo, hi, numpy.array([0]), numpy.array([64]),
 		values, True, buffer, False, False, classes, True, False, out, bounds,
-		kinds, stats)
+		kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 2 and (kinds[:n] > 0).all() and not buffer.any()
 	m = _encode_tiles(tile, tiles[n:], lo[n:], hi[n:], numpy.array([0]),
 		numpy.array([64]), values, True, buffer, False, False, classes, True,
-		False, out, bounds, kinds, stats)
+		False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert m == 2 and stats[0, 1] == 64
+
+
+###
+# Summaries, checksums, appending and merging
+
+
+def test_tile_sums(fw, ref):
+	"""Each track's sum over every tile comes from the file's summaries,
+	without decoding a chunk, and matches the values."""
+
+	reader = FigWigReader(fw)
+	sums = reader.tile_sums()
+	# A NaN in a tile makes its sum NaN, as it makes the track's sum.
+	expected = []
+	for chrom, length in CHROM_SIZES.items():
+		padded = numpy.pad(ref[chrom], ((0, 0), (0, -length % TILE)))
+		expected.append(padded.reshape(5, -1, TILE).sum(-1))
+	expected = numpy.concatenate(expected, axis=1).astype(numpy.float32)
+	assert sums.shape == expected.shape and sums.dtype == numpy.float32
+	numpy.testing.assert_allclose(sums, expected, rtol=1e-6)
+	assert numpy.isnan(sums[2, 777 // TILE]) and numpy.isnan(sums[2]).sum() == 1
+	numpy.testing.assert_allclose(reader.tile_sums('signal', 'chr2'),
+		expected[2, 79:79 + 47], rtol=1e-6)
+	numpy.testing.assert_allclose(reader.tile_sums(['empty', 'atac_plus'],
+		['chrM', 'chr1']), numpy.concatenate([expected[[4, 0], 126:],
+		expected[[4, 0], :79]], axis=1), rtol=1e-6)
+	numpy.testing.assert_allclose(sums.sum(axis=1), reader.stats['sum'],
+		rtol=1e-5)
+	with pytest.raises(ValueError, match="not one of the file's chromosomes"):
+		reader.tile_sums(chroms='chr9')
+
+
+def test_tile_sums_in_track_order(track_fw, fw):
+	numpy.testing.assert_allclose(FigWigReader(track_fw).tile_sums(),
+		FigWigReader(fw).tile_sums(), rtol=1e-6)
+
+
+def test_files_past_the_summary_cap_keep_none(tmp_path, monkeypatch):
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 100)
+	path = str(tmp_path / 'big.fw')
+	write_figwig(path, {'chr1': 64 * 100}, ['a'], 'chr1', [0], numpy.ones((1, 1,
+		6400)), tile=64)
+	reader = FigWigReader(path)
+	assert reader.read('chr1', [0], 10).sum() == 10
+	with pytest.raises(ValueError, match="keeps no summary"):
+		reader.tile_sums()
+
+
+def test_verify_checks_every_chunk(tmp_path):
+	"""A flipped byte in an uncompressed chunk passes an ordinary read and
+	fails one with verify=True; a compressed chunk fails either way."""
+
+	for level in (0, 6):
+		path = str(tmp_path / 'v{}.fw'.format(level))
+		values = numpy.arange(2000.0)[None, None]
+		write_figwig(path, {'chr1': 2000}, ['a'], 'chr1', [0], values, tile=256,
+			level=level)
+		with open(path, 'rb') as handle:
+			data = bytearray(handle.read())
+		data[300] ^= 0x40
+		with open(path, 'wb') as handle:
+			handle.write(bytes(data))
+		with pytest.raises(ValueError, match="checksum|corrupt"):
+			FigWigReader(path, verify=True).read('chr1', [0], 2000)
+		if level == 0:
+			y = FigWigReader(path).read('chr1', [0], 2000)
+			assert not numpy.array_equal(y[0, 0], values[0, 0])
+	reader = FigWigReader(path, verify=True)
+	assert reader.verify
+	copy = pickle.loads(pickle.dumps(reader))
+	assert copy.verify
+
+
+def test_append_adds_tracks_to_a_file(tmp_path, ref):
+	"""append=True starts from the file's tracks, whose chunks are copied,
+	and adds the new ones after them; the old tracks cannot be written."""
+
+	path = str(tmp_path / 'grow.fw')
+	write_reference(path, ref, tile=TILE)
+	before = FigWigReader(path)
+	old_sums = before.tile_sums()
+	with FigWigWriter(path, None, [{'name': 'more', 'assay': 'new'}],
+			append=True, n_jobs=2) as writer:
+		assert [t['name'] for t in writer.tracks][:5] == [t['name'] for t in
+			TRACKS]
+		with pytest.raises(ValueError, match="came from another file"):
+			writer.write('chr1', [0], numpy.ones((1, 1, 10)), tracks='atac_plus')
+		writer.write('chr1', [10], numpy.full((1, 1, 20), 3.0))
+		writer.write('chr2', [0], numpy.full((1, 1, 5), 2.0), tracks='more')
+	after = FigWigReader(path, verify=True)
+	assert [t['name'] for t in after.tracks] == [t['name'] for t in TRACKS] + \
+		['more']
+	assert [t['group'] for t in after.tracks] == [0, 0, 1, 2, 2, 3]
+	assert after.tracks[5]['assay'] == 'new' and after.tracks[5]['dtype'] == \
+		'uint8'
+	assert after.genome == 'hg38' and after.attributes == before.attributes
+	rng = numpy.random.default_rng(9)
+	chroms, starts = random_windows(rng, 50, 300)
+	y = after.read(chroms, starts, 300, dtype='float64')
+	assert_identical(y[:, :5], expected(ref, chroms, starts, 300, list(range(
+		5)), numpy.float64))
+	numpy.testing.assert_array_equal(after.read('chr1', [0], 40, tracks='more')[
+		0], [0] * 10 + [3] * 20 + [0] * 10)
+	for field in before.stats.dtype.names:
+		numpy.testing.assert_array_equal(before.stats[field], after.stats[field][
+			:5])
+	numpy.testing.assert_array_equal(after.tile_sums()[:5], old_sums)
+	assert after.tile_sums('more', 'chr1')[0] == 60
+	entries = after.read_entries(tracks='more')
+	assert len(entries.values) == 25
+
+	with pytest.raises(ValueError, match="must be the file's"):
+		FigWigWriter(path, None, ['x'], append=True, tile=16)
+	with pytest.raises(ValueError, match="must be the file's"):
+		FigWigWriter(path, {'chr1': 10}, ['x'], append=True)
+	with pytest.raises(ValueError, match="named twice|already one of"):
+		FigWigWriter(path, None, ['more'], append=True)
+	with pytest.raises(ValueError, match="no tracks"):
+		with FigWigWriter(str(tmp_path / 'none.fw'), {'chr1': 10}, None):
+			pass
+
+
+def test_append_in_track_order(tmp_path, ref):
+	path = str(tmp_path / 'grow_t.fw')
+	write_reference(path, ref, order='tracks')
+	with FigWigWriter(path, None, ['more'], append=True) as writer:
+		writer.write_sparse('chr2', [5, 2999], 'more', [4, 5])
+	after = FigWigReader(path, verify=True)
+	assert after.order == 'tracks' and len(after.tracks) == 6
+	rng = numpy.random.default_rng(10)
+	chroms, starts = random_windows(rng, 50, 300)
+	assert_identical(after.read(chroms, starts, 300, tracks=list(range(5)),
+		dtype='float64'), expected(ref, chroms, starts, 300, list(range(5)),
+		numpy.float64))
+	y = after.read('chr2', [0], 3001, tracks='more')[0]
+	assert y[5] == 4 and y[2999] == 5 and y.sum() == 9
+
+
+def test_add_file_copies_tracks(tmp_path, ref, cells):
+	"""add_file takes another file's tracks whole, in their groups, and
+	refuses a file written with another tile, level, order or genome."""
+
+	first = str(tmp_path / 'first.fw')
+	write_reference(first, ref)
+	_, entries, paths = cells
+	merged = str(tmp_path / 'merged.fw')
+	with FigWigWriter(merged, CHROM_SIZES, ['own'], tile=TILE) as writer:
+		writer.write('chr1', [0], numpy.ones((1, 1, 100)))
+		writer.add_file(first)
+		with pytest.raises(ValueError, match="already one of the writer's"):
+			writer.add_file(first)
+		with pytest.raises(ValueError, match="was written with tile"):
+			writer.add_file(paths['positions', 120])
+		with pytest.raises(ValueError, match="was written with tile"):
+			writer.add_file(paths['tracks', 1])
+	reader = FigWigReader(merged, verify=True)
+	assert [t['name'] for t in reader.tracks] == ['own'] + [t['name'] for t in
+		TRACKS]
+	assert [t['group'] for t in reader.tracks] == [0, 1, 1, 2, 3, 3]
+	rng = numpy.random.default_rng(11)
+	chroms, starts = random_windows(rng, 50, 300)
+	assert_identical(reader.read(chroms, starts, 300, tracks=list(range(1, 6)),
+		dtype='float64'), expected(ref, chroms, starts, 300, list(range(5)),
+		numpy.float64))
+	assert reader.read('chr1', [0], 100, tracks='own').sum() == 100
+
+	other = str(tmp_path / 'other.fw')
+	write_figwig(other, {'chr1': 100}, ['x'], 'chr1', [0], numpy.ones((1, 1,
+		100)), tile=TILE)
+	with FigWigWriter(str(tmp_path / 'm2.fw'), CHROM_SIZES, None, tile=TILE) \
+			as writer:
+		with pytest.raises(ValueError, match="other chromosomes"):
+			writer.add_file(other)
+		writer.add_file(first)
