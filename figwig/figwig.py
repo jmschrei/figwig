@@ -2017,12 +2017,27 @@ class FigWigReader:
 		kind byte, compressed size, uncompressed size and offset of each
 		tile's chunk; in track order the track's blocks."""
 
-		with self._index_lock:
-			if self._index[g] is None:
-				self._index[g] = self._read_track_index(g) if self.order == \
-					'tracks' else self._read_group_index(g)
+		if self._index[g] is None:
+			index = self._read_track_index(g) if self.order == 'tracks' else \
+				self._read_group_index(g)
+			with self._index_lock:
+				if self._index[g] is None:
+					self._index[g] = index
 
 		return self._index[g]
+
+	def _load_indexes(self, groups, n_threads):
+		"""Read the indexes of these groups that have not been read yet, on
+		up to n_threads threads, since a file of hundreds of groups costs a
+		few milliseconds per group to inflate and lay out."""
+
+		missing = [g for g in groups if self._index[g] is None]
+		if len(missing) > 1 and n_threads > 1:
+			pool = self._pool_for(n_threads)
+			list(pool.map(self._group_index, missing))
+		else:
+			for g in missing:
+				self._group_index(g)
 
 	def _read_group_index(self, g):
 		error = "The index of {} cannot be read".format(self.path)
@@ -2296,9 +2311,15 @@ class FigWigReader:
 			tiles = _window_tiles(self.tile, self._tile_offsets, tids, starts,
 				lengths, width)
 			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
+			self._load_indexes(groups_read, n_threads)
 		else:
-			n_threads = self._threads(n_jobs, len(first_channel) * max(1, n //
-				_BLOCK_ENTRIES))
+			# The tasks come first, since the threads follow their number;
+			# they get their output once it is allocated.
+			self._load_indexes(list(first_channel), n_jobs)
+			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
+				None, 'list' if sparse else 'sum' if summing else 'dense', labels
+				is not None, bins or 1, n_jobs)
+			n_threads = max(1, min(n_jobs, len(tasks)))
 		buffers = n_threads if summing and self.order == 'tracks' and n_threads \
 			> 1 else 0
 
@@ -2347,8 +2368,8 @@ class FigWigReader:
 		mode = 'list' if sparse else 'sum' if summing else 'dense'
 		accumulate = labels is not None
 		if self.order == 'tracks':
-			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
-				out3, mode, accumulate, bins or 1, n_threads)
+			for task in tasks:
+				task.out = out3
 		else:
 			tasks = []
 			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
