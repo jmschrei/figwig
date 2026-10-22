@@ -20,6 +20,7 @@ import pytest
 import pybigtools
 
 import figwig
+import figwig._isal
 import figwig._kernels
 
 from figwig import BigWigReader
@@ -27,6 +28,17 @@ from figwig import read_bigwig
 
 from .writers import write_bigwig
 from .writers import write_raw_bigwig
+
+
+@pytest.fixture(autouse=True, params=['isal', 'zlib'] if
+	figwig._isal._isal_functions() is not None else ['zlib'])
+def default_engine(request, monkeypatch):
+	"""Run every test with the default engine both on ISA-L, where it can be
+	called from numba, and on zlib, as without the isal package."""
+
+	if request.param == 'zlib':
+		monkeypatch.setattr(figwig._isal, '_isal_functions', lambda: None)
+	return request.param
 
 
 def reference(path, chroms, starts, width, missing=0.0):
@@ -91,6 +103,19 @@ def test_read_matches_pybigtools_at_chromosome_edges(dense_bw, batching):
 
 	X = BigWigReader(path).read(names, starts, 1000)
 	assert_identical(X, reference(path, names, starts, 1000))
+
+
+def test_output_may_share_storage_with_starts(dense_bw):
+	path, _ = dense_bw
+	starts = numpy.array([0, 1], dtype=numpy.int64)
+	out = starts.view(numpy.float32)[:2].reshape(2, 1)
+	expected = BigWigReader(path).read('chrM', [0], 1, missing=7.0)
+	with pytest.warns(UserWarning, match='chromosomes not in'):
+		result = BigWigReader(path).read(['chrM', 'absent'], starts, 1,
+			out=out, missing=7.0)
+	assert result is out
+	assert_identical(result[:1], expected)
+	assert result[1, 0] == 7.0
 
 
 def test_past_chromosome_end_is_nan(dense_bw):
@@ -462,11 +487,19 @@ def test_read_bigwig_several_files(dense_bw, sparse_bw, deep_bw, container,
 		read_bigwig(files[0], names, starts, 300)[:, None])
 
 
+@pytest.mark.parametrize('loaded', [True, False])
 def test_read_bigwig_several_files_share_a_pool(dense_bw, sparse_bw,
-	monkeypatch):
+	monkeypatch, loaded):
 	"""Each file below is one batch, so read one at a time no read could use
-	more than one thread; read together, their batches share one pool."""
+	more than one thread; read together, their batches share one pool. A
+	decoder whose library did not load, as on Windows, runs no batch first."""
 
+	if not loaded:
+		monkeypatch.setattr(figwig._isal, '_isal_functions', lambda: None)
+		monkeypatch.setattr(figwig.bigwig, '_zlib_uncompress', lambda: None)
+
+	# Compiled first, so that no batch runs before the pool to compile them.
+	read_bigwig(dense_bw[0], 'chr1', [0], 100, n_jobs=1)
 	sizes = []
 	pool = figwig.bigwig.ThreadPoolExecutor
 
@@ -482,10 +515,10 @@ def test_read_bigwig_several_files_share_a_pool(dense_bw, sparse_bw,
 
 def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 	"""Each kernel is called first on the calling thread when it has not been
-	compiled, the inflater for the first compressed file even when an
-	uncompressed file comes before it. The inflater is called only where
-	zlib's library can be loaded; elsewhere, as on Windows, blocks are
-	inflated by zlib.decompress."""
+	compiled, the default decoder's inflater for the first compressed file
+	even when an uncompressed file comes before it. The inflater is called
+	only where its functions can be loaded; elsewhere, as for zlib on Windows,
+	blocks are inflated by its decompress."""
 
 	sections = [_bedgraph('chr1', s, [(0, 5, 1.0)]) for s in range(0, 9000,
 		100)]
@@ -505,16 +538,18 @@ def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 			calls.setdefault(self.name, threading.current_thread())
 			return self.function(*args)
 
-	for name in ['_read_windows', '_inflate_blocks']:
-		monkeypatch.setattr(figwig.bigwig, name, Uncompiled(name,
-			getattr(figwig.bigwig, name)))
+	monkeypatch.setattr(figwig.bigwig, '_read_windows', Uncompiled(
+		'_read_windows', figwig.bigwig._read_windows))
+	decoder = figwig.bigwig._decoder('auto')
+	monkeypatch.setattr(type(decoder), 'kernel', staticmethod(Uncompiled(
+		'inflate', type(decoder).kernel)))
 
 	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 2)
 	files = [tmp_path / 'False.bw', tmp_path / 'True.bw']
 	X = read_bigwig(files, 'chr1', numpy.arange(0, 9000, 50), 10, n_jobs=4)
 	assert calls['_read_windows'] is threading.main_thread()
-	if figwig._kernels._zlib_uncompress() is not None:
-		assert calls['_inflate_blocks'] is threading.main_thread()
+	if decoder.functions is not None:
+		assert calls['inflate'] is threading.main_thread()
 
 	assert_identical(X[:, 0], X[:, 1])
 

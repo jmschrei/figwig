@@ -38,6 +38,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+isal = ["isal>=1.8"]
+cuda = ["cupy-cuda12x[ctk]>=14,<15", "nvidia-nvcomp-cu12==6.0.0.12"]
 fast = [
     "deflate>=0.9",
 ]

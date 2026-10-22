@@ -31,6 +31,9 @@ _LIBDEFLATE = []
 _ZLIB_NAMES = ('libz.so.1', 'libz.1.dylib', 'libz.dylib', 'zlib1.dll',
 	'zlib.dll')
 
+# The largest finite float32, past which a value cannot be written.
+_FLOAT32_MAX = float(numpy.finfo(numpy.float32).max)
+
 # Where there is no pread, as on Windows, a read seeks the shared file
 # descriptor and then reads from it, and this lock keeps another thread from
 # moving the file position in between.
@@ -191,17 +194,63 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 		source = data[starts[k]:starts[k] + sizes[k]]
 		status = uncompress(buffer[position:].ctypes, length.ctypes,
 			source.ctypes, sizes[k])
-		n = numpy.int64(length[0])
+		position = _place_block(blocks, k, status == 0, position,
+			numpy.int64(length[0]))
 
-		if status != 0:
-			blocks[k, 5] = 2
-		elif n == 0 or n % 4 != 0:
-			blocks[k, 5] = 0
-		else:
-			blocks[k, 0] = position // 4
-			blocks[k, 1] = (position + n) // 4
-			position += n
+	return position
 
+
+@numba.njit(nogil=True, cache=True)
+def _isal_inflate_blocks(init, inflate, state, block_state, crc_flag, data,
+	starts, sizes, buffer, blocks):
+	"""Inflate data blocks as `_inflate_blocks` does, with ISA-L's stateless
+	inflate, without the GIL.
+
+	`init` and `inflate` are ISA-L's isal_inflate_init() and
+	isal_inflate_stateless(), and `state` the bytes of one struct
+	inflate_state, at least 8-byte aligned, of which `block_state` and
+	`crc_flag` are the byte offsets of those fields. The struct starts with
+	next_out (a pointer), avail_out and total_out (32-bit), next_in (a
+	pointer), read_in (64-bit) and avail_in (32-bit). With crc_flag ISAL_ZLIB
+	(3), a block's zlib header and Adler-32 checksum are checked, as zlib
+	checks them; it is inflated when the call returns ISAL_DECOMP_OK (0) with
+	block_state ISAL_BLOCK_FINISH (5).
+	"""
+
+	ints = state.view(numpy.uint32)
+	pointers = state.view(numpy.uint64)
+	position = 0
+	for k in range(starts.shape[0]):
+		if blocks[k, 5] != 1:
+			continue
+
+		init(state.ctypes)
+		ints[crc_flag // 4] = 3
+		pointers[0] = buffer.ctypes.data + position
+		ints[2] = min(buffer.shape[0] - position, 2 ** 32 - 1)
+		pointers[2] = data.ctypes.data + starts[k]
+		ints[8] = sizes[k]
+		status = inflate(state.ctypes)
+		position = _place_block(blocks, k, status == 0 and
+			ints[block_state // 4] == 5, position, numpy.int64(ints[3]))
+
+	return position
+
+
+@numba.njit(nogil=True, cache=True)
+def _place_block(blocks, k, inflated, position, n):
+	"""Record block k's n inflated bytes at `position` of the buffer and
+	return the next position; or mark the block 2, for zlib.decompress, when
+	it was not inflated, or 0 when its bytes are not whole 32-bit words."""
+
+	if not inflated:
+		blocks[k, 5] = 2
+	elif n == 0 or n % 4 != 0:
+		blocks[k, 5] = 0
+	else:
+		blocks[k, 0] = position // 4
+		blocks[k, 1] = (position + n) // 4
+		position += n
 	return position
 
 
@@ -262,36 +311,149 @@ def _deflate_blocks_libdeflate(compress, compressor, data, bounds, out, sizes):
 
 
 @numba.njit(nogil=True, cache=True)
-def _update_summary(spans, values, counts, stats):
-	"""Fold items, in file order, into a bigWig's total summary.
+def _check_sorted_windows(tids, starts, lengths, values):
+	"""Return -1 for valid, sorted, nonoverlapping windows, or the first
+	item needing the writer's full validation and sorting path."""
 
-	Item i covers spans[i] bases with the float32 values[i]. `counts` holds
-	the bases covered and the number of items, `stats` the minimum, maximum,
-	sum and sum of squares, as float64. The sums are added the way libBigWig
-	(pyBigWig's writer) adds them, so that they agree with pyBigWig's to the
-	last bit: the product of a span and a value is rounded to float32 before
-	it is added to the sum, and the sum of squares adds span * value**2 in
-	float64. The minimum and maximum are those of the values. libBigWig
-	compares a value with its maximum only when it is not a new minimum, and
-	starts its maximum at the smallest positive double, so its maximum misses
-	a first value that is the largest, and stays at that double when no
-	value is positive.
-	"""
+	width = values.shape[1]
+	limit = 2**32 - 1 - width
+	for j in range(len(starts)):
+		start, tid = starts[j], tids[j]
+		if start < 0 or start > limit:
+			return j
+		if j > 0 and (tid < tids[j - 1] or
+				(tid == tids[j - 1] and start < starts[j - 1] + width)):
+			return j
+		inside = lengths[j] - start
+		for c in range(width):
+			value = values[j, c]
+			if value > _FLOAT32_MAX or value < -_FLOAT32_MAX:
+				return j
+			if c >= inside and not numpy.isnan(value):
+				return j
+	return -1
 
+
+@numba.njit(nogil=True, cache=True)
+def _check_sorted_intervals(tids, starts, ends, lengths, values):
+	"""Return -1 for valid, sorted, nonoverlapping intervals, or the first
+	item needing the writer's full validation and sorting path."""
+
+	for j in range(len(starts)):
+		start, end, tid = starts[j], ends[j], tids[j]
+		if start < 0 or end <= start or end > lengths[j]:
+			return j
+		if j > 0 and (tid < tids[j - 1] or
+				(tid == tids[j - 1] and start < ends[j - 1])):
+			return j
+		value = values[j]
+		if value > _FLOAT32_MAX or value < -_FLOAT32_MAX:
+			return j
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
+def _copy_kept(tids, starts, ends, values, missing, out_tids, out_starts,
+	out_ends, out_values):
+	"""Copy the items whose value is neither NaN nor `missing`, in order, in
+	one pass. An empty `out_tids` or `out_ends` is not written. Returns the
+	number of items copied."""
+
+	copy_tids = out_tids.shape[0] > 0
+	copy_ends = out_ends.shape[0] > 0
+	n = 0
 	for i in range(values.shape[0]):
 		value = values[i]
-		span = spans[i]
-		as_double = numpy.float64(value)
+		if value != value or value == missing:
+			continue
 
-		if as_double < stats[0]:
-			stats[0] = as_double
-		if as_double > stats[1]:
-			stats[1] = as_double
+		if copy_tids:
+			out_tids[n] = tids[i]
+		out_starts[n] = starts[i]
+		if copy_ends:
+			out_ends[n] = ends[i]
+		out_values[n] = value
+		n += 1
 
-		counts[0] += span
-		counts[1] += 1
-		stats[2] += numpy.float64(numpy.float32(span) * value)
-		stats[3] += numpy.float64(span) * (as_double * as_double)
+	return n
+
+
+@numba.njit(nogil=True, cache=True)
+def _update_summary_blocks(kinds, firsts, n_items, starts, ends, values, counts,
+	stats):
+	"""Fold the items of data blocks, in file order, into a bigWig's total
+	summary. Blocks are laid out as `_encode_blocks` takes them: a bedGraph
+	item spans from its start to its end, and the others one base.
+
+	`counts` holds the bases covered and the number of items, `stats` the
+	minimum, maximum, sum and sum of squares, as float64. The sums are added
+	the way libBigWig (pyBigWig's writer) adds them, so that they agree with
+	pyBigWig's to the last bit: the product of a span and a value is rounded
+	to float32 before it is added to the sum, and the sum of squares adds
+	span * value**2 in float64. The minimum and maximum are those of the
+	values. libBigWig compares a value with its maximum only when it is not
+	a new minimum, and starts its maximum at the smallest positive double, so
+	its maximum misses a first value that is the largest, and stays at that
+	double when no value is positive.
+	"""
+
+	for b in range(firsts.shape[0]):
+		for i in range(firsts[b], firsts[b] + n_items[b]):
+			value = values[i]
+			span = numpy.uint32(ends[i] - starts[i]) if kinds[b] == 1 else \
+				numpy.uint32(1)
+			as_double = numpy.float64(value)
+
+			if as_double < stats[0]:
+				stats[0] = as_double
+			if as_double > stats[1]:
+				stats[1] = as_double
+
+			counts[0] += span
+			counts[1] += 1
+			stats[2] += numpy.float64(numpy.float32(span) * value)
+			stats[3] += numpy.float64(span) * (as_double * as_double)
+
+
+@numba.njit(nogil=True, cache=True)
+def _encode_blocks(kinds, tids, firsts, n_items, offsets, starts, ends, values,
+	words):
+	"""Write data blocks, each one section, as libBigWig lays them out.
+
+	Block b is n_items[b] items of section type kinds[b] on chromosome
+	tids[b], from item firsts[b] of `starts`, `ends` and `values`, which hold
+	every item in file order, `values` as the float32 bits. Its 24-byte
+	section header and items are written to the 32-bit words from
+	offsets[b]. A block ends at the end of its last item. Only bedGraph
+	items read `ends`; fixedStep and varStep items are each one base.
+	"""
+
+	for b in range(firsts.shape[0]):
+		o = offsets[b]
+		f = firsts[b]
+		n = n_items[b]
+		kind = kinds[b]
+
+		words[o] = tids[b]
+		words[o + 1] = starts[f]
+		words[o + 2] = ends[f + n - 1] if kind == 1 else starts[f + n - 1] + 1
+		words[o + 3] = 1 if kind == 3 else 0
+		words[o + 4] = 0 if kind == 1 else 1
+		words[o + 5] = kind | (n << 16)
+
+		o += 6
+		if kind == 3:
+			for i in range(n):
+				words[o + i] = values[f + i]
+		elif kind == 2:
+			for i in range(n):
+				words[o + 2 * i] = starts[f + i]
+				words[o + 2 * i + 1] = values[f + i]
+		else:
+			for i in range(n):
+				words[o + 3 * i] = starts[f + i]
+				words[o + 3 * i + 1] = ends[f + i]
+				words[o + 3 * i + 2] = values[f + i]
 
 
 @numba.njit(nogil=True, cache=True)
@@ -449,6 +611,9 @@ def _zoom_records(size, tids, starts, ends, values, progress, open_ints,
 	sum and sum of squares are kept, including those of the last record of
 	a block, which libBigWig leaves at 0.
 
+	A single chromosome id applies to every item; `ends=None` means that
+	each item covers one base. These avoid expanding constant input arrays.
+
 	The open record carries over between calls, in `open_ints`: whether there
 	is one, its place in its block, chromosome, start, end and number of
 	bases; and in `open_floats`: its minimum, maximum, sum and sum of squares
@@ -485,9 +650,9 @@ def _zoom_records(size, tids, starts, ends, values, progress, open_ints,
 	i = progress[0]
 	full = False
 	while i < values.shape[0]:
-		tid = tids[i]
+		tid = tids[0] if len(tids) == 1 else tids[i]
 		start = starts[i] if progress[1] < 0 else progress[1]
-		end = ends[i]
+		end = starts[i] + 1 if ends is None else ends[i]
 		value = values[i]
 		as_double = numpy.float64(value)
 

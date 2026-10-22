@@ -5,9 +5,12 @@
 ```python
 BigWigReader(path)        # reads the header and chromosome tree now
 reader.chrom_sizes        # {name: length} in the file's order; ENCODE's is chr1, chr10, chr11, ...
-reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0)
-read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0)
+reader.read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, *, engine='auto')
+read_bigwig(bigwigs, chroms, starts, width, out=None, n_jobs=8, missing=0.0, *, engine='auto')
 ```
+
+`engine='auto'` inflates with ISA-L when the `isal` extra is installed and
+with zlib otherwise; `'zlib'` and `'isal'` choose one. The values are the same.
 
 | `bigwigs` given as | Result, float32 |
 |---|---|

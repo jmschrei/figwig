@@ -196,3 +196,16 @@ libBigWig also writes an empty data block where it changes section type,
 which figwig leaves out, and stops making zoom levels at the first level that
 needs as many zoom blocks as the one before it, which can leave a sparse track
 with only its finest level.
+
+Temporary zoom storage
+----------------------
+
+With single-thread compression, zoom summaries may be built while data
+blocks are compressed. Threaded compression builds them by reading the data
+back at close, avoiding competing queues and their memory cost. Completed
+compressed zoom streams are spooled to temporary files, with bounded queues,
+and appended in the same order at close. This keeps memory from growing with
+the total compressed zoom size and preserves output bytes. Temporary storage
+uses Python's default temporary directory (including ``TMPDIR`` where
+supported). Allow space for the compressed zoom streams in addition to the
+output file. Temporary files are closed on success and on worker failures.

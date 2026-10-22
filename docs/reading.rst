@@ -277,3 +277,50 @@ Falling back to another reader
 
 figwig's tests compare it against pybigtools' ``values()``, bit for bit,
 which makes pybigtools a natural fallback for the files figwig refuses.
+
+ISA-L decompression
+-------------------
+
+Data blocks are inflated by ISA-L, Intel's inflate, when the ``isal`` package
+is installed (``pip install figwig[isal]``), and by zlib otherwise. On the
+ENCODE ATAC-seq and DNase-seq bigWigs of the benchmarks, ISA-L reads 1.2 to
+1.5 times faster on 1 to 8 threads. Both give the same values.
+
+figwig calls ISA-L through the functions that python-isal's extension
+exports, from numba and without the GIL, so no compiler is needed. It does so
+on 64-bit platforms, for the ISA-L versions whose internal layout it has been
+checked against (2.31.1, in python-isal 1.8); with another version, the
+default reads with zlib. ``engine='zlib'`` or ``engine='isal'`` chooses one;
+ISA-L that cannot be called from numba goes through python-isal's Python
+API, which is slower than zlib on several threads.
+
+Explicit CUDA reading
+---------------------
+
+Install ``figwig[cuda]`` on a CUDA 12 machine and import ``figwig.cuda``::
+
+    from figwig.cuda import BigWigReader
+
+    reader = BigWigReader('signal.bw')
+    device_values = reader.read('chr1', [100, 1000], 500)
+
+The result is a CuPy float32 array on the current CUDA device. Supplying a
+NumPy ``out`` array uses the existing CPU reader, without loading CUDA or
+allocating device memory. ``workspace`` only limits device reads. The
+``figwig.cuda.read_bigwig`` function also accepts multiple paths or CUDA
+readers and returns the same channel layout as the CPU API. Calls complete
+on the current stream before returning. CPU calls do not load CUDA packages.
+
+Every previously unseen block is decompressed and validated on the CPU,
+including its zlib checksum and bigWig section structure. A bounded 64 MiB
+cache holds hashes and validation metadata, not decompressed data. Only
+identical staged bytes found in this cache may reach nvCOMP. Consequently,
+first reads and repeated reads have different costs. Keep a reader alive
+between calls to reuse its cache; file metadata changes invalidate it.
+
+``workspace`` sets a temporary device-memory limit in bytes. By default it
+is the smaller of 4 GiB and one quarter of free device memory after reserving
+256 MiB, measured after allocating the requested output. Output memory is
+additional. Decompression retries smaller batches when allocations fail,
+and raises ``MemoryError`` if a single block cannot fit. This does not free
+another application's CuPy memory pool or change the requested output type.

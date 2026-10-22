@@ -15,6 +15,7 @@ from itertools import pairwise
 
 import numpy
 
+from ._io import _pread_blocks
 from ._kernels import _inflate_blocks
 from ._kernels import _pread
 from ._kernels import _pread_into
@@ -300,7 +301,7 @@ class BigWigReader:
 
 	def read(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, width: int, out: numpy.ndarray | None = None,
-		n_jobs: int = 8, missing: float = 0.0) -> numpy.ndarray:
+		n_jobs: int = 8, missing: float = 0.0, *, engine: str = 'auto') -> numpy.ndarray:
 		"""Read the per-base values of many windows of one width.
 
 		Window j covers [starts[j], starts[j] + width) on chroms[j], and its
@@ -345,6 +346,13 @@ class BigWigReader:
 			pyBigWig's `values()` does. Default is 0.0.
 
 
+		engine: str, optional
+			What inflates the data blocks: 'isal', ISA-L, which needs the
+			isal package, in figwig's `isal` extra; 'zlib'; or 'auto', ISA-L
+			where it can be called without the GIL and zlib otherwise. Each
+			gives the same values. Default is 'auto'.
+
+
 		Returns
 		-------
 		out: numpy.ndarray, shape=(n, width), dtype=float32
@@ -353,7 +361,7 @@ class BigWigReader:
 			end of the chromosome.
 		"""
 
-		return _read([self], True, chroms, starts, width, out, n_jobs, missing)
+		return _read([self], True, chroms, starts, width, out, n_jobs, missing, engine)
 
 	def _warn_absent(self, windows, missing, stacklevel):
 		"""Warn about windows on chromosomes the file does not have.
@@ -383,7 +391,7 @@ class BigWigReader:
 			list(self.chrom_sizes)[:3])),
 			stacklevel=stacklevel + 1)
 
-	def _read_blocks(self, fd, leaves, index, uncompress=None):
+	def _read_blocks(self, fd, leaves, index, decoder):
 		"""Read and decompress data blocks into one array of 32-bit words.
 
 		Returns the words and a (len(leaves), 6) array of each block's first
@@ -391,15 +399,12 @@ class BigWigReader:
 		it was read or 0 if it could not be.
 
 		The compressed blocks are read with one positional read per run of
-		adjacent blocks, into one array. `uncompress`, the result of
-		`_zlib_uncompress()`, inflates them without the GIL. The blocks it
-		leaves, and every block when it is None or the file is not
-		compressed, are inflated with zlib.decompress, with the same result.
+		adjacent blocks, into one array, and `decoder` inflates them without
+		the GIL. The blocks it leaves are inflated by its `decompress`, with
+		the same result. `decoder` is None for a file that is not compressed.
 		"""
 
 		offsets, sizes = index['offsets'][leaves], index['sizes'][leaves]
-		breaks = numpy.flatnonzero(offsets[1:] != offsets[:-1] + sizes[:-1]) + 1
-		breaks = [0] + breaks.tolist() + [len(leaves)] if len(leaves) > 0 else []
 
 		# Blocks in a run are adjacent in the file, so each run is read to
 		# the positions its blocks have when they are packed end to end. A
@@ -407,32 +412,35 @@ class BigWigReader:
 		ends = numpy.cumsum(sizes)
 		starts = ends - sizes
 		data = numpy.empty(int(sizes.sum()), dtype=numpy.uint8)
-		read = numpy.ones(len(leaves), dtype=numpy.int64)
-		for r0, r1 in pairwise(breaks):
-			position, end = int(starts[r0]), int(ends[r1 - 1])
-			got = _pread_into(fd, data[position:end], int(offsets[r0]))
-			read[r0:r1][ends[r0:r1] > position + got] = 0
+		if decoder is not None and decoder.batched_reads:
+			read = _pread_blocks(fd, data, starts, ends, offsets)
+		else:
+			breaks = numpy.flatnonzero(offsets[1:] != offsets[:-1] + sizes[:-1]) + 1
+			breaks = [0] + breaks.tolist() + [len(leaves)] if len(leaves) else []
+			read = numpy.ones(len(leaves), dtype=numpy.int64)
+			for r0, r1 in pairwise(breaks):
+				position, end = int(starts[r0]), int(ends[r1 - 1])
+				got = _pread_into(fd, data[position:end], int(offsets[r0]))
+				read[r0:r1][ends[r0:r1] > position + got] = 0
 
 		zeros = numpy.zeros(len(leaves), dtype=numpy.int64)
 		blocks = numpy.stack([zeros, zeros, index['chroms'][leaves],
 			index['bases'][leaves, 0], index['bases'][leaves, 1], read], axis=1)
 
-		used, buffer = 0, numpy.empty(0, dtype=numpy.uint8)
-		if uncompress is not None and self._buffer_size > 0:
-			function, ulong = uncompress
+		used = None
+		if decoder is not None:
 			buffer = numpy.empty(len(leaves) * min(self._buffer_size,
 				_MAX_BLOCK_BYTES), dtype=numpy.uint8)
-			used = _inflate_blocks(function, data, starts, sizes, buffer, blocks,
-				numpy.zeros(1, dtype=ulong))
-		else:
+			used = decoder.inflate(data, starts, sizes, buffer, blocks)
+		if used is None:
+			used, buffer = 0, numpy.empty(0, dtype=numpy.uint8)
 			blocks[:, 5] *= 2
 
 		parts, position = [], used
 		for k in numpy.flatnonzero(blocks[:, 5] == 2).tolist():
 			raw = data[starts[k]:ends[k]]
 			try:
-				block = zlib.decompress(raw) if self._buffer_size > 0 else \
-					raw.tobytes()
+				block = raw.tobytes() if decoder is None else decoder.decompress(raw)
 			except zlib.error:
 				block = b''
 
@@ -567,7 +575,7 @@ class _Read:
 	is no end past which their bases would be NaN.
 	"""
 
-	def __init__(self, bigwig, windows, out, signal, missing):
+	def __init__(self, bigwig, windows, out, signal, missing, decoder):
 		self.bigwig, self.windows = bigwig, windows
 		self.out, self.signal, self.missing = out, signal, missing
 
@@ -608,8 +616,7 @@ class _Read:
 			prepend=-1)), n).tolist()
 		self.n_batches = len(self.bounds) - 1
 		self.failed = numpy.zeros(n, dtype=numpy.bool_)
-		self.uncompress = _zlib_uncompress() if bigwig._buffer_size > 0 else \
-			None
+		self.decoder = decoder if bigwig._buffer_size > 0 else None
 		self.fd = None
 
 	def open(self):
@@ -628,7 +635,7 @@ class _Read:
 		w0, w1 = self.bounds[k], self.bounds[k + 1]
 		b0, b1 = int(self.rows[w0, 0]), int(self.rows[w0:w1, 1].max())
 		words, blocks = self.bigwig._read_blocks(self.fd, self.needed[b0:b1],
-			self.index, self.uncompress)
+			self.index, self.decoder)
 		local = self.rows[w0:w1].copy()
 		local[:, :2] -= b0
 		_read_windows(words, blocks, local, self.out, self.signal,
@@ -645,7 +652,8 @@ class _Read:
 				self.windows.describe(j)))
 
 
-def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
+def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing, engine,
+	stacklevel=3):
 	"""Read windows from one or more open bigWigs into one array.
 
 	With `single`, `bigwigs` holds one BigWigReader and the output has shape
@@ -655,6 +663,7 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
 	and the warnings it raises name the line that called them.
 	"""
 
+	decoder = _decoder(engine)
 	n_jobs = _check_n_jobs(n_jobs)
 	missing = _check_missing(missing)
 	windows = _Windows(chroms, starts, width)
@@ -676,12 +685,50 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
 
 	windows.check_range()
 	for bigwig in bigwigs:
-		bigwig._warn_absent(windows, missing, stacklevel=3)
+		bigwig._warn_absent(windows, missing, stacklevel=stacklevel)
 
 	out3 = out.reshape(n, 1, width) if single else out
-	_run([_Read(bigwig, windows, out3, i, missing) for i, bigwig in
+	_run([_Read(bigwig, windows, out3, i, missing, decoder) for i, bigwig in
 		enumerate(bigwigs)], n_jobs)
 	return out
+
+
+class _ZlibDecoder:
+	"""Inflates data blocks with zlib's uncompress(), without the GIL, where
+	its library loads. Blocks it cannot inflate, and every block where it
+	does not load, go to zlib.decompress."""
+
+	batched_reads = False
+	kernel = staticmethod(_inflate_blocks)
+	decompress = staticmethod(zlib.decompress)
+
+	def __init__(self):
+		self.functions = _zlib_uncompress()
+
+	def inflate(self, data, starts, sizes, buffer, blocks):
+		"""Inflate blocks into `buffer`, returning the bytes used, or None to
+		leave every block to `decompress`."""
+
+		if self.functions is None:
+			return None
+
+		function, ulong = self.functions
+		return self.kernel(function, data, starts, sizes, buffer, blocks,
+			numpy.zeros(1, dtype=ulong))
+
+
+def _decoder(engine):
+	"""The decoder for `engine`: 'zlib', 'isal', or 'auto', which is ISA-L
+	where it can be called without the GIL, and zlib otherwise."""
+
+	if engine == 'zlib':
+		return _ZlibDecoder()
+	if engine not in ('auto', 'isal'):
+		raise ValueError("engine must be 'auto', 'zlib' or 'isal', not {!r}."
+			.format(engine))
+
+	from ._isal import _isal_decoder
+	return _isal_decoder(required=engine == 'isal') or _ZlibDecoder()
 
 
 def _run(reads, n_jobs):
@@ -699,9 +746,12 @@ def _run(reads, n_jobs):
 	if tasks and not getattr(_read_windows, 'signatures', True):
 		first.append(tasks[0])
 
-	compressed = [task for task in tasks if task[0].uncompress is not None]
-	if compressed and not getattr(_inflate_blocks, 'signatures', True) and \
-			compressed[0] not in first:
+	# A decoder whose library did not load, as zlib's or ISA-L's may not on
+	# Windows, leaves every block to its decompress and is never compiled.
+	compressed = [task for task in tasks if task[0].decoder is not None and
+		task[0].decoder.functions is not None]
+	if compressed and not getattr(compressed[0][0].decoder.kernel, 'signatures',
+			True) and compressed[0] not in first:
 		first.append(compressed[0])
 
 	rest = [task for task in tasks if task not in first]
@@ -729,7 +779,7 @@ def _run(reads, n_jobs):
 def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
 	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
-	missing: float = 0.0) -> numpy.ndarray:
+	missing: float = 0.0, *, engine: str = 'auto') -> numpy.ndarray:
 	"""Read the per-base values of many windows of one width from bigWigs.
 
 	Given one bigWig, this reads the windows as `BigWigReader.read` does, into
@@ -780,6 +830,11 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 		window on a chromosome a file does not have. Default is 0.0.
 
 
+	engine: str, optional
+		What inflates the data blocks: 'isal', 'zlib' or 'auto', as for
+		`BigWigReader.read`. Default is 'auto'.
+
+
 	Returns
 	-------
 	out: numpy.ndarray, dtype=float32, shape=(n, width) or (n, len(bigwigs), width)
@@ -799,4 +854,4 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 
 	files = [bigwig if isinstance(bigwig, BigWigReader) else BigWigReader(
 		bigwig) for bigwig in files]
-	return _read(files, single, chroms, starts, width, out, n_jobs, missing)
+	return _read(files, single, chroms, starts, width, out, n_jobs, missing, engine)

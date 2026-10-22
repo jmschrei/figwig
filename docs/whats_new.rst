@@ -9,10 +9,19 @@ Release History
 Unreleased
 ==========
 
+Reading
+-------
+
+	- ``read`` and ``read_bigwig`` take ``engine``: ``'auto'``, the default, ``'zlib'`` or ``'isal'``. ``'auto'`` inflates data blocks with ISA-L where the ``isal`` package is installed (the new ``isal`` extra), and with zlib otherwise. ISA-L is called through the functions python-isal's extension exports, from a numba kernel without the GIL, as zlib's ``uncompress()`` is, so no compiler is needed; it is used for ISA-L 2.31.1, in python-isal 1.8, on 64-bit platforms. Every engine gives the same values. On the ENCODE ATAC-seq and DNase-seq bigWigs of the benchmarks, reading is 1.2 to 1.5 times faster on 1 to 8 threads.
+
+	- ``figwig.cuda.BigWigReader`` and ``figwig.cuda.read_bigwig`` read windows into CuPy arrays, decompressing data blocks on the GPU with nvCOMP (the new ``cuda`` extra). Every block is first inflated and checked on the CPU, its checksum and sections included, and a bounded cache of what was checked lets the same bytes skip the check when read again. Device memory is bounded by ``workspace``, and a NumPy ``out`` is read on the CPU, without CUDA.
+
 Writing
 -------
 
 	- ``_zoom_records``, the kernel that summarizes items into one zoom level's records, holds the open record in locals and stores it back when it returns, instead of writing it to the level's state arrays for every item. Zoom levels are summarized on different threads at once, and their small state arrays can share a cache line, which makes the kernel many times slower in the processes where the arrays happen to be allocated next to each other. The files written are unchanged. Thanks @YaoxiangLi!
+
+	- Threaded writing lays out, encodes and compresses each batch of blocks and folds it into the summary in a pipeline, so that the calling thread only takes the next batch, and checks sorted input in one compiled pass. Completed zoom blocks are spooled to temporary files rather than kept in memory until the file is closed. Writing is up to 1.5 times faster on 8 threads and needs less memory; the files written are unchanged.
 
 
 Version 0.1.0

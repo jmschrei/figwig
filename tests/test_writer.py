@@ -862,6 +862,97 @@ def test_bad_write(tmp_path, call, error, match):
 			call(writer)
 
 
+@pytest.mark.parametrize('intervals', [False, True])
+@pytest.mark.parametrize('dtype', ['float32', 'float64', 'float16',
+	'longdouble', '>f8', 'int64', 'uint64', 'bool'])
+@pytest.mark.parametrize('layout', ['contiguous', 'strided', 'reversed',
+	'broadcast'])
+def test_fused_validation_matches_original(tmp_path, monkeypatch, intervals,
+	dtype, layout):
+	"""Validation accepts the same numeric layouts and writes the same bytes
+	as the original path, including types left to numpy."""
+
+	starts = numpy.arange(8, dtype=numpy.int64) * 4
+	values = numpy.arange(16).astype(dtype)
+	if layout == 'strided':
+		values = values[::2]
+	elif layout == 'reversed':
+		values = values[7::-1]
+	elif layout == 'broadcast':
+		values = numpy.broadcast_to(values[1], (8,))
+	else:
+		values = values[:8]
+	if not intervals:
+		values = values[:, None]
+	ends = starts + 2 if intervals else None
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+				patch.setattr(figwig.writer, '_check_sorted_intervals',
+					lambda *args: 0)
+			figwig.write_bigwig(tmp_path / (name + '.bw'), {'chr1': 100},
+				'chr1', starts, values, ends=ends, engine='zlib', n_jobs=1)
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
+@pytest.mark.parametrize('dtype', [numpy.float32, numpy.float64])
+@pytest.mark.parametrize('width', [64, 1024, 65537])
+def test_dense_validation_matches_original(tmp_path, monkeypatch, dtype, width):
+	"""Dense windows and their partial last row keep the same bytes through
+	compiled float64 checks and vectorized float32 checks."""
+
+	starts = numpy.arange(4, dtype=numpy.int64) * width
+	values = numpy.random.default_rng(9).normal(size=(4, width)).astype(dtype)
+	values[-1, width // 2:] = numpy.nan
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+			figwig.write_bigwig(tmp_path / (name + '.bw'),
+				{'chr1': 3 * width + width // 2}, 'chr1', starts, values,
+				engine='zlib', n_jobs=1)
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
+@pytest.mark.parametrize('starts, values, ends', [
+	([-1, 2], [[numpy.inf], [1]], None),
+	([0, 2], [[1e39], [numpy.inf]], None),
+	([0, 0], [[1], [numpy.inf]], None),
+	([0, 2], [numpy.inf, 1], [1, 2]),
+	([0, 2], [numpy.inf, 1], [1, 101]),
+	([2, 0], [1, 1], [4, 3]),
+	([0, 2, 4], [[1e39], [1], [numpy.inf]], None),
+])
+def test_fused_validation_preserves_errors_and_state(tmp_path, monkeypatch,
+	starts, values, ends):
+	"""Competing errors retain the original message and precedence, and a
+	rejected call changes neither the file nor the next accepted position."""
+
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 2)
+	messages = []
+	for name in ['new', 'old']:
+		with monkeypatch.context() as patch:
+			if name == 'old':
+				patch.setattr(figwig.writer, '_check_sorted_windows',
+					lambda *args: 0)
+				patch.setattr(figwig.writer, '_check_sorted_intervals',
+					lambda *args: 0)
+			with figwig.BigWigWriter(tmp_path / (name + '.bw'),
+					{'chr1': 100}, engine='zlib', n_jobs=1) as writer:
+				with pytest.raises(ValueError) as error:
+					writer.write('chr1', starts, values, ends=ends)
+				messages.append(str(error.value))
+				writer.write('chr1', [0], [[2]])
+	assert messages[0] == messages[1]
+	assert (tmp_path / 'new.bw').read_bytes() == (
+		tmp_path / 'old.bw').read_bytes()
+
+
 def test_one_numpy_name_is_quoted_as_a_name(tmp_path):
 	"""A single chromosome given as a numpy string, such as one element of an
 	array of names, showed as np.str_('chr1') in error messages."""
@@ -987,6 +1078,7 @@ def test_finest_zoom_level_written_during_pass(tmp_path, monkeypatch):
 	before the levels are finished; on one thread, each is compressed as
 	soon as its records are, so all are written by then."""
 
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', False)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', 1)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', 1)
 	seen = []
@@ -1005,11 +1097,66 @@ def test_finest_zoom_level_written_during_pass(tmp_path, monkeypatch):
 	assert all(n_written == 0 for _, n_written, _ in seen[1:])
 
 
+@pytest.mark.parametrize('kind', ['bases', 'intervals', 'dense'])
+@pytest.mark.parametrize('n_jobs', [1, 3])
+def test_live_zooms_identical_to_read_back(tmp_path, monkeypatch,
+	writer_batching, kind, n_jobs):
+	"""Zoom levels summarized as the data are written give the file that
+	reading the data back gives, whether they are kept or given up."""
+
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', True)
+	calls = calls_of(kind, random_state=2)
+	write_figwig(tmp_path / 'live.bw', CHROMS, calls, zooms=10, n_jobs=n_jobs)
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', False)
+	write_figwig(tmp_path / 'read.bw', CHROMS, calls, zooms=10, n_jobs=n_jobs)
+
+	assert (tmp_path / 'live.bw').read_bytes() == (tmp_path /
+		'read.bw').read_bytes()
+
+
+@pytest.mark.parametrize('n_jobs', [1, 3])
+def test_live_zooms_kept_or_given_up(tmp_path, monkeypatch, n_jobs):
+	"""Single bases keep the zoom levels summarized as they are written, and
+	the data are not read back. Intervals that widen after the first batch
+	change the zoom sizes, so those levels are given up and the data read
+	back, for the same file as when they are never summarized."""
+
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', True)
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 100)
+	reads = []
+	read_back = figwig.writer.BigWigWriter._read_zoom_levels
+
+	def recorded(self, *args):
+		reads.append(1)
+		return read_back(self, *args)
+
+	monkeypatch.setattr(figwig.writer.BigWigWriter, '_read_zoom_levels',
+		recorded)
+
+	write_figwig(tmp_path / 'a.bw', CHROMS, calls_of('bases'), n_jobs=n_jobs)
+	assert reads == []
+
+	# A batch is laid out a whole data block, 2728 intervals, at a time.
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 3000)
+	starts = numpy.arange(0, 3_000_000, 150)
+	ends = starts + numpy.where(numpy.arange(starts.size) < 5000, 2, 100)
+	values = numpy.linspace(-1, 1, starts.size)
+	calls = [('intervals', 'chr1', starts, ends, values)]
+	write_figwig(tmp_path / 'live.bw', CHROMS, calls, n_jobs=n_jobs)
+	assert reads == [1]
+
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', False)
+	write_figwig(tmp_path / 'read.bw', CHROMS, calls, n_jobs=n_jobs)
+	assert (tmp_path / 'live.bw').read_bytes() == (tmp_path /
+		'read.bw').read_bytes()
+
+
 def test_zoom_read_ahead_is_bounded(tmp_path, monkeypatch):
 	"""However many threads there are, blocks are read back for the zoom
 	levels at most _ZOOM_READ_AHEAD chunks past the one the slowest level is
 	on. With summaries slowed down, the reads reach that bound."""
 
+	monkeypatch.setattr(figwig.writer, '_LIVE_ZOOMS', False)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_CHUNK_BLOCKS', 1)
 	monkeypatch.setattr(figwig.writer, '_ZOOM_READ_AHEAD', 2)
 	lock = threading.Lock()
@@ -1215,28 +1362,37 @@ def test_zoom_records_full_block():
 	assert open_ints.tolist() == [1, 1, 0, 102_205, 102_206, 1]
 
 
+def summarize(kinds, n_items, starts, ends, values):
+	"""The counts and stats `_update_summary_blocks` adds up for blocks of
+	the given section types and numbers of items."""
+
+	counts = numpy.zeros(2, dtype=numpy.uint64)
+	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
+	n_items = numpy.array(n_items, dtype=numpy.int64)
+	figwig._kernels._update_summary_blocks(numpy.array(kinds, dtype=numpy.int64),
+		numpy.cumsum(n_items) - n_items, n_items, numpy.array(starts,
+		dtype=numpy.int64), numpy.array(ends, dtype=numpy.int64), numpy.array(
+		values, dtype=numpy.float32), counts, stats)
+	return counts, stats
+
+
 def test_update_summary_by_hand():
 	"""The minimum and maximum are those of the values, the first value
 	included. The sum adds each span times value as float32, so 3 * 0.1
-	rounds to float32 before it is added, as in libBigWig."""
+	rounds to float32 before it is added, as in libBigWig. A bedGraph item
+	spans from its start to its end, and an item of another section type one
+	base, whatever its end."""
 
-	counts = numpy.zeros(2, dtype=numpy.uint64)
-	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
-	figwig._kernels._update_summary(numpy.array([3, 1], dtype=numpy.uint32),
-		numpy.array([0.1, 0.5], dtype=numpy.float32), counts, stats)
-	assert stats[1] == 0.5
-
-	counts = numpy.zeros(2, dtype=numpy.uint64)
-	stats = numpy.array([numpy.inf, -numpy.inf, 0.0, 0.0])
-	figwig._kernels._update_summary(numpy.array([3, 1], dtype=numpy.uint32),
-		numpy.array([0.5, 0.1], dtype=numpy.float32)[::-1].copy(), counts, stats)
-
+	counts, stats = summarize([1], [2], [0, 3], [3, 4], [0.1, 0.5])
 	assert counts.tolist() == [4, 2]
 	assert stats[0] == float(numpy.float32(0.1))
 	assert stats[1] == 0.5
 	assert stats[2] == float(numpy.float32(numpy.float32(3) * numpy.float32(
 		0.1))) + 0.5
 	assert stats[3] == 3 * float(numpy.float32(0.1)) ** 2 + 0.25
+
+	counts, _ = summarize([2, 3], [2, 1], [0, 5, 9], [100, 100, 100], [1, 1, 1])
+	assert counts.tolist() == [3, 3]
 
 
 def test_zoom_reductions():
@@ -1436,3 +1592,73 @@ def test_close(tmp_path):
 	assert writer.chrom_sizes == CHROMS
 	assert figwig.BigWigReader(str(tmp_path / 'a.bw')).read('chr1', [5],
 		2).tolist() == [[2.0, 0.0]]
+
+
+@pytest.mark.parametrize('n_jobs', [1, 3])
+@pytest.mark.parametrize('fail', [False, True])
+def test_zoom_spools_are_closed(tmp_path, monkeypatch, n_jobs, fail):
+	"""Bounded spool queues release files on success and worker exceptions."""
+
+	opened, queued = [], []
+	temporary = figwig.writer.tempfile.TemporaryFile
+	drain = figwig.writer._ZoomLevel.drain
+	compress = figwig.writer._compress_zoom_blocks
+
+	def tracked():
+		file = temporary()
+		opened.append(file)
+		return file
+
+	def counted(self, keep):
+		queued.append(len(self.blocks))
+		return drain(self, keep)
+
+	def compressed(*args):
+		if fail:
+			raise OSError('compression failed')
+		time.sleep(0.001)
+		return compress(*args)
+
+	monkeypatch.setattr(figwig.writer.tempfile, 'TemporaryFile', tracked)
+	monkeypatch.setattr(figwig.writer._ZoomLevel, 'drain', counted)
+	monkeypatch.setattr(figwig.writer, '_compress_zoom_blocks', compressed)
+	monkeypatch.setattr(figwig.writer, '_ZOOM_COMPRESS_BLOCKS', 1)
+	monkeypatch.setattr(figwig.writer, '_BATCH_ITEMS', 5000)
+	starts = numpy.arange(0, 2_000_000, 20)
+	calls = [('bases', 'chr1', starts, numpy.ones(len(starts)))]
+	if fail:
+		with pytest.raises(OSError, match='compression failed'):
+			write_figwig(tmp_path / 'a.bw', CHROMS, calls, n_jobs=n_jobs)
+	else:
+		write_figwig(tmp_path / 'a.bw', CHROMS, calls, n_jobs=n_jobs)
+	assert opened and all(file.closed for file in opened)
+	assert max(queued, default=0) <= figwig.writer._ZOOM_QUEUED_PARTS + 1
+
+
+def test_zoom_pending_records_own_their_memory():
+	zoom = figwig.writer._ZoomLevel(16)
+	ints = numpy.zeros((5000, 4), dtype=numpy.uint32)
+	floats = numpy.zeros((5000, 4), dtype=numpy.float32)
+	zoom._take([(ints, floats)], False)
+	assert zoom.pending_ints.base is None
+	assert zoom.pending_floats.base is None
+	assert len(zoom.pending_ints) < figwig.writer._ZOOM_BLOCK_RECORDS
+
+
+def test_compact_zoom_inputs_match_expanded_inputs(monkeypatch):
+	"""Constant chromosome ids and implicit single-base ends preserve records."""
+
+	monkeypatch.setattr(figwig.writer, '_ZOOM_SCRATCH_RECORDS', 3)
+	starts = numpy.arange(5000, dtype=numpy.int64) * 20
+	values = numpy.random.default_rng(7).normal(size=5000).astype(numpy.float32)
+	tids = numpy.full(len(starts), 2, dtype=numpy.int64)
+	results = []
+	for ids, ends in [(tids, starts + 1), (tids[:1], None)]:
+		zoom = figwig.writer._ZoomLevel(16)
+		ints, floats = zoom.add(ids, starts, ends, values)
+		last_ints, last_floats = zoom.finish()
+		results.append((numpy.concatenate([ints, last_ints]),
+			numpy.concatenate([floats, last_floats])))
+	numpy.testing.assert_array_equal(results[0][0], results[1][0])
+	numpy.testing.assert_array_equal(results[0][1].view('u4'),
+		results[1][1].view('u4'))
