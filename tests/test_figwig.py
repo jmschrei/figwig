@@ -6,6 +6,7 @@ import sys
 import pickle
 import shutil
 import struct
+import zlib
 import subprocess
 
 import numpy
@@ -900,19 +901,28 @@ def test_corrupt_index_runs_raise(tmp_path, fw):
 	offset = int(reader._directory[0])
 	n_runs = struct.unpack_from('<I', data, offset)[0]
 	assert n_runs >= 1
-	runs = numpy.frombuffer(bytes(data[offset + 4:offset + 4 + n_runs *
+	at = offset + 8
+	runs = numpy.frombuffer(bytes(data[at:at + n_runs *
 		figwig.figwig._RUN.itemsize]), dtype=figwig.figwig._RUN).copy()
+	n_bytes = struct.unpack_from('<II', data, at + runs.nbytes)[1]
+	end = at + runs.nbytes + 8 + n_bytes
 
-	def write(runs_, name):
+	def write(runs_, name, recompute=True):
+		# The record's CRC is recomputed, so that the checks on the runs
+		# themselves are what refuses the file.
 		path = str(tmp_path / name)
 		copy = bytearray(data)
-		copy[offset + 4:offset + 4 + runs.nbytes] = runs_.tobytes()
+		copy[at:at + runs.nbytes] = runs_.tobytes()
+		if recompute:
+			struct.pack_into('<I', copy, offset + 4, zlib.crc32(copy[at:end]))
 		with open(path, 'wb') as handle:
 			handle.write(copy)
 		return path
 
 	bad = runs.copy()
 	bad['bytes'][0] += 1
+	with pytest.raises(ValueError, match="does not match its checksum"):
+		FigWigReader(write(bad, 'crc.fw', recompute=False)).read('chr1', [0], 10)
 	with pytest.raises(ValueError, match="do not add up"):
 		FigWigReader(write(bad, 'bytes.fw')).read('chr1', [0], 10)
 
@@ -2640,3 +2650,64 @@ def test_append_merges_attributes(tmp_path, ref):
 		writer.write('chr1', [0], numpy.ones((1, 1, 10)))
 	after = FigWigReader(path).attributes
 	assert after == {**before, 'batch': 2, 'lab': 'x'}
+
+
+def test_window_that_ends_a_large_chunk_keeps_the_next_tile_open(tmp_path):
+	"""A window that completes a tile whose chunk is large (float64 values)
+	and runs into the next tile leaves that tile's values in the open
+	buffer: the encoder, which stops before a tile that might not fit its
+	buffer, must not stop before the tile it only keeps."""
+
+	path = str(tmp_path / 'kept.fw')
+	rng = numpy.random.default_rng(28)
+	n = 3001
+	expected = numpy.zeros(n)
+	calls = [(1239, 1293), (1293, 1318), (1318, 1349), (1349, 1600)]
+	with FigWigWriter(path, {'chr1': n}, [{'name': 'f64', 'dtype': 'float64'}],
+			tile=64, level=6, n_jobs=1) as writer:
+		for start, end in calls:
+			values = (rng.integers(0, 2 ** 40, end - start) + 0.5) * (rng.random(
+				end - start) < 0.5)
+			writer.write('chr1', [start], values[None, None])
+			expected[start:end] = values
+	y = FigWigReader(path, verify=True).read('chr1', [0], n, dtype='float64')
+	numpy.testing.assert_array_equal(y[0, 0], expected)
+
+
+def test_split_tasks_cut_between_tiles_no_window_spans(fw, ref, monkeypatch):
+	"""A read of many windows over few chunks is split by pairs across the
+	threads; a binned read's pieces are cut only at tile boundaries that
+	no window spans, since a window's pairs lie apart in tile order."""
+
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(31)
+	n = 1200
+	starts = rng.integers(0, 100, n)
+	chroms = numpy.array(['chr1'] * n)
+	dense = expected(ref, chroms, starts, 100, list(range(5)), numpy.float64)
+	want = dense.reshape(n, 5, 2, 50).sum(-1)
+	monkeypatch.setattr(figwig.figwig, '_CHUNKS_PER_THREAD', 1)
+	seen = []
+	run = reader._run
+
+	def spy(tasks, n_threads, summed=None, copies=False):
+		seen.append((len(tasks), copies))
+		return run(tasks, n_threads, summed, copies)
+
+	monkeypatch.setattr(reader, '_run', spy)
+	for _ in range(10):
+		y = reader.read(chroms, starts, 100, bins=50, dtype='float64', n_jobs=4)
+		numpy.testing.assert_array_equal(y, want)
+	# Every window spans the one tile boundary, so the pieces are cut
+	# inside windows and sum into copies.
+	assert seen[0][0] >= 4 and all(copies for _, copies in seen)
+
+	# Windows inside the first tile of two chromosomes: the pieces are cut
+	# at the tile boundary between them, which no window spans; no copies.
+	seen.clear()
+	starts = rng.integers(0, 30, n)
+	chroms = numpy.where(numpy.arange(n) % 2 == 0, 'chr1', 'chr2')
+	dense = expected(ref, chroms, starts, 30, list(range(5)), numpy.float64)
+	y = reader.read(chroms, starts, 30, bins=10, dtype='float64', n_jobs=4)
+	numpy.testing.assert_array_equal(y, dense.reshape(n, 5, 3, 10).sum(-1))
+	assert seen[0][0] >= 4 and not seen[0][1]

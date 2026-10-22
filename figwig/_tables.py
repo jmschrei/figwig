@@ -16,6 +16,25 @@ import csv
 import os
 
 
+def _refuse_existing(path, flag, besides=()):
+	"""Raise unless `path` does not exist or is one of `besides`, the paths
+	a command may write over; `flag` names the option that allows it."""
+
+	if os.path.exists(path) and not any(os.path.exists(other) and
+			os.path.samefile(path, other) for other in besides):
+		raise ValueError("{} exists; {} writes over it.".format(path, flag))
+
+
+def _exit(prog, error, **renames):
+	"""The SystemExit a command raises for `error`, with the names of
+	options the user did not type replaced by those they did."""
+
+	message = str(error).replace('n_jobs', '-p')
+	for old, new in renames.items():
+		message = message.replace(old, new)
+	return SystemExit("{}: {}".format(prog, message))
+
+
 def _delimiter(path):
 	return ',' if str(path).endswith('.csv') else '\t'
 

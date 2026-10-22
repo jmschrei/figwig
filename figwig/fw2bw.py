@@ -20,6 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy
 
+from ._tables import _exit
+from ._tables import _refuse_existing
 from ._tables import _write_table
 from .figwig import _temporary_path
 from .figwig import FigWigReader
@@ -105,9 +107,8 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 	chrom_sizes = list(reader.chrom_sizes.items())
 	if not force:
 		for i in ids.tolist():
-			name = os.path.join(directory, _bigwig_name(reader.tracks[i]))
-			if os.path.exists(name):
-				raise ValueError("{} exists; -f writes over it.".format(name))
+			_refuse_existing(os.path.join(directory, _bigwig_name(reader.tracks[
+				i])), '-f')
 
 	by_group = {}
 	for i in ids.tolist():
@@ -208,4 +209,4 @@ def main(argv=None, prog='figwig fw2bw'):
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
 			force=args.force)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))
+		raise _exit(prog, e)

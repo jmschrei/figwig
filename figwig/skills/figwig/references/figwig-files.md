@@ -311,7 +311,8 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it`, `exists; --force writes over it` | `bw2fw`, `fw2bw`, `reorder`, `merge` or `bam2fw` onto an existing output |
 | `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | `nan=` misspelt, or on a dense read |
 | `the table has one column; a table is tab-separated` | a space-separated metadata table |
-| `it is version 1 of the format`, `version 2` | a file written by a figwig before the format's release; write it again |
+| `it is version 1 of the format`, `version 2`, `version 3` | a file written by a figwig before the format's release; write it again |
+| `its tables do not match their checksum`, `The index of ... does not match its checksum` | a damaged table or index record; the file is corrupt |
 | `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB, or written by an earlier figwig |
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
 | `was written with order|tile|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of files with different layouts or chromosome sets; `reorder` one first, or `bw2fw -s` the same sizes |

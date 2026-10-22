@@ -21,7 +21,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 import numpy
 
+from ._tables import _exit
 from ._tables import _match_rows
+from ._tables import _refuse_existing
 from ._tables import _read_table
 from ._tables import _track_name
 from .bigwig import BigWigReader
@@ -234,13 +236,12 @@ def main(argv=None, prog='figwig bw2fw'):
 			chrom_sizes = _shared_chrom_sizes(readers, FigWigReader(args.output)
 				.chrom_sizes)
 		else:
-			if os.path.exists(args.output) and not args.force:
-				raise ValueError("{} exists; --append adds tracks to it, and -f "
-					"writes over it.".format(args.output))
+			if not args.force:
+				_refuse_existing(args.output, "--append adds tracks to it, and -f")
 			chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
 			append=args.append)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))
+		raise _exit(prog, e)

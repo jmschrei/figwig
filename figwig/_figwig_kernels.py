@@ -759,7 +759,11 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	need = n_tracks * width * 8 + 16
 
 	for t in range(n_tiles):
-		if position + need > out.shape[0]:
+		# The last tile under `keep_last` is filled and kept, not encoded,
+		# so it needs no room; returning before it would leave it unfilled
+		# and the caller none the wiser.
+		if position + need > out.shape[0] and not (keep_last and t == n_tiles
+				- 1):
 			return t
 		base = tiles[t] * tile
 		for i in range(lo[t], hi[t]):

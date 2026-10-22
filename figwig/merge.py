@@ -14,6 +14,8 @@ import argparse
 import os
 import sys
 
+from ._tables import _exit
+from ._tables import _refuse_existing
 from .figwig import FigWigReader
 from .figwig import FigWigWriter
 
@@ -54,16 +56,13 @@ def main(argv=None, prog='figwig merge'):
 	for path in args.figwig:
 		if not os.path.isfile(path):
 			raise SystemExit("{}: {} is not a file.".format(prog, path))
-	if os.path.exists(args.output) and not args.force and not any(
-			os.path.samefile(args.output, path) for path in args.figwig):
-		raise SystemExit("{}: {} exists; -f writes over it.".format(prog,
-			args.output))
 
 	try:
+		if not args.force:
+			_refuse_existing(args.output, '-f', besides=args.figwig)
 		_merge(args.figwig, args.output, genome=args.genome,
 			verbose=args.verbose)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')
-			.replace('this writer has', 'the first file has').replace(
-			"the writer lacks", "the first file lacks").replace("the writer has",
-			"the first file has").replace("in the writer", "in the first file")))
+		raise _exit(prog, e, **{'this writer has': 'the first file has',
+			'the writer lacks': 'the first file lacks', 'the writer has':
+			'the first file has', 'in the writer': 'in the first file'})

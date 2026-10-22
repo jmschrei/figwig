@@ -12,6 +12,7 @@ import argparse
 import os
 import sys
 
+from ._tables import _exit
 from .figwig import FigWigReader
 
 
@@ -88,7 +89,7 @@ def main(argv=None, prog='figwig info'):
 			print(line)
 		sys.stdout.flush()
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise _exit(prog, e)
 	except BrokenPipeError:
 		# The reader of the output, such as `head`, has gone; say nothing.
 		os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())

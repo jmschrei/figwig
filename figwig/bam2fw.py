@@ -20,8 +20,10 @@ import os
 
 import numpy
 
+from ._tables import _exit
 from ._tables import _match_rows
 from ._tables import _read_table
+from ._tables import _refuse_existing
 from .figwig import _DEFAULT_TILE
 from .figwig import FigWigWriter
 
@@ -181,15 +183,14 @@ def main(argv=None, prog='figwig bam2fw'):
 			"'figwig[bam2bw]'").format(prog, ', '.join(missing)))
 
 	try:
-		if os.path.exists(args.name + '.fw') and not args.force:
-			raise ValueError("{}.fw exists; --force writes over it.".format(
-				args.name))
+		if not args.force:
+			_refuse_existing(args.name + '.fw', '--force')
 		_check_filenames(args)
 		chrom_sizes = read_chrom_sizes(args.sizes)
 		tracks, groups = _tracks_for_files(args.filename, args.metadata,
 			args.unstranded, args.dtype)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise _exit(prog, e)
 
 	tqdm = _tqdm(args.verbose)
 	if args.verbose:
@@ -226,4 +227,4 @@ def main(argv=None, prog='figwig bam2fw'):
 				_write_counts(writer, group, strands, chrom_sizes, args.scale_factor,
 					read_depth)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise _exit(prog, e)

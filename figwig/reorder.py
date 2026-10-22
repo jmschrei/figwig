@@ -16,6 +16,8 @@ import sys
 
 from .figwig import _DEFAULT_GROUPS
 from .figwig import _DEFAULT_TILE
+from ._tables import _exit
+from ._tables import _refuse_existing
 from .figwig import FigWigReader
 from .figwig import FigWigWriter
 
@@ -92,14 +94,12 @@ def main(argv=None, prog='figwig reorder'):
 	args = _parser(prog).parse_args(argv)
 	if not os.path.isfile(args.figwig):
 		raise SystemExit("{}: {} is not a file.".format(prog, args.figwig))
-	if os.path.exists(args.output) and not args.force and not os.path.samefile(
-			args.figwig, args.output):
-		raise SystemExit("{}: {} exists; -f writes over it.".format(prog,
-			args.output))
 
 	try:
+		if not args.force:
+			_refuse_existing(args.output, '-f', besides=[args.figwig])
 		_reorder(args.figwig, args.output, args.order, tile=args.tile,
 			groups=args.groups, level=args.level, n_jobs=args.parallel,
 			verbose=args.verbose)
 	except (ValueError, TypeError, OSError) as e:
-		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))
+		raise _exit(prog, e)

@@ -87,7 +87,7 @@ from .writer import _compress_blocks
 
 
 _FIGWIG_MAGIC = int.from_bytes(b'FIGW', 'little')
-_VERSION = 3
+_VERSION = 4
 _CODEC_NONE, _CODEC_ZLIB = 0, 1
 _FLAG_TRACKS = 1
 _ORDERS = {'positions': 'positions', 'csc': 'positions', 'tracks': 'tracks',
@@ -136,7 +136,7 @@ _CLASSES = {'float32': _FLOAT32, 'float64': _FLOAT64}
 
 _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 	('tile', '<u4'), ('codec', '<u2'), ('level', '<u2'), ('n_chroms', '<u4'),
-	('n_tracks', '<u4'), ('n_groups', '<u4'), ('reserved', '<u4'),
+	('n_tracks', '<u4'), ('n_groups', '<u4'), ('tables_crc', '<u4'),
 	('chroms', '<u8'), ('tracks', '<u8'), ('index', '<u8'), ('data', '<u8'),
 	('metadata', '<u8'), ('metadata_length', '<u8'), ('zooms', '<u8'),
 	('length', '<u8'), ('padding', 'V32')])
@@ -1970,25 +1970,25 @@ class FigWigWriter:
 					track['dtype'] = _infer_dtype(sum_, nonzero, low, high, flags)
 
 			chroms_offset = self._file.tell()
-			for name, length in self._chrom_list:
-				encoded = name.encode()
-				self._file.write(struct.pack('<H', len(encoded)) + encoded +
-					struct.pack('<Q', length))
+			chrom_table = b''.join(struct.pack('<H', len(name.encode())) +
+				name.encode() + struct.pack('<Q', length) for name, length in
+				self._chrom_list)
 
-			tracks_offset = self._file.tell()
+			tracks_offset = chroms_offset + len(chrom_table)
 			stats = numpy.zeros(len(self.tracks), dtype=_STATS)
 			stats['sum'] = self._stats[:, 0] + self._stats[:, 5]
 			stats['nonzero'] = self._stats[:, 1]
 			stats['min'] = numpy.where(self._stats[:, 1] > 0, self._stats[:, 2], 0)
 			stats['max'] = numpy.where(self._stats[:, 1] > 0, self._stats[:, 3], 0)
-			self._file.write(stats.tobytes())
 
-			metadata_offset = self._file.tell()
+			metadata_offset = tracks_offset + stats.nbytes
 			metadata = _json({'genome': self.genome, 'attributes': self.attributes,
 				'order': self.order, 'tracks': self.tracks}, "the metadata").encode()
-			self._file.write(metadata)
 
-			index_offset = self._file.tell()
+			# Each group's record carries the CRC-32 of its index bytes, and
+			# the header that of the tables and the directory, so that a
+			# reader refuses a damaged table rather than reading by it.
+			index_offset = metadata_offset + len(metadata)
 			directory = numpy.zeros(len(self._groups), dtype='<u8')
 			position = index_offset + directory.nbytes
 			records = []
@@ -1996,7 +1996,8 @@ class FigWigWriter:
 				if self.order == 'tracks':
 					blocks = numpy.concatenate(self._blocks[g]) if self._blocks[g] \
 						else numpy.zeros(0, dtype=_BLOCK)
-					record = struct.pack('<I', len(blocks)) + blocks.tobytes()
+					body = blocks.tobytes()
+					record = struct.pack('<II', len(blocks), zlib.crc32(body)) + body
 				else:
 					runs = numpy.zeros(len(self._runs[g]), dtype=_RUN)
 					for r, run in enumerate(self._runs[g]):
@@ -2006,14 +2007,16 @@ class FigWigWriter:
 					live = live[numpy.argsort(live['tile'], kind='stable')]
 					stream = zlib.compress(b''.join(live[field].tobytes() for field
 						in _LIVE_FIELDS), 6)
-					record = struct.pack('<I', len(runs)) + runs.tobytes() + \
-						struct.pack('<II', len(live), len(stream)) + stream
+					body = runs.tobytes() + struct.pack('<II', len(live), len(stream)) \
+						+ stream
+					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
 				record += self._summary_record(g)
 				directory[g] = position
 				position += len(record)
 				records.append(record)
 
-			self._file.write(directory.tobytes())
+			tables = chrom_table + stats.tobytes() + metadata + directory.tobytes()
+			self._file.write(tables)
 			for record in records:
 				self._file.write(record)
 			length = self._file.tell()
@@ -2028,6 +2031,7 @@ class FigWigWriter:
 			header['n_chroms'] = len(self._chrom_list)
 			header['n_tracks'] = len(self.tracks)
 			header['n_groups'] = len(self._groups)
+			header['tables_crc'] = zlib.crc32(tables)
 			header['chroms'] = chroms_offset
 			header['tracks'] = tracks_offset
 			header['index'] = index_offset
@@ -2238,8 +2242,8 @@ class FigWigReader:
 
 			offsets = [int(header[key]) for key in ('chroms', 'tracks',
 				'metadata', 'index')]
-			if any(not _HEADER.itemsize <= o <= length for o in offsets) or \
-					offsets[0] > offsets[1]:
+			if any(not _HEADER.itemsize <= o <= length for o in offsets) or any(
+					a > b for a, b in zip(offsets[:-1], offsets[1:])):
 				raise ValueError(error + ": a table lies outside the file.")
 
 			n_chroms, n_tracks, n_groups = (int(header[key]) for key in (
@@ -2247,6 +2251,17 @@ class FigWigReader:
 			if n_chroms == 0 or n_tracks == 0 or n_groups == 0:
 				raise ValueError(error + ": it has no chromosomes, tracks or "
 					"groups.")
+			if 8 * n_groups > length - offsets[3]:
+				raise ValueError(error + ": the file ends inside its index.")
+			# The tables and the index's directory are checked against the
+			# header's CRC-32 before anything is taken from them, so a flipped
+			# chromosome length or track record is refused rather than read.
+			tables = _pread(fd, offsets[3] + 8 * n_groups - offsets[0], offsets[0])
+			if len(tables) != offsets[3] + 8 * n_groups - offsets[0]:
+				raise ValueError(error + ": the file ends inside its tables.")
+			if zlib.crc32(tables) != int(header['tables_crc']):
+				raise ValueError(error + ": its tables do not match their "
+					"checksum; the file is corrupt.")
 			order = 'tracks' if int(header['flags']) & _FLAG_TRACKS else 'positions'
 			if order == 'tracks' and n_groups != n_tracks:
 				raise ValueError(error + ": a file in track order needs a group "
@@ -2275,11 +2290,7 @@ class FigWigReader:
 				raise ValueError(error + ": its metadata is not a JSON "
 					"document.") from None
 
-			if 8 * n_groups > length - offsets[3]:
-				raise ValueError(error + ": the file ends inside its index.")
-			directory = _pread(fd, 8 * n_groups, offsets[3])
-			if len(directory) != 8 * n_groups:
-				raise ValueError(error + ": the file ends inside its index.")
+			directory = tables[offsets[3] - offsets[0]:]
 		finally:
 			os.close(fd)
 
@@ -2490,18 +2501,18 @@ class FigWigReader:
 
 		fd = _open_read(self.path)
 		try:
-			raw = _pread(fd, 4, offset)
-			if len(raw) != 4:
+			raw = _pread(fd, 8, offset)
+			if len(raw) != 8:
 				raise ValueError(error + ": the file ends inside it.")
-			n_runs = struct.unpack('<I', raw)[0]
-			if 4 + n_runs * _RUN.itemsize + 8 > room:
+			n_runs, crc = struct.unpack('<II', raw)
+			if 8 + n_runs * _RUN.itemsize + 8 > room:
 				raise ValueError(error + ": the file ends inside it.")
-			raw = _pread(fd, n_runs * _RUN.itemsize + 8, offset + 4)
+			raw = _pread(fd, n_runs * _RUN.itemsize + 8, offset + 8)
 			if len(raw) != n_runs * _RUN.itemsize + 8:
 				raise ValueError(error + ": the file ends inside it.")
 			runs = numpy.frombuffer(raw[:n_runs * _RUN.itemsize], dtype=_RUN)
 			n_live, n_bytes = struct.unpack('<II', raw[n_runs * _RUN.itemsize:])
-			at = offset + 4 + n_runs * _RUN.itemsize + 8
+			at = offset + 8 + n_runs * _RUN.itemsize + 8
 			if n_live > n or n_bytes > self._file_size - at:
 				raise ValueError(error + ": the file ends inside it.")
 			stream = _pread(fd, n_bytes, at)
@@ -2510,6 +2521,9 @@ class FigWigReader:
 		finally:
 			os.close(fd)
 
+		if zlib.crc32(stream, zlib.crc32(raw)) != crc:
+			raise ValueError(error + ": it does not match its checksum; the file "
+				"is corrupt.")
 		raw = _inflate_exact(stream, 17 * n_live, error)
 		tiles = numpy.frombuffer(raw[:4 * n_live], dtype='<u4').astype(numpy.int64)
 		if n_live > 0 and (tiles[-1] >= n or (tiles[1:] <= tiles[:-1]).any()):
@@ -2674,20 +2688,23 @@ class FigWigReader:
 
 		fd = _open_read(self.path)
 		try:
-			raw = _pread(fd, 4, offset)
-			if len(raw) != 4:
+			raw = _pread(fd, 8, offset)
+			if len(raw) != 8:
 				raise ValueError(error + ": the file ends inside it.")
-			n_blocks = struct.unpack('<I', raw)[0]
-			if n_blocks * _BLOCK.itemsize > self._file_size - offset - 4:
+			n_blocks, crc = struct.unpack('<II', raw)
+			if n_blocks * _BLOCK.itemsize > self._file_size - offset - 8:
 				raise ValueError(error + ": the file ends inside it.")
-			raw = _pread(fd, n_blocks * _BLOCK.itemsize, offset + 4)
+			raw = _pread(fd, n_blocks * _BLOCK.itemsize, offset + 8)
 			if len(raw) != n_blocks * _BLOCK.itemsize:
 				raise ValueError(error + ": the file ends inside it.")
 		finally:
 			os.close(fd)
 
+		if zlib.crc32(raw) != crc:
+			raise ValueError(error + ": it does not match its checksum; the file "
+				"is corrupt.")
 		blocks = numpy.frombuffer(raw, dtype=_BLOCK).copy()
-		self._summary_at[t] = self._summary_header(offset + 4 + n_blocks *
+		self._summary_at[t] = self._summary_header(offset + 8 + n_blocks *
 			_BLOCK.itemsize, error)
 		if (blocks['chrom'] >= len(self._lengths)).any() or (blocks['n'] == 0
 				).any() or (blocks['first'] > blocks['last']).any() or (blocks[
@@ -2871,6 +2888,9 @@ class FigWigReader:
 		nan_mode = _NAN_MODES[nan]
 		if nan_mode and bins is None:
 			raise ValueError("nan= applies to sums: give bins too.")
+		if nan_mode and labels is not None:
+			raise ValueError("nan= cannot be given with labels, whose sums run "
+				"over tracks.")
 		ids, single = self._select(tracks)
 		windows = _Windows(chroms, starts, width)
 		n, width = windows.n, windows.width
@@ -3661,10 +3681,21 @@ class _Task:
 		cuts = numpy.linspace(0, n, parts + 1).astype(numpy.int64)
 		cut_inside = False
 		if by_window:
-			rows = self.pair_rows
-			windows = numpy.flatnonzero(numpy.diff(rows) != 0) + 1
-			if len(windows) + 1 >= parts:
-				cuts[1:-1] = windows[numpy.searchsorted(windows, cuts[1:-1])]
+			# The pairs lie in tile order, so a window that spans two tiles
+			# has pairs apart; a cut is safe only at a tile boundary that no
+			# window spans.
+			# Consecutive pairs lie on one tile while their chunk and base
+			# agree (two chromosomes' first tiles share a base).
+			change = (numpy.diff(self.pair_chunks) != 0) | (numpy.diff(
+				self.pair_bases) != 0)
+			inverse = numpy.concatenate([[0], numpy.cumsum(change)])
+			spans = _continuing_windows(self.pair_rows, inverse, int(inverse[-1])
+				+ 1 if n else 0)
+			firsts = numpy.flatnonzero(change) + 1
+			safe = firsts[~spans[inverse[firsts] - 1]]
+			if len(safe) + 1 >= parts:
+				cuts[1:-1] = safe[numpy.minimum(numpy.searchsorted(safe,
+					cuts[1:-1]), len(safe) - 1)]
 				cuts = numpy.unique(cuts)
 			else:
 				cut_inside = parts > 1

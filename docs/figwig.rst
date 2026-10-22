@@ -368,8 +368,10 @@ converter may write over its own input. A writer that is garbage collected
 with values written and no ``close`` warns. Every chunk's CRC-32 goes into
 the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
 reads against it; a compressed chunk's zlib checksum is checked on every
-read either way, as is the CRC-32 of a chunk a compressed file stores as it
-is, so ``verify`` is for uncompressed files, at the cost of a
+read either way, as are the CRC-32 of a chunk a compressed file stores as
+it is, of the tables and directory (in the header) at open and of each
+group's index record when it is read, so ``verify`` is for uncompressed
+files, at the cost of a
 pass over the bytes read, and for the rare damage zlib's Adler-32 misses:
 of 2,715 single-bit flips in one compressed chunk, 2,714 were refused and
 one read as four wrong bases, which ``verify`` caught.
@@ -525,7 +527,7 @@ The header, 128 bytes:
 field              type  meaning
 =================  ====  ==================================================
 magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
-version            u2    3; a reader refuses any other
+version            u2    4; a reader refuses any other
 flags              u2    bit 0 set for track order
 tile               u4    bases per tile, a power of two from 16 to 65,536
 codec              u2    0 for uncompressed chunks, 1 for zlib streams
@@ -533,7 +535,7 @@ level              u2    the compression level the chunks were written at
 n_chroms           u4    chromosomes in the chromosome table
 n_tracks           u4    tracks
 n_groups           u4    groups, which is n_tracks in track order
-reserved           u4    0
+tables_crc         u4    CRC-32 of the bytes from ``chroms`` to the end of the index's directory
 chroms             u8    offset of the chromosome table
 tracks             u8    offset of the statistics table
 index              u8    offset of the index
@@ -560,7 +562,8 @@ records' order as the track order and, within a group, as the order of the
 group's tracks in its chunks.
 
 The index starts with a directory of ``n_groups`` u8 offsets, one per
-group's record. In position order a record is ``n_runs`` (u4), then that
+group's record. In position order a record is ``n_runs`` (u4) and the
+CRC-32 (u4) of the record's bytes up to the summary, then that
 many 32-byte runs of ``first`` tile, ``last`` tile, ``offset`` in the file
 and ``bytes`` (all u8), then ``n_live`` (u4), ``n_bytes`` (u4) and a zlib
 stream of ``n_bytes`` that inflates to ``17 * n_live`` bytes: the live
@@ -573,7 +576,8 @@ chunks of tiles ``first`` to ``last``, back to back from ``offset`` for
 ``bytes`` bytes, so a chunk's offset is its run's plus the compressed
 sizes of the run's earlier tiles. A group written chromosome by chromosome
 has one run; groups written in turn have a run per switch. In track order
-a record is ``n_blocks`` (u4) then that many 40-byte blocks of
+a record is ``n_blocks`` (u4) and the CRC-32 (u4) of the blocks' bytes,
+then that many 40-byte blocks of
 ``chrom`` (u4, an index into the chromosome table), ``first`` and
 ``last`` position (u4), ``n`` entries (u4), ``offset`` (u8), compressed
 ``size`` and uncompressed ``raw`` size (u4), ``kind`` (u4, the kind byte)
