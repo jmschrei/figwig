@@ -1135,7 +1135,7 @@ def test_read_tiles_zero_chunk_writes_zeros():
 		dtype=numpy.int64), numpy.zeros(0, dtype=numpy.uint8), 2,
 		numpy.array([1, -1]), numpy.array([-1]), numpy.array([0]),
 		numpy.array([4]), numpy.array([0]), out, False, numpy.zeros((0, 0)), 1,
-		numpy.zeros(0, dtype=numpy.int64))
+		numpy.zeros(0, dtype=numpy.int64), 0)
 	numpy.testing.assert_array_equal(out[0, 1], 0)
 	numpy.testing.assert_array_equal(out[0, 0], 9)
 
@@ -1235,7 +1235,7 @@ def test_labels_sum_tracks(fw, ref, read_batching):
 		reader.read(chroms, starts, 150, sparse=True, out=numpy.zeros(1))
 
 
-def test_dense_guard(fw, monkeypatch):
+def test_dense_guard(fw, track_fw, monkeypatch):
 	reader = FigWigReader(fw)
 	monkeypatch.setattr(figwig.figwig, '_MAX_DENSE_BYTES', 1000)
 	with pytest.raises(ValueError, match="sparse=True or labels="):
@@ -1244,13 +1244,11 @@ def test_dense_guard(fw, monkeypatch):
 	assert reader.read('chr1', [0], 1000, out=out) is out
 	assert reader.read('chr1', [0], 1000, sparse=True).shape == (1, 5, 1000)
 
-	# A binned read whose bins straddle tiles counts its copies per thread.
-	monkeypatch.setattr(figwig.figwig, '_MAX_DENSE_BYTES', 100000)
-	monkeypatch.setattr(figwig.figwig, '_CHUNKS_PER_THREAD', 1)
-	with pytest.raises(ValueError, match="copies for the threads"):
-		reader.read('chr1', [1], 4992, bins=3, dtype='float64', n_jobs=4)
-	assert reader.read('chr1', [1], 4992, bins=3, dtype='float64', n_jobs=1
-		).shape == (1, 5, 1664)
+	# A summed read in track order counts its copies per thread.
+	monkeypatch.setattr(figwig.figwig, '_MAX_DENSE_BYTES', 1000)
+	with pytest.raises(ValueError, match="the dense output would take"):
+		FigWigReader(track_fw).read('chr1', [1], 4992, bins=3, dtype='float64',
+			n_jobs=4)
 
 
 def test_read_entries(fw, ref):
@@ -1751,7 +1749,7 @@ def test_matrix_chunks_in_compressed_files(tmp_path):
 	assert y[0, 0].sum() == 200
 
 
-def test_bins_sum_each_window(fw, ref):
+def test_bins_sum_each_window(fw, ref, scratch_mode):
 	reader = FigWigReader(fw)
 	rng = numpy.random.default_rng(11)
 	chroms, starts = random_windows(rng, 60, 256)
@@ -1786,10 +1784,11 @@ def test_bins_sum_each_window(fw, ref):
 
 def test_bins_that_straddle_tiles_on_threads(fw, ref, read_batching,
 	monkeypatch):
-	"""A bin that straddles a tile boundary is filled from two tiles, which
-	may lie in two tasks, so the read sums into a copy per thread and the
-	threads give the one-thread result; bins on the tile grid, bins of one
-	base and labels write disjoint cells and sum without copies."""
+	"""A bin that straddles a tile boundary is filled from two tiles, so a
+	binned read's batches are not cut inside a window, and the threads
+	give the one-thread result without a copy of the output per thread;
+	a window longer than a batch may grow is cut, and the read then sums
+	into a copy per thread."""
 
 	reader = FigWigReader(fw)
 	seen = []
@@ -1809,20 +1808,45 @@ def test_bins_that_straddle_tiles_on_threads(fw, ref, read_batching,
 				n_jobs=4)
 			numpy.testing.assert_array_equal(y, dense.reshape(1, 5, -1, bins).sum(
 				-1))
-	assert seen and all(seen)
+	# One window of 78 tiles: cut, and summed into copies, under batches
+	# of one or three chunks; whole, and summed straight, under the default.
+	assert seen and (all(seen) if read_batching[0] < 78 else not any(seen))
 
 	seen.clear()
-	reader.read('chr1', [0], width, bins=32, dtype='float64', n_jobs=4)
-	reader.read('chr1', [1], width, bins=32, dtype='float64', n_jobs=4)
-	reader.read('chr1', [1], width, bins=1, dtype='float64', n_jobs=4)
 	reader.read('chr1', [1, 3], width, labels=[0, 0, 1, 1, 1], dtype='float64',
 		n_jobs=4)
-	assert seen == [False, True, False, False]
+	assert seen == [False]
+	# Windows of 300 bases that straddle many task cuts under small batches.
+	rng = numpy.random.default_rng(18)
+	chroms, starts = random_windows(rng, 200, 300)
+	inside = starts + 300 <= numpy.array([CHROM_SIZES[c] for c in chroms])
+	chroms, starts = chroms[inside], starts[inside]
+	dense = expected(ref, chroms, starts, 300, list(range(5)), numpy.float64)
+	seen.clear()
+	for _ in range(3):
+		y = reader.read(chroms, starts, 300, bins=100, dtype='float64', n_jobs=4)
+		numpy.testing.assert_array_equal(y, dense.reshape(len(starts), 5, 3,
+			100).sum(-1))
+	if read_batching[0] >= 10:
+		assert seen == [False, False, False]
+
+
+@pytest.fixture(params=['scratch', 'no_scratch'])
+def scratch_mode(request, monkeypatch):
+	"""Binned reads decode a chunk into a scratch tile when many pairs
+	fall on it and it fits _SCRATCH_BYTES, and bin each pair's bases
+	straight into its row otherwise: here with the scratch tile as usual
+	and with none, as for a read of thousands of tracks. (Chunks of fewer
+	than _SCRATCH_PAIRS pairs take the direct path either way.)"""
+
+	if request.param == 'no_scratch':
+		monkeypatch.setattr(figwig.figwig, '_SCRATCH_BYTES', 0)
+	return request.param
 
 
 @pytest.mark.parametrize('n_jobs', [1, 4])
 def test_sums_over_intervals_of_any_length(fw, track_fw, ref, read_batching,
-	n_jobs):
+	scratch_mode, n_jobs):
 	"""sums takes intervals that differ in length and gives each track's
 	total over each, in position and in track order, as the dense windows
 	sum to; an empty interval sums to 0, and one past a chromosome's end
@@ -1864,6 +1888,49 @@ def test_sums_over_intervals_of_any_length(fw, track_fw, ref, read_batching,
 			reader.sums('chr1', [10], [9])
 		with pytest.raises(ValueError, match="'chr1', 'chr2', 'chrM'"):
 			reader.sums('chr9', [0], [10])
+
+
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_nan_modes_of_sums(fw, track_fw, ref, scratch_mode, n_jobs):
+	"""nan='skip' leaves NaN bases out of a sum, 'count' gives the bases
+	that are not NaN, and the default makes a sum with a NaN base NaN; in
+	both orders, through sums and through bins."""
+
+	rng = numpy.random.default_rng(16)
+	n = 40
+	names = numpy.array(list(CHROM_SIZES))
+	chroms = names[rng.integers(0, 3, n)]
+	lengths = numpy.array([CHROM_SIZES[c] for c in chroms])
+	starts = (rng.random(n) * lengths).astype(numpy.int64)
+	ends = numpy.minimum(starts + rng.integers(1, 600, n), lengths)
+	dense = [expected(ref, chroms[i:i + 1], starts[i:i + 1], int(ends[i] -
+		starts[i]), list(range(5)), numpy.float64)[0] for i in range(n)]
+	skipped = numpy.array([numpy.nansum(d, axis=-1) for d in dense])
+	valid = numpy.array([(~numpy.isnan(d)).sum(-1) for d in dense])
+	plain = numpy.array([d.sum(-1) for d in dense])
+	assert numpy.isnan(plain).any() and (valid < (ends - starts)[:, None]).any()
+	for path in (fw, track_fw):
+		reader = FigWigReader(path)
+		numpy.testing.assert_array_equal(reader.sums(chroms, starts, ends,
+			dtype='float64', n_jobs=n_jobs), plain)
+		numpy.testing.assert_array_equal(reader.sums(chroms, starts, ends,
+			dtype='float64', n_jobs=n_jobs, nan='skip'), skipped)
+		numpy.testing.assert_array_equal(reader.sums(chroms, starts, ends,
+			dtype='float64', n_jobs=n_jobs, nan='count'), valid)
+		y = reader.read(chroms, starts, 300, bins=100, dtype='float64',
+			n_jobs=n_jobs, nan='count')
+		full = numpy.nan_to_num(expected(ref, chroms, starts, 300, list(range(
+			5)), numpy.float64), nan=-1)
+		window = expected(ref, chroms, starts, 300, list(range(5)), numpy.float64)
+		inside = (starts[:, None] + numpy.arange(300)[None]) < lengths[:, None]
+		counted = (~numpy.isnan(window) & inside[:, None, :]).reshape(n, 5, 3,
+			100).sum(-1)
+		numpy.testing.assert_array_equal(y, counted)
+		del full
+		with pytest.raises(ValueError, match="nan must be"):
+			reader.sums(chroms, starts, ends, nan='ignore')
+		with pytest.raises(ValueError, match="give bins too"):
+			reader.read(chroms, starts, 300, nan='skip')
 
 
 def test_bins_in_track_order(track_fw, fw):
@@ -2500,3 +2567,76 @@ def test_chromosome_mismatch_is_described(tmp_path, ref):
 				"such as 'chrX'; it lacks a chromosome the writer has, such as "
 				"'chrM'; 'chr2' is 3000 bases long in it and 3001 in the writer"):
 			writer.add_file(other)
+
+
+@pytest.mark.parametrize('level', [6, 0])
+def test_batches_encoded_in_several_goes(tmp_path, monkeypatch, level):
+	"""A batch whose chunks outgrow the encoder's buffer is encoded in
+	several goes and joined from the parts: float64 chunks, at eight bytes
+	per value where the buffer holds four, and entries past _BATCH_BYTES.
+	Each part is its own streams, not the front of a buffer the next go
+	writes over."""
+
+	path = str(tmp_path / 'parts.fw')
+	n = 16 * 40
+	y = (numpy.arange(n) + 0.5)[None, None]
+	write_figwig(path, {'chr1': n}, [{'name': 't', 'dtype': 'float64'}], 'chr1',
+		[0], y, tile=16, level=level)
+	reader = FigWigReader(path, verify=True)
+	assert_identical(reader.read('chr1', [0], n), y)
+	numpy.testing.assert_array_equal(reader.read('chr1', [0], n, bins=16)[0, 0],
+		y[0, 0].reshape(-1, 16).sum(-1))
+
+	monkeypatch.setattr(figwig.figwig, '_BATCH_BYTES', 2000)
+	rng = numpy.random.default_rng(15)
+	positions = numpy.sort(rng.choice(20000, 6000, replace=False))
+	values = rng.integers(1, 200, 6000)
+	with FigWigWriter(path, {'chr1': 20000}, ['t'], tile=64, level=level) as \
+			writer:
+		writer.write_sparse('chr1', positions, 't', values)
+	expected_track = numpy.zeros(20000, dtype=numpy.int64)
+	expected_track[positions] = values
+	reader = FigWigReader(path, verify=True)
+	numpy.testing.assert_array_equal(reader.read('chr1', [0], 20000,
+		dtype='int64')[0, 0], expected_track)
+	assert len(reader._runs[0]) >= 1
+
+
+def test_stored_chunks_in_a_compressed_file_are_checked(tmp_path, ref):
+	"""A chunk stored as it is inside a compressed file has no zlib checksum,
+	so its CRC is checked on every read, as the compressed chunks' Adler-32
+	is; an uncompressed file's chunks are checked only with verify=True."""
+
+	path = str(tmp_path / 'stored.fw')
+	rng = numpy.random.default_rng(17)
+	# Random bytes do not deflate, so these chunks are stored as they are.
+	values = rng.integers(0, 256, (1, 1, 4 * TILE)).astype(numpy.float64)
+	write_figwig(path, {'chr1': 4 * TILE}, ['noise'], 'chr1', [0], values,
+		tile=TILE, level=6)
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets, crcs = reader._group_index(0)
+	assert ((kinds & figwig.figwig._STORED) > 0).all()
+	good = reader.read('chr1', [0], 4 * TILE)
+	with open(path, 'r+b') as handle:
+		handle.seek(int(offsets[1]) + 5)
+		byte = handle.read(1)
+		handle.seek(int(offsets[1]) + 5)
+		handle.write(bytes([byte[0] ^ 0x10]))
+	with pytest.raises(ValueError, match="does not match its checksum"):
+		FigWigReader(path).read('chr1', [0], 4 * TILE)
+	with pytest.raises(ValueError, match="does not match its checksum"):
+		FigWigReader(path, verify=True).read('chr1', [0], 4 * TILE)
+	assert_identical(FigWigReader(path).read('chr1', [0], TILE), good[:, :,
+		:TILE])
+
+
+def test_append_merges_attributes(tmp_path, ref):
+	path = str(tmp_path / 'attrs.fw')
+	write_reference(path, ref, tile=TILE)
+	before = FigWigReader(path).attributes
+	assert before
+	with FigWigWriter(path, None, ['more'], append=True, attributes={'batch':
+			2, 'lab': 'x'}) as writer:
+		writer.write('chr1', [0], numpy.ones((1, 1, 10)))
+	after = FigWigReader(path).attributes
+	assert after == {**before, 'batch': 2, 'lab': 'x'}

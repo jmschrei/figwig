@@ -51,10 +51,14 @@ def _describe(reader, count_bytes=False):
 				live += int(index['size'].astype('int64').sum())
 			else:
 				live += int(reader._runs[g]['bytes'].astype('int64').sum())
-		tables = size - int(reader._tables_at)
+		tables = int(reader._file_size) - int(reader._tables_at)
 		lines.append("chunk bytes\t{}".format(live))
 		lines.append("table and index bytes\t{}".format(tables))
-		lines.append("unused bytes\t{}".format(size - 128 - live - tables))
+		lines.append("unused bytes\t{}".format(int(reader._file_size) - 128 - live
+			- tables))
+		if size > reader._file_size:
+			lines.append("bytes past the end\t{}".format(size - int(
+				reader._file_size)))
 	for key, value in reader.attributes.items():
 		lines.append("attribute\t{}\t{}".format(key, value))
 
@@ -82,6 +86,10 @@ def main(argv=None, prog='figwig info'):
 		reader = FigWigReader(args.figwig)
 		for line in _describe(reader, args.bytes):
 			print(line)
-	except (ValueError, TypeError) as e:
+		sys.stdout.flush()
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, e))
-	sys.stdout.flush()
+	except BrokenPipeError:
+		# The reader of the output, such as `head`, has gone; say nothing.
+		os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+		raise SystemExit(0)

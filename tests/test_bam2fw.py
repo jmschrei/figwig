@@ -208,6 +208,12 @@ def test_errors(tmp_path, bam, sizes):
 		bam2fw(tmp_path, [bam], sizes, "-m", str(table))
 	with pytest.raises(SystemExit, match="outside 0 to 255"):
 		bam2fw(tmp_path, [bam], sizes, "--dtype", "uint8", "-sf", "200")
+	with pytest.raises(SystemExit, match="No such file|not a file|cannot"):
+		bam2fw(tmp_path, [bam], str(tmp_path / "none.sizes"))
+	path = bam2fw(tmp_path, [bam], sizes)
+	with pytest.raises(SystemExit, match="exists; --force writes over it"):
+		bam2fw(tmp_path, [bam], sizes)
+	assert bam2fw(tmp_path, [bam], sizes, "--force") == path
 
 
 def test_helpers():

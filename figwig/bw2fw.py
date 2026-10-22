@@ -242,5 +242,5 @@ def main(argv=None, prog='figwig bw2fw'):
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
 			append=args.append)
-	except (ValueError, TypeError) as e:
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

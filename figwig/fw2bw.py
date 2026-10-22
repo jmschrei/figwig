@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy
 
 from ._tables import _write_table
+from .figwig import _temporary_path
 from .figwig import FigWigReader
 from .writer import BigWigWriter
 
@@ -115,14 +116,18 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 	# A group's tracks are read together and their bigWigs written at once,
 	# one track per thread, each writer compressing on its share of the
 	# threads.
-	paths = {}
+	# Each bigWig is written beside its name and moved there once complete,
+	# so that a conversion that fails or is killed leaves no half-written
+	# bigWig under a final name.
+	paths, partials = {}, {}
 	pool = ThreadPoolExecutor(n_jobs) if n_jobs > 1 else None
 	for g, members in by_group.items():
 		writers = {}
 		try:
 			for i in members:
 				paths[i] = os.path.join(directory, _bigwig_name(reader.tracks[i]))
-				writers[i] = BigWigWriter(paths[i], chrom_sizes, zooms=zooms,
+				partials[i] = _temporary_path(paths[i])
+				writers[i] = BigWigWriter(partials[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
 
 			for chrom, length in chrom_sizes:
@@ -145,9 +150,16 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 
 			for writer in writers.values():
 				writer.close()
+			for i in members:
+				os.replace(partials[i], paths[i])
 		except BaseException as error:
 			for writer in writers.values():
 				writer.__exit__(type(error), error, error.__traceback__)
+			for i in members:
+				try:
+					os.remove(partials[i])
+				except OSError:
+					pass
 			raise
 	if pool is not None:
 		pool.shutdown()
@@ -195,5 +207,5 @@ def main(argv=None, prog='figwig fw2bw'):
 		_convert(args.figwig, args.output, ids, zooms=args.zooms, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
 			force=args.force)
-	except (ValueError, TypeError) as e:
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

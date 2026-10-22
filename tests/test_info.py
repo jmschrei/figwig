@@ -68,6 +68,13 @@ def test_unused_bytes_after_an_append(tmp_path, ref):
 	lines = _describe(FigWigReader(path))
 	assert not any(line.startswith('unused bytes') for line in lines)
 
+	# Bytes past the end the header names, as a killed append leaves.
+	with open(path, 'ab') as handle:
+		handle.write(bytes(1000))
+	lines = _describe(FigWigReader(path), count_bytes=True)
+	past = [line for line in lines if line.startswith('bytes past the end')][0]
+	assert past.split('\t')[1] == '1000'
+
 
 def test_command_line(tmp_path, fw, capsys):
 	main(['info', fw])

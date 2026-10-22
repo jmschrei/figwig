@@ -65,8 +65,12 @@ def _match_rows(path, records, header, filenames):
 	for filename in filenames:
 		record = by_key.get(filename, by_key.get(os.path.basename(filename)))
 		if record is None:
-			raise ValueError("{} has no row for {} in its first column, {!r}."
-				.format(path, filename, header[0]))
+			hint = ""
+			if len(header) == 1 and ' ' in header[0]:
+				hint = (" The table has one column; a table is tab-separated, or "
+					"comma-separated with a .csv extension.")
+			raise ValueError("{} has no row for {} in its first column, {!r}.{}"
+				.format(path, filename, header[0], hint))
 		rows.append(record)
 
 	return rows

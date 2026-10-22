@@ -70,3 +70,26 @@ def test_merge_errors(tmp_path, parts):
 		main(['merge', '-o', str(tmp_path / 'o.fw'), first, first])
 	with pytest.raises(SystemExit, match="is not a file"):
 		main(['merge', '-o', str(tmp_path / 'o.fw'), str(tmp_path / 'no.fw')])
+
+
+def test_existing_output_is_refused_without_force(tmp_path):
+	ref = reference_tracks()
+	a, b = str(tmp_path / 'a.fw'), str(tmp_path / 'b.fw')
+	write_reference(a, ref)
+	write_figwig(b, CHROM_SIZES, ['x'], 'chr1', [0], numpy.ones((1, 1, 10)),
+		tile=64)
+	out = str(tmp_path / 'out.fw')
+	main(['merge', '-o', out, a, b])
+	with pytest.raises(SystemExit, match="exists; -f writes over it"):
+		main(['merge', '-o', out, a])
+	assert len(FigWigReader(out).tracks) == 6
+	main(['merge', '-o', out, '-f', a])
+	assert len(FigWigReader(out).tracks) == 5
+	main(['merge', '-o', out, out, b])
+	assert len(FigWigReader(out).tracks) == 6
+
+	other = str(tmp_path / 'l.fw')
+	write_figwig(other, CHROM_SIZES, ['y'], 'chr1', [0], numpy.ones((1, 1, 10)),
+		tile=64, level=1)
+	with pytest.raises(SystemExit, match="level 1 where the first file has"):
+		main(['merge', '-o', str(tmp_path / 'm.fw'), a, other])

@@ -9,7 +9,9 @@ in one call, straight into a float32 numpy array, from one bigWig or from
 several at once, and writes bigWigs from the same windows, from intervals, or
 from per-base counts. Its command, :doc:`figwig bam2bw <bam2bw>`, turns
 SAM/BAM files of reads, or BED/tsv files of fragments, into bigWigs of
-per-base counts. The work runs on threads that run in parallel, because
+per-base counts, and its own :doc:`figwig file <figwig>` holds many tracks
+in one file, read across tracks in one call. The work runs on threads
+that run in parallel, because
 zlib's ``uncompress()`` and ``compress2()``, libdeflate and figwig's numba
 kernels all run without the GIL. It depends only on numpy and numba. A file
 it cannot read with certainty raises a ``ValueError`` that says what it found,

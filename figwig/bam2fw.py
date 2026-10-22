@@ -56,6 +56,8 @@ def _parser(prog):
 	parser.add_argument('-l', '--level', default=1, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"1.")
+	parser.add_argument('--force', action='store_true', help="Write over a "
+		"figwig file at <-n>.fw, which is refused without it.")
 	parser.add_argument('-v', '--verbose', action='store_true')
 	return parser
 
@@ -179,11 +181,14 @@ def main(argv=None, prog='figwig bam2fw'):
 			"'figwig[bam2bw]'").format(prog, ', '.join(missing)))
 
 	try:
+		if os.path.exists(args.name + '.fw') and not args.force:
+			raise ValueError("{}.fw exists; --force writes over it.".format(
+				args.name))
 		_check_filenames(args)
 		chrom_sizes = read_chrom_sizes(args.sizes)
 		tracks, groups = _tracks_for_files(args.filename, args.metadata,
 			args.unstranded, args.dtype)
-	except (ValueError, TypeError) as e:
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, e))
 
 	tqdm = _tqdm(args.verbose)
@@ -220,5 +225,5 @@ def main(argv=None, prog='figwig bam2fw'):
 
 				_write_counts(writer, group, strands, chrom_sizes, args.scale_factor,
 					read_depth)
-	except (ValueError, TypeError) as e:
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, e))

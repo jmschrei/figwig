@@ -204,11 +204,12 @@ window's total per track, which a count loss takes:
 must divide ``width``; the sums are taken without laying the
 window's bases out, from a scratch tile each chunk is decoded into once,
 and bases past the end of a chromosome count as 0. A bin that straddles
-two tiles is summed from both, which may lie on different threads, so a
-read whose bins do not lie on the tile grid sums into a copy of its
-output per thread, which the memory guard counts; its output is
-``width / bins`` times smaller than a dense one. ``bins`` and ``labels``
-can be given together.
+two tiles is summed from both, so a binned read's batches of chunks are
+not cut inside a window, and the threads sum into the one output; a
+window longer than a batch may grow, such as a whole chromosome, is cut,
+and the read then sums into a copy of its output per thread, which the
+memory guard counts. The output is ``width / bins`` times smaller than a
+dense one. ``bins`` and ``labels`` can be given together.
 
 ``sums`` takes intervals that differ in length, such as peaks, genes or
 cCREs, and gives each track's total over each, the way ``bins=width``
@@ -225,9 +226,22 @@ These sums count every base of an interval, so a mean is a sum over the
 interval's length. pyBigWig's ``stats(type="mean")``, pybigtools and
 deepTools average over the bases an interval covers and give NaN for a
 region no interval covers, which a figwig file cannot tell from 0 unless
-it was written with ``--missing nan``, where a bin or interval that holds
-a NaN base sums to NaN; an analysis of count tracks ported from those
-tools gives other means for regions with uncovered bases.
+it was written with ``--missing nan``; there, ``nan`` says what a NaN base
+does: ``'propagate'`` makes the sum NaN, ``'skip'`` leaves the base out,
+and ``'count'`` gives the number of bases that are not NaN, so that the
+mean over covered bases is one over the other:
+
+.. code-block:: python
+
+    covered = fw.sums(chroms, starts, ends, nan="skip") / fw.sums(chroms, starts, ends, nan="count")
+
+``read`` takes ``nan`` with ``bins`` the same way. An analysis of count
+tracks ported from those tools gives other means for regions with
+uncovered bases unless the file was written so. ``sums`` takes any number
+of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
+same as a sparse read's sums; a chunk that fewer than four windows fall
+on, or a read of more tracks than a scratch tile holds (256 MB), is binned
+straight from its entries, and a float32 sum is taken in float64.
 
 ``read_entries(tracks, chroms)`` gives every nonzero base of some tracks
 over whole chromosomes as a ``SparseEntries`` of chromosome index,
@@ -243,7 +257,7 @@ them without decoding a chunk:
 .. code-block:: python
 
     sums = fw.tile_sums()                          # (6, tiles over the genome) float32
-    chr1 = fw.tile_sums("atac.+", "chr1")          # (15195,) at 16,384 bases per tile
+    chr1 = fw.tile_sums("atac.+", "chr1")          # (15196,) at 16,384 bases per tile
     per_mb = chr1[:15168].reshape(-1, 64).sum(-1)  # 1 Mb bins
 
 This is what a bigWig's zoom levels serve: a genome-wide profile at the
@@ -354,7 +368,8 @@ converter may write over its own input. A writer that is garbage collected
 with values written and no ``close`` warns. Every chunk's CRC-32 goes into
 the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
 reads against it; a compressed chunk's zlib checksum is checked on every
-read either way, so ``verify`` is for uncompressed files, at the cost of a
+read either way, as is the CRC-32 of a chunk a compressed file stores as it
+is, so ``verify`` is for uncompressed files, at the cost of a
 pass over the bytes read, and for the rare damage zlib's Adler-32 misses:
 of 2,715 single-bit flips in one compressed chunk, 2,714 were refused and
 one read as four wrong bases, which ``verify`` caught.
@@ -381,7 +396,7 @@ file reads as it did, a reader already open on it keeps reading and is
 told to open it again once the append has closed, a writer that fails
 cuts the file back to what it was, and a process killed part way leaves a
 file whose header still describes the old one. The file's chromosomes,
-tile, level and order are taken, and
+tile, level and order are taken, ``attributes`` adds to the file's, and
 ``chrom_sizes``, ``tile``, ``level`` and ``order`` must agree with them or
 be left at None. Appending costs the new chunks alone, and leaves the
 old tables and index behind as dead bytes between the chunks, about the
@@ -614,7 +629,7 @@ tracks per group                   2**29 / tile: 32,768 at the default tile, 131
 nonzero bases per track-order      65,536 per block, any number of blocks
 block
 dense read                         8 GiB unless ``out`` is given
-scratch for ``bins``               256 MB per thread: channels times tile times 8 bytes
+scratch tile for sums              256 MB per thread, channels times tile times 8 bytes; a read of more channels bins each window from its chunks without one
 values                             integers to 2**53 exactly, float32 or float64 otherwise
 =================================  ===================================================================
 

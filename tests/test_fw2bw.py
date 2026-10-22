@@ -152,3 +152,20 @@ def test_command_line(tmp_path, fw):
 		str(tmp_path / 'cli'), '-f'], env=ENV, capture_output=True, text=True,
 		timeout=600)
 	assert result.returncode == 0, result.stderr
+
+
+def test_failed_conversion_leaves_no_bigwig(tmp_path, fw, monkeypatch):
+	"""Each bigWig is written beside its name and moved there when
+	complete, so a conversion that fails leaves neither it nor its partial
+	file behind."""
+
+	import figwig.writer
+
+	def fail(self, *args, **kwargs):
+		raise ValueError("stopped part way")
+
+	monkeypatch.setattr(figwig.writer.BigWigWriter, 'write', fail)
+	out = tmp_path / 'failed'
+	with pytest.raises(SystemExit, match="stopped part way"):
+		main(['fw2bw', fw, '-o', str(out)])
+	assert sorted(os.listdir(out)) == []

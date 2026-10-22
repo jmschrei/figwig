@@ -1278,6 +1278,69 @@ def _copy_dense(dst, data, at, code, n, accumulate):
 		_copy_row(dst, data[at:at + 4 * n].view(numpy.float32), n, accumulate)
 
 
+@numba.njit(nogil=True, cache=True)
+def _bin_dense(dst, data, at, code, n, offset, bins, nan_mode):
+	"""dst[(offset + p) // bins] += the p-th of n values of element type
+	`code` at `at` of `data`: a dense chunk's bases, binned into a window's
+	row, each as `_pick` takes it under `nan_mode`."""
+
+	if code == _U8:
+		_bin_row(dst, data[at:at + n], n, offset, bins, nan_mode)
+	elif code == _U16:
+		_bin_row(dst, data[at:at + 2 * n].view(numpy.uint16), n, offset, bins,
+			nan_mode)
+	elif code == _U32:
+		_bin_row(dst, data[at:at + 4 * n].view(numpy.uint32), n, offset, bins,
+			nan_mode)
+	elif code == _I8:
+		_bin_row(dst, data[at:at + n].view(numpy.int8), n, offset, bins, nan_mode)
+	elif code == _I16:
+		_bin_row(dst, data[at:at + 2 * n].view(numpy.int16), n, offset, bins,
+			nan_mode)
+	elif code == _I32:
+		_bin_row(dst, data[at:at + 4 * n].view(numpy.int32), n, offset, bins,
+			nan_mode)
+	elif code == _F64:
+		_bin_row(dst, data[at:at + 8 * n].view(numpy.float64), n, offset, bins,
+			nan_mode)
+	else:
+		_bin_row(dst, data[at:at + 4 * n].view(numpy.float32), n, offset, bins,
+			nan_mode)
+
+
+@numba.njit(nogil=True, cache=True)
+def _bin_row(dst, src, n, offset, bins, nan_mode):
+	"""dst[(offset + p) // bins] += src[p] for p below n, a bin at a time
+	so that the inner loop vectorizes."""
+
+	p = 0
+	while p < n:
+		k = (offset + p) // bins
+		end = min(n, (k + 1) * bins - offset)
+		total = 0.0
+		if nan_mode == 0:
+			for q in range(p, end):
+				total += numpy.float64(src[q])
+		else:
+			for q in range(p, end):
+				total += _pick(numpy.float64(src[q]), nan_mode)
+		dst[k] += total
+		p = end
+
+
+@numba.njit(nogil=True, cache=True, inline='always')
+def _pick(v, nan_mode):
+	"""What a base of value v adds to a sum: v (mode 0, NaN propagates), v
+	or 0 for NaN (mode 1, NaN skipped), or 1 for NaN and 0 otherwise (mode
+	2, NaN bases counted)."""
+
+	if nan_mode == 0:
+		return v
+	if v != v:
+		return 1.0 if nan_mode == 2 else 0.0
+	return 0.0 if nan_mode == 2 else v
+
+
 @numba.njit(nogil=True, cache=True, inline='always')
 def _value(values, i, ones):
 	"""Value i of a typed view of a chunk's values, or 1 for a chunk whose
@@ -1288,10 +1351,12 @@ def _value(values, i, ones):
 
 @numba.njit(nogil=True, cache=True)
 def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
-	row, k_out, out_rows, out_channels, out_offsets, out_values):
+	row, k_out, out_rows, out_channels, out_offsets, out_values, bins,
+	nan_mode):
 	"""Bases s to e - 1 of a window that starts at `start` take `value`:
-	set or added into row `slot` of `channels`, or listed as entries when
-	the value is not 0. Returns the entries listed."""
+	set or added into row `slot` of `channels`, added per bin of `bins`
+	bases when above 1, or listed as entries when the value is not 0.
+	Returns the entries listed."""
 
 	if listing:
 		if value != 0.0:
@@ -1305,7 +1370,17 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 		return k_out
 
 	dst = channels[slot]
-	if accumulate:
+	if bins > 1:
+		if nan_mode != 0:
+			value = _pick(value, nan_mode)
+		k = (s - start) // bins
+		edge = (k + 1) * bins
+		for p in range(s - start, e - start):
+			if p >= edge:
+				k += 1
+				edge += bins
+			dst[k] += value
+	elif accumulate:
 		for p in range(s - start, e - start):
 			dst[p] += value
 	else:
@@ -1322,7 +1397,7 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 @numba.njit(nogil=True, cache=True)
 def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	selected, values, ones, base, a, b, start, channels, accumulate, fill, row,
-	k_out, out_rows, out_channels, out_offsets, out_values):
+	k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode):
 	"""One window's bases of one sparse, runs or matrix chunk: set or added
 	into the window's `channels`, (channels, width) of the output, when
 	`channels` has a row, or listed as entries from k_out on when `fill`,
@@ -1333,10 +1408,13 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	uint16 `offsets` are as its header gives them, and each present track's
 	first base in the window is found by binary search. `selected` lists
 	the group's tracks with a slot, ascending. `values` is the typed view of
-	the chunk's values.
+	the chunk's values. With `bins` above 1, which comes with `accumulate`,
+	`channels` is the window's binned row and each base is added into its
+	bin.
 	"""
 
 	listing = channels.shape[0] == 0
+	plain = accumulate and bins == 1 and nan_mode == 0
 	if kind == _SPARSE or kind == _RUNS:
 		# Entry d of the values is the d-th varint; the varints of tracks
 		# not read, and those after the window, are counted by their last
@@ -1371,15 +1449,17 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					if here > since:
 						k_out = _put_run(current, max(since, a), here, start, channels,
 							slot, accumulate, listing, fill, row, k_out, out_rows,
-							out_channels, out_offsets, out_values)
+							out_channels, out_offsets, out_values, bins, nan_mode)
 					current = _value(values, d, ones)
 					since = here
 					d += 1
 				if since < b:
 					k_out = _put_run(current, max(since, a), b, start, channels, slot,
 						accumulate, listing, fill, row, k_out, out_rows,
-						out_channels, out_offsets, out_values)
+						out_channels, out_offsets, out_values, bins, nan_mode)
 			else:
+				k = (a - start) // bins
+				edge = start + (k + 1) * bins
 				while at < end:
 					delta, at = _get_varint(data, at)
 					p += delta
@@ -1395,8 +1475,13 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 								out_offsets[k_out] = here - start
 								out_values[k_out] = _value(values, d, ones)
 							k_out += 1
-						elif accumulate:
+						elif plain:
 							channels[slot, here - start] += _value(values, d, ones)
+						elif accumulate:
+							while here >= edge:
+								k += 1
+								edge += bins
+							channels[slot, k] += _pick(_value(values, d, ones), nan_mode)
 						else:
 							channels[slot, here - start] = _value(values, d, ones)
 					d += 1
@@ -1434,6 +1519,8 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 				lo = mid + 1
 			else:
 				hi = mid
+		kb = (a - start) // bins
+		edge = start + (kb + 1) * bins
 		for i in range(lo, numpy.int64(ptr[k + 1])):
 			here = base + numpy.int64(offsets[i])
 			if here >= b:
@@ -1445,8 +1532,13 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					out_offsets[k_out] = here - start
 					out_values[k_out] = _value(values, i, ones)
 				k_out += 1
-			elif accumulate:
+			elif plain:
 				channels[slot, here - start] += _value(values, i, ones)
+			elif accumulate:
+				while here >= edge:
+					kb += 1
+					edge += bins
+				channels[slot, kb] += _pick(_value(values, i, ones), nan_mode)
 			else:
 				channels[slot, here - start] = _value(values, i, ones)
 
@@ -1473,10 +1565,11 @@ def _dense_entries(data, at, code, n, row, slot, a, start, fill, k_out,
 @numba.njit(nogil=True, cache=True)
 def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 	selected, base, start, a, b, channels, accumulate, fill, row, k_out,
-	out_rows, out_channels, out_offsets, out_values):
+	out_rows, out_channels, out_offsets, out_values, bins, nan_mode):
 	"""The bases of one window in one chunk, set or added into `channels`
-	or listed as entries, by the chunk's kind and element type. Returns the
-	entries in the window, for a listing."""
+	or listed as entries, by the chunk's kind and element type, or, with
+	`bins` above 1, added per bin into `channels`, the window's binned
+	row. Returns the entries in the window, for a listing."""
 
 	w = _WIDTHS[code]
 	listing = channels.shape[0] == 0
@@ -1489,6 +1582,9 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 			if listing:
 				k_out = _dense_entries(data, at, code, b - a, row, slot, a, start,
 					fill, k_out, out_rows, out_channels, out_offsets, out_values)
+			elif bins > 1:
+				_bin_dense(channels[slot], data, at, code, b - a, a - start, bins,
+					nan_mode)
 			else:
 				_copy_dense(channels[slot, a - start:b - start], data, at, code,
 					b - a, accumulate)
@@ -1514,51 +1610,52 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total], False, base, a, b, start, channels,
 			accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
-			out_values)
+			out_values, bins, nan_mode)
 	elif code == _U16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _U32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total].view(numpy.int8), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _I32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), False, base, a, b,
 			start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _F32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), False, base, a,
 			b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	elif code == _F64:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 8 * total].view(numpy.float64), False, base, a,
 			b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, bins, nan_mode)
 	return _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 		selected, data[v0:v0], True, base, a, b, start, channels, accumulate,
-		fill, row, k_out, out_rows, out_channels, out_offsets, out_values)
+		fill, row, k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode)
 
 
 @numba.njit(nogil=True, cache=True)
-def _bin_into(dst, src, src0, s0, s1, bins):
+def _bin_into(dst, src, src0, s0, s1, bins, nan_mode):
 	"""dst[k] += the sum over each bin k of `bins` bases of a window that
-	the window's bases s0 to s1 - 1 touch, base s0 being src[src0]."""
+	the window's bases s0 to s1 - 1 touch, base s0 being src[src0], each
+	base as `_pick` takes it under `nan_mode`."""
 
 	k0 = s0 // bins
 	k1 = (s1 - 1) // bins
@@ -1566,15 +1663,19 @@ def _bin_into(dst, src, src0, s0, s1, bins):
 		e0 = max(k * bins, s0)
 		e1 = min((k + 1) * bins, s1)
 		total = 0.0
-		for p in range(e0, e1):
-			total += src[src0 + p - s0]
+		if nan_mode == 0:
+			for p in range(e0, e1):
+				total += src[src0 + p - s0]
+		else:
+			for p in range(e0, e1):
+				total += _pick(src[src0 + p - s0], nan_mode)
 		dst[k] += total
 
 
 @numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins,
-	pair_stops):
+	pair_stops, nan_mode):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
@@ -1599,9 +1700,11 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	tile, and are set by the caller.
 
 	`scratch`, (channels, tile) float64 or empty, holds a whole chunk's
-	decoded tracks when many pairs fall on one chunk, or whenever `bins`
-	is above 1, so that the chunk is decoded once rather than once per
-	window.
+	decoded tracks when many pairs fall on one chunk, so that the chunk is
+	decoded once rather than once per window; a binned read of fewer pairs
+	per chunk, or one without a scratch tile, bins each pair's bases
+	straight into its row. `nan_mode` is what a NaN base adds to a binned
+	sum, as `_pick` takes it.
 	"""
 
 	width = out.shape[2] * bins
@@ -1636,8 +1739,12 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 		kind = _kind_of(kinds[chunk])
 		code = _code_in(kinds[chunk])
-		via_scratch = scratch.shape[0] > 0 and (bins > 1 or (q1 - q >=
-			_SCRATCH_PAIRS and kind != _DENSE))
+		# A chunk that many pairs fall on is decoded once into the scratch
+		# tile, from which each window is copied or binned; otherwise each
+		# pair is decoded on its own, binned straight into its row when
+		# summing, which needs no scratch however many tracks there are.
+		via_scratch = scratch.shape[0] > 0 and q1 - q >= _SCRATCH_PAIRS and (
+			bins > 1 or kind != _DENSE)
 		if via_scratch and chunk != decoded:
 			base = pair_bases[q]
 			if accumulate:
@@ -1645,7 +1752,7 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 					scratch[targets[j], :] = 0
 			_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
 				slots, selected, base, base, base, base + tile, scratch, accumulate,
-				False, 0, 0, empty, empty, empty, empty_values)
+				False, 0, 0, empty, empty, empty, empty_values, 1, 0)
 			decoded = chunk
 
 		for r in range(q, q1):
@@ -1659,14 +1766,15 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 				continue
 			if not via_scratch:
 				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
-					slots, selected, base, start, a, b, out[row], accumulate, False,
-					row, 0, empty, empty, empty, empty_values)
+					slots, selected, base, start, a, b, out[row], accumulate or bins
+					> 1, False, row, 0, empty, empty, empty, empty_values, bins,
+					nan_mode)
 				continue
 			for j in range(targets.shape[0]):
 				slot = targets[j]
 				if bins > 1:
 					_bin_into(out[row, slot], scratch[slot], a - base, a - start,
-						b - start, bins)
+						b - start, bins, nan_mode)
 				else:
 					_copy_row(out[row, slot, a - start:b - start], scratch[slot,
 						a - base:b - base], b - a, accumulate)
@@ -1704,7 +1812,7 @@ def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		k_out = _window_of_chunk(tile, data, positions[chunk], _kind_of(kinds[
 			chunk]), _code_in(kinds[chunk]), n_tracks, slots, selected, base,
 			start, a, b, no_channels, False, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values)
+			out_channels, out_offsets, out_values, 1, 0)
 
 	return k_out
 
@@ -1788,7 +1896,8 @@ def _block_into(code, view, data, v0, n, start, end, row, slot, dst, adding,
 @numba.njit(nogil=True, cache=True)
 def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 	pair_starts, pair_rows, width, out, accumulate, list_entries, fill,
-	out_rows, out_channels, out_offsets, out_values, scratch, bins, pair_stops):
+	out_rows, out_channels, out_offsets, out_values, scratch, bins, pair_stops,
+	nan_mode):
 	"""Windows out of a batch of track-order blocks.
 
 	Pair q is a window and one block of one track that may hold its bases:
@@ -1825,7 +1934,7 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 			_block_into(code, view, data, v0, n, start, end, row, slot, scratch,
 				True, False, fill, k_out, out_rows, out_channels, out_offsets,
 				out_values)
-			_bin_into(out[row, slot], scratch, 0, 0, width, bins)
+			_bin_into(out[row, slot], scratch, 0, 0, width, bins, nan_mode)
 		else:
 			_block_into(code, view, data, v0, n, start, end, row, slot, out[row,
 				slot], accumulate, False, fill, k_out, out_rows, out_channels,

@@ -121,9 +121,11 @@ took 0.7 s for the bigWig reader on the machine above, and 1.1 s for
 ``figwig bam2bw``. A figwig file's kernels are larger, and compiled once per
 element type of a chunk: the first dense read compiled for 27 s, the first
 sparse read for 21 s more, the first read into another output dtype for
-12 s, the first track-order read for 12 s and the first write for 8 s,
-about 80 s in all for a process that reads and writes every way; sums per
-label and per bin share the dense read's kernels. numba caches them on
+12 s (14 s for a uint8 track alone, 15 s for an int32 output), the first
+sum per label or per bin for 11 s, the first ``read_entries`` for 9 s,
+the first track-order read for 12 s and the first write for 8 s, about
+120 s in all for a process that reads and writes every way, each with no
+output while it compiles. numba caches them on
 disk, next to the installed package,
 or in the user's cache directory when the package directory cannot be
 written, and later processes load them in a tenth of a second. Warm up with

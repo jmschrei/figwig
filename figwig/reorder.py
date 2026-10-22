@@ -12,6 +12,7 @@ order asked for, with the same tracks, attributes and genome.
 
 import argparse
 import os
+import sys
 
 from .figwig import _DEFAULT_GROUPS
 from .figwig import _DEFAULT_TILE
@@ -41,6 +42,9 @@ def _parser(prog):
 		"in position order and 0 in track order.")
 	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
 		"number of threads. Default is 1.")
+	parser.add_argument('-f', '--force', action='store_true', help="Write "
+		"over a figwig file at the output other than the input itself, which "
+		"is refused without it.")
 	parser.add_argument('-v', '--verbose', action='store_true')
 	return parser
 
@@ -68,6 +72,7 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 		tile = _DEFAULT_TILE
 	if groups is None:
 		groups = _DEFAULT_GROUPS
+	total = 0
 	with FigWigWriter(output, reader.chrom_sizes, tracks, genome=reader.genome,
 			attributes=reader.attributes, tile=tile, groups=groups, level=level,
 			n_jobs=n_jobs, order=order) as writer:
@@ -76,19 +81,25 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 			if len(entries.values) > 0:
 				writer.write_sparse(chrom, entries.positions, entries.tracks,
 					entries.values)
-			if verbose:
-				print("{}: {}, {:,} entries".format(output, chrom, len(
-					entries.values)))
+			total += len(entries.values)
+	if verbose:
+		print("{}: {} tracks in {} order, {:,} nonzero bases, {:.1f} MB.".format(
+			output, len(tracks), order, total, os.path.getsize(output) / 1e6),
+			file=sys.stderr)
 
 
 def main(argv=None, prog='figwig reorder'):
 	args = _parser(prog).parse_args(argv)
 	if not os.path.isfile(args.figwig):
 		raise SystemExit("{}: {} is not a file.".format(prog, args.figwig))
+	if os.path.exists(args.output) and not args.force and not os.path.samefile(
+			args.figwig, args.output):
+		raise SystemExit("{}: {} exists; -f writes over it.".format(prog,
+			args.output))
 
 	try:
 		_reorder(args.figwig, args.output, args.order, tile=args.tile,
 			groups=args.groups, level=args.level, n_jobs=args.parallel,
 			verbose=args.verbose)
-	except (ValueError, TypeError) as e:
+	except (ValueError, TypeError, OSError) as e:
 		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

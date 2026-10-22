@@ -282,3 +282,15 @@ def test_append_adds_bigwigs_to_a_file(tmp_path, bigwigs):
 		main(['bw2fw', '-o', out, '--append', '-t', '64', bigwigs[0]])
 	with pytest.raises(SystemExit, match="does not exist"):
 		main(['bw2fw', '-o', str(tmp_path / 'no.fw'), '--append', bigwigs[0]])
+
+
+def test_missing_inputs_are_messages(tmp_path, bigwigs):
+	out = str(tmp_path / 'out.fw')
+	with pytest.raises(SystemExit, match="No such file|not a file|cannot"):
+		main(['bw2fw', '-o', out, '-s', str(tmp_path / 'none.sizes'), bigwigs[0]])
+	with pytest.raises(SystemExit, match="No such file|not a file|cannot"):
+		main(['bw2fw', '-o', out, '-m', str(tmp_path / 'none.tsv'), bigwigs[0]])
+	table = tmp_path / 'spaces.tsv'
+	table.write_text("file name assay\n{} a ATAC\n".format(bigwigs[0]))
+	with pytest.raises(SystemExit, match="one column; a table is tab-separated"):
+		main(['bw2fw', '-o', out, '-m', str(table), bigwigs[0]])

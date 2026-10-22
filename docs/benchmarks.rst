@@ -318,6 +318,13 @@ method                                                     seconds   peak RSS
 pyBigWig ``stats(type="sum", exact=True)``, one process    46 s      201 MB
 =========================================================  ========  ========
 
+Over 3,000 single cells as tracks (chr1 to chr5 of the PBMC fragments,
+46 million cut sites, one group), the 58,705 peaks on those chromosomes
+summed in 0.96 s on 8 threads and 1.5 s on one, the same sums as a sparse
+read of the windows gives in 1.2 s; before the entries were binned
+without a scratch tile this read was refused above 2,048 tracks and took
+73 s in two halves.
+
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -334,6 +341,15 @@ tile 16,384, groups of 8, level 6   190 MB    9.6 s     2.3 s
 tile 1,024, groups of 1, level 1    290 MB    1.33 s    0.39 s
 nine bigWigs, ``read_bigwig``       742 MB    1.5 s     0.5 s
 ==================================  ========  ========  =========
+
+A second run of six chr22 tracks at 500 bp and 1 kb windows gave the
+same picture (9.7 s at the defaults against 0.81 s at ``-t 1024 --groups
+1`` for 10,000 500 bp windows, and 1.17 s for the bigWigs), and found
+``-l 1`` no faster than level 6 for a file 8% larger, so the tile and
+groups are the advice. Count tracks go the other way: 8 of 48 count
+tracks read in short windows from one group of 48 in a quarter to a half
+of the time from 48 groups of one, since a sparse chunk's other tracks are
+stepped over by their byte counts.
 
 A 1 kb window from a 16,384-base tile decodes 16 kb of float32 per
 track, and every track of its group with it; a dense GC track grouped

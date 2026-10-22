@@ -315,7 +315,8 @@ call, from any subset of the tracks, into `(windows, tracks, width)` in the
 tracks' own dtype, or as a sparse list of nonzero bases with `sparse=True`,
 summed per label with `labels=`, or summed per bin of each window with
 `bins=`, and `sums` gives each track's total over intervals of any
-lengths, such as peaks or genes. It is written in position order, tiles
+lengths, such as peaks or genes, or over thousands of cells at once, with
+`nan=` for means over the bases a track covers. It is written in position order, tiles
 across tracks, for reading
 windows across many tracks, or in track order for reading a few tracks over
 the genome, and `write_sparse` takes nonzero bases as entries, such as the

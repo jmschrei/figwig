@@ -81,3 +81,13 @@ def test_layout_is_kept_and_a_file_can_be_written_over_itself(tmp_path, fw):
 	by_track = FigWigReader(path)
 	assert by_track.order == 'tracks'
 	assert_same_values(FigWigReader(fw), by_track)
+
+
+def test_existing_output_is_refused_without_force(tmp_path, fw):
+	out = str(tmp_path / 'o.fw')
+	main(['reorder', fw, out, '--order', 'tracks'])
+	with pytest.raises(SystemExit, match="exists; -f writes over it"):
+		main(['reorder', fw, out, '--order', 'positions'])
+	main(['reorder', fw, out, '--order', 'positions', '-f'])
+	main(['reorder', out, out, '--order', 'tracks'])
+	assert FigWigReader(out).order == 'tracks'

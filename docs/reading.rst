@@ -276,4 +276,7 @@ Falling back to another reader
                 start in zip(chroms, starts)], dtype=numpy.float32)
 
 figwig's tests compare it against pybigtools' ``values()``, bit for bit,
-which makes pybigtools a natural fallback for the files figwig refuses.
+which makes pybigtools a natural fallback for the bigWigs figwig refuses.
+A bigBed raises the same ``ValueError``, and pybigtools' ``values()`` on
+a bigBed panics with an exception that is not an ``Exception``, so check
+the file's magic first where a path may be either.

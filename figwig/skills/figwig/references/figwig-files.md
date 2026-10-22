@@ -13,8 +13,10 @@ directory of bigWigs is read in windows again and again.
 ```python
 FigWigReader(path)
 reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
-	sparse=False, labels=None, bins=None)
-reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8)   # -> (n, tracks): totals over intervals of any lengths
+	sparse=False, labels=None, bins=None, nan='propagate')
+reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8, nan='propagate')
+	# -> (n, tracks): totals over intervals of any lengths; nan='skip' leaves NaN
+	# bases out, nan='count' gives the bases that are not NaN (covered-base means)
 reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
 reader.tile_sums(tracks=None, chroms=None)  # -> float32 (tracks, tiles): sums per tile, no decoding
 reader.select(**attributes)          # -> int64 indices, for `tracks`
@@ -24,8 +26,9 @@ reader.chrom_sizes, reader.genome, reader.attributes, reader.tile, reader.order
 read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=None,
 	n_jobs=8, sparse=False, labels=None, bins=None)
 
-FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=16384,
-	groups=8, level=None, engine='auto', n_jobs=8, order='positions', append=False)
+FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None,
+	groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False)
+	# tile None is 16384, order None is 'positions', level None is 6 (0 in track order)
 writer.write(chroms, starts, values, ends=None, tracks=None)
 writer.write_sparse(chroms, positions, tracks, values)   # nonzero bases as entries
 writer.add_file(path)                # copy another file's tracks in (same chroms, tile, level, order)
@@ -117,7 +120,12 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 - `sums(chroms, starts, ends, tracks)` is for intervals that differ in
   length, peaks, genes or cCREs: 172,732 peaks x 6 tracks took 0.25 s on 8
   threads, where a `read(bins=width)` per distinct width took 2.7 s and
-  pyBigWig `stats` 46 s.
+  pyBigWig `stats` 46 s; 58,705 peaks x 3,000 cells took 1.0 s, equal to a
+  sparse read's sums. A mean over covered bases, as pyBigWig and deepTools
+  give it, is `sums(..., nan="skip") / sums(..., nan="count")` on a file
+  written with `--missing nan`; a scaled-region profile (deepTools
+  scale-regions) is `sums` over sub-intervals with edges `start + (j *
+  length) // n_bins`, which matches `computeMatrix` to 2e-6.
 - A `FigWigReader` pickles without its index, which each worker reads
   again, and can be read from several threads, so it goes in a Dataset the
   way `references/reading.md` shows for `BigWigReader`. DataLoader workers
@@ -130,10 +138,13 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
   time should be written with small groups, and groups should hold tracks of
   one kind: a count track grouped with a float track is stored as float
   values and decoded with it. The defaults (tile 16,384, groups of 8) suit
-  count tracks; dense float tracks read in short windows (conservation,
-  fold change, p-value) want `tile=1024, groups=1` (`bw2fw -t 1024 --groups
-  1`): 7x faster random 1 kb windows for a file 50% larger, and a dense
-  track in a group of its own reads 12x faster than beside two others.
+  count tracks, for which one group of many tracks reads 8 of 48 tracks
+  2-4x faster than 48 groups of one, since a sparse chunk's other tracks
+  are stepped over cheaply; dense float tracks read in short windows
+  (conservation, fold change, p-value) want `tile=1024, groups=1` (`bw2fw
+  -t 1024 --groups 1`; `-l 1` gains nothing): 7x faster random 1 kb windows
+  for a file 35-50% larger, and a dense track in a group of its own reads
+  12x faster than beside two others.
 - The first dense read of a fresh install compiles for about 27 s, the first
   sparse read for 21 s more, a second output dtype for 12 s and track order
   for 12 s; later processes load the cache in a tenth of a second. Warm up
@@ -214,7 +225,10 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
 - The file is written beside its path and moved there at `close`, with the
   mode the umask gives a new file, so a failed write leaves the path as it
   was, and `reorder` or `bw2fw` may write over their input. A writer never
-  closed warns and writes nothing.
+  closed warns and writes nothing. `write` with `ends=` (intervals) encodes
+  on the calling thread, where whole-tile windows go to the pool: write
+  windows for speed. `append=True` with `attributes=` adds to the file's
+  attributes.
 - The chunks depend on the values and on which calls wrote which groups, not
   on `n_jobs` or on how values were split between calls; the sum statistic
   is compensated.
@@ -231,10 +245,17 @@ figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 figwig info k562.fw [-b]                                     # what the file holds
 ```
 
-- `bw2fw` and `fw2bw` refuse to write over an output that exists unless
-  `-f` is given (`--append` adds to it instead); `-v` prints a line per
-  group and a summary. There is no bedGraph export: `fw2bw` then
-  `bigWigToBedGraph`, or `read_entries` and write the runs.
+- `bw2fw`, `fw2bw`, `reorder` and `merge` refuse to write over an output
+  that exists unless `-f` is given (`bam2fw` takes `--force`, since its
+  `-f` means fragments; `--append` adds to a file instead); `-v` prints a
+  line per group and a summary on stderr. `fw2bw` writes each bigWig beside
+  its name and moves it into place when complete, as `bw2fw` writes its
+  file, so a killed conversion leaves no half-written output; a killed
+  `--append` leaves bytes past the file's end, which `info -b` reports and
+  the next append writes over. `fw2bw -z N` writes N zoom levels (0 by
+  default), each adding to the bigWig. There is no bedGraph export: `fw2bw`
+  then `bigWigToBedGraph`, or `read_entries` and write the runs. Ctrl-C
+  exits with 130, a missing input file with a message.
 
 - The metadata table is tab-separated (or `.csv`), with a header; its first
   column names the input file by path or base name, a `name` column names the
@@ -249,9 +270,12 @@ figwig info k562.fw [-b]                                     # what the file hol
 - Values read from a converted file equal `read_bigwig(..., missing=0.0,
   keep_nan=True)` on the bigWigs: an interval whose value is NaN is NaN.
   `--missing nan` makes the bases no interval covers NaN too, for methylation
-  or conservation tracks whose zeros are measurements; the track is then
-  float32, which costs a compressed file under 1% and doubles an
-  uncompressed one; `fw2bw --missing nan` writes such a file's zeros back.
+  or conservation tracks whose zeros are measurements, and for fold-change
+  or p-value tracks whose explicit 0.0 intervals should survive a round
+  trip (`bw2fw` then `fw2bw` with `--missing nan` on both is lossless; the
+  defaults drop the 0.0 intervals); the track is then float32, which costs
+  a compressed file under 1% and doubles an uncompressed one; `fw2bw
+  --missing nan` writes such a file's zeros back.
   `bw2fw --append` of a bigWig with chromosomes the file lacks drops them
   with a warning; `bw2fw -s` fixes the chromosome set of files that will be
   merged.
@@ -284,7 +308,9 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `no track has an attribute` | `select` with a key no track record has; the message names the keys |
 | `pass dtype= to read as another type` | `out=` of another dtype than the tracks' |
 | `ends must hold one end per start`, `an interval's end is before its start` | `sums` with mismatched or reversed intervals |
-| `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it` | `bw2fw` or `fw2bw` onto an existing output |
+| `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it`, `exists; --force writes over it` | `bw2fw`, `fw2bw`, `reorder`, `merge` or `bam2fw` onto an existing output |
+| `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | `nan=` misspelt, or on a dense read |
+| `the table has one column; a table is tab-separated` | a space-separated metadata table |
 | `it is version 1 of the format`, `version 2` | a file written by a figwig before the format's release; write it again |
 | `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB, or written by an earlier figwig |
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |

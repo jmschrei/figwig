@@ -620,6 +620,8 @@ class FigWigWriter:
 				genome = source.genome
 			if attributes is None:
 				attributes = source.attributes
+			elif isinstance(attributes, dict):
+				attributes = {**source.attributes, **attributes}
 		if tile is None:
 			tile = _DEFAULT_TILE
 		if order is None:
@@ -1587,13 +1589,15 @@ class FigWigWriter:
 		largest = int(numpy.diff(first).max())
 		need = max(4 + 4 * n_tracks + 11 * largest + 16, 24 + 18 * largest + 16)
 		bound = n * (4 * n_tracks + 24) + 18 * n_entries + 16
-		out = numpy.empty(min(bound, _BATCH_BYTES + need), dtype=numpy.uint8)
 		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
 		tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
 		parts = []
 		t = 0
 		while t < n:
+			# A buffer per go: an uncompressed part is a view of its buffer,
+			# which the next go must not write over.
+			out = numpy.empty(min(bound, _BATCH_BYTES + need), dtype=numpy.uint8)
 			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
 			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
 			done = _encode_entries(self.tile, n_tracks, tiles[t:], first[t:],
@@ -1764,6 +1768,10 @@ class FigWigWriter:
 			return data, raw, raw, kinds, gtiles, _crcs(data, cuts)
 
 		compressed, sizes = _compress_blocks(self.engine, self.level, data, cuts)
+		# The streams lie at the front of a larger buffer; a batch encoded
+		# in several goes is joined from its parts, so each is cut to its
+		# streams here.
+		compressed = compressed[:int(sizes.sum())]
 		grown = numpy.flatnonzero(sizes >= raw)
 		if len(grown) == 0:
 			return compressed, sizes, raw, kinds, gtiles, _crcs(compressed,
@@ -2702,7 +2710,8 @@ class FigWigReader:
 		numpy.ndarray, width: int, tracks: str | int | list | None = None,
 		out: numpy.ndarray | None = None, dtype=None, n_jobs: int = 8,
 		sparse: bool = False, labels: list | numpy.ndarray | None = None,
-		bins: int | None = None) -> numpy.ndarray | SparseWindows:
+		bins: int | None = None, nan: str = 'propagate') -> numpy.ndarray | \
+		SparseWindows:
 		"""Read the per-base values of many windows of one width.
 
 		Window j is [starts[j], starts[j] + width) on chroms[j], and its
@@ -2772,6 +2781,12 @@ class FigWigReader:
 			The bases per bin, a divisor of `width`, to sum each window over;
 			None reads every base. Default is None.
 
+		nan: str, optional
+			With `bins`, what a NaN base does to its bin's sum: 'propagate'
+			makes the sum NaN, 'skip' leaves the base out, and 'count' makes
+			each bin the number of its bases that are not NaN. Default is
+			'propagate'.
+
 		Returns
 		-------
 		out: numpy.ndarray or SparseWindows
@@ -2781,11 +2796,12 @@ class FigWigReader:
 		"""
 
 		return self._read(chroms, starts, width, tracks, out, dtype, n_jobs,
-			sparse, labels, bins, None)
+			sparse, labels, bins, None, nan)
 
 	def sums(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, ends: list[int] | numpy.ndarray, tracks: str | int | list
-		| None = None, dtype=None, n_jobs: int = 8) -> numpy.ndarray:
+		| None = None, dtype=None, n_jobs: int = 8, nan: str = 'propagate') -> \
+		numpy.ndarray:
 		"""The sum of each track over intervals of any lengths.
 
 		Each interval is `chroms[i]`, from `starts[i]` to `ends[i]`, and
@@ -2815,6 +2831,14 @@ class FigWigReader:
 		n_jobs: int, optional
 			The threads, as `read` takes it. Default is 8.
 
+		nan: str, optional
+			What a NaN base does to its interval's sum: 'propagate' makes
+			the sum NaN, 'skip' leaves the base out, and 'count' makes the
+			result the number of bases that are not NaN, so that a mean over
+			the bases a track covers is the sums with 'skip' over those with
+			'count', for a file written with its uncovered bases NaN. Default
+			is 'propagate'.
+
 		Returns
 		-------
 		sums: numpy.ndarray, shape=(n, tracks) or (n,)
@@ -2830,16 +2854,23 @@ class FigWigReader:
 			raise ValueError("an interval's end is before its start.")
 		width = int((ends - starts).max()) if len(starts) else 1
 		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
-			n_jobs, False, None, max(width, 1), ends)
+			n_jobs, False, None, max(width, 1), ends, nan)
 		return out[..., 0]
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
-		labels, bins, stops):
+		labels, bins, stops, nan='propagate'):
 		"""`read`, with `stops` the windows' ends when they differ in
 		length (`sums`), and then `width` the longest and `bins` equal to
-		it, so that each window's sum is its one bin."""
+		it, so that each window's sum is its one bin; `nan` is what a NaN
+		base does to a binned sum."""
 
 		n_jobs = _check_n_jobs(n_jobs)
+		if nan not in _NAN_MODES:
+			raise ValueError("nan must be 'propagate', 'skip' or 'count', not {!r}."
+				.format(nan))
+		nan_mode = _NAN_MODES[nan]
+		if nan_mode and bins is None:
+			raise ValueError("nan= applies to sums: give bins too.")
 		ids, single = self._select(tracks)
 		windows = _Windows(chroms, starts, width)
 		n, width = windows.n, windows.width
@@ -2902,7 +2933,11 @@ class FigWigReader:
 			first_channel = {i: int(labels[c]) for i, c in first_channel.items()
 				if labels[c] >= 0}
 
-		tiles = None
+		# The tasks come first, since the threads and the copies follow
+		# them; they get their output once it is allocated.
+		mode = 'list' if sparse else 'sum' if summing else 'dense'
+		accumulate = labels is not None
+		cut_inside = False
 		if self.order == 'positions':
 			read_ids = numpy.array(list(first_channel), dtype=numpy.int64)
 			groups_read = numpy.unique(self._group_of[read_ids]).tolist()
@@ -2910,24 +2945,34 @@ class FigWigReader:
 				lengths, width, stops)
 			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
 			self._load_indexes(groups_read, n_threads)
+			tasks = []
+			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
+			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
+			for g in groups_read:
+				mine = self._group_of[read_ids] == g
+				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
+				slots[self._slot_of[read_ids[mine]]] = channels[mine]
+				planned, cut = self._plan(g, slots, tiles, starts, width, None, mode,
+					accumulate, bins or 1, most, stops, nan_mode)
+				tasks.extend(planned)
+				cut_inside |= cut
+			if len(tasks) < n_threads:
+				tasks, cut = _split_tasks(tasks, n_threads, bins is not None and
+					bins > 1)
+				cut_inside |= cut
 		else:
-			# The tasks come first, since the threads follow their number;
-			# they get their output once it is allocated.
 			self._load_indexes(list(first_channel), n_jobs)
 			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
-				None, 'list' if sparse else 'sum' if summing else 'dense', labels
-				is not None, bins or 1, n_jobs, stops)
+				None, mode, accumulate, bins or 1, n_jobs, stops, nan_mode)
 			n_threads = max(1, min(n_jobs, len(tasks)))
 		# In position order a group's tasks sum straight into the output when
 		# they write disjoint cells: a label's cells are one per window base,
-		# and a window's two tiles fill different bases, but a bin that
-		# straddles a tile boundary is filled from two tiles, which may lie
-		# in two tasks, so such a read sums into a copy per thread, as track
-		# order does, unless its bins lie on the tile grid.
-		straddling = bins is not None and bins > 1 and (self.tile % bins != 0 or
-			(starts % bins != 0).any())
+		# a window's two tiles fill different bases, and a binned read's
+		# batches are not cut inside a window unless a window is longer than
+		# a batch may grow; then, and in track order, where a track's blocks
+		# are spread over the tasks, each thread sums into its own copy.
 		buffers = n_threads if summing and n_threads > 1 and (self.order ==
-			'tracks' or straddling) else 0
+			'tracks' or cut_inside) else 0
 
 		inner = None
 		if not sparse:
@@ -2957,10 +3002,13 @@ class FigWigReader:
 
 			# Sums into an integer output are taken in int64 and checked
 			# against the output's type, since a sum can overflow a type
-			# that each track's values fit.
+			# that each track's values fit; sums into a float32 output are
+			# taken in float64, since a bin is added to base by base.
 			inner = out
 			if summing and dtype.kind in 'iu':
 				inner = numpy.zeros(shape, dtype=numpy.int64)
+			elif summing and dtype != numpy.float64:
+				inner = numpy.zeros(shape, dtype=numpy.float64)
 
 		if n == 0:
 			if sparse:
@@ -2971,35 +3019,31 @@ class FigWigReader:
 
 		out3 = None if sparse else inner.reshape(n, 1, out_width) if single \
 			else inner
-
-		mode = 'list' if sparse else 'sum' if summing else 'dense'
-		accumulate = labels is not None
-		if self.order == 'tracks':
-			for task in tasks:
-				task.out = out3
-		else:
-			tasks = []
-			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
-			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
-			for g in groups_read:
-				mine = self._group_of[read_ids] == g
-				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
-				slots[self._slot_of[read_ids[mine]]] = channels[mine]
-				tasks.extend(self._plan(g, slots, tiles, starts, width, out3, mode,
-					accumulate, bins or 1, most, stops))
-			if len(tasks) < n_threads:
-				tasks = _split_tasks(tasks, n_threads)
+		for task in tasks:
+			task.out = out3
 
 		self._run(tasks, n_threads, out3 if mode == 'sum' else None, buffers > 0)
 
 		if sparse:
 			return self._gather(tasks, copies, n, len(ids), width, dtype)
 
+		if nan_mode == 2:
+			# The kernels count a bin's NaN bases, since the bases that are
+			# not stored are the zeros; the bases that are not NaN are the
+			# rest of the bin, clipped to the chromosome.
+			span = numpy.clip(numpy.minimum(starts + width if stops is None else
+				stops, lengths) - starts, 0, None)
+			per_bin = numpy.clip(span[:, None] - numpy.arange(out_width)[None, :]
+				* bins, 0, bins)
+			counted = inner.reshape(n, -1, out_width)
+			counted[...] = per_bin[:, None, :] - counted
+
 		if inner is not out:
-			info = numpy.iinfo(dtype)
-			if (inner < info.min).any() or (inner > info.max).any():
-				raise ValueError("a sum lies outside what {} holds; read the sums "
-					"as a wider type.".format(dtype))
+			if dtype.kind in 'iu':
+				info = numpy.iinfo(dtype)
+				if (inner < info.min).any() or (inner > info.max).any():
+					raise ValueError("a sum lies outside what {} holds; read the "
+						"sums as a wider type.".format(dtype))
 			out[...] = inner.reshape(out.shape)
 
 		for channel, source in copies:
@@ -3162,6 +3206,9 @@ class FigWigReader:
 		else:
 			if type(dtype).__module__ == 'torch':
 				dtype = str(dtype).split('.')[-1]
+			if dtype in ('bfloat16', 'float16'):
+				raise ValueError("dtype must be an integer or float type of 32 or "
+					"64 bits, not {}; read float32 and cast.".format(dtype))
 			try:
 				dtype = numpy.dtype(dtype)
 			except TypeError:
@@ -3191,24 +3238,31 @@ class FigWigReader:
 		return dtype
 
 	def _plan(self, g, slots, tiles, starts, width, out, mode, accumulate, bins,
-		most, stops=None):
+		most, stops=None, nan_mode=0):
 		"""The tasks that read group g's part of the windows: each a batch
 		of up to `most` chunks and the (window, tile) pairs that fall in
-		them, from the windows' tiles as `_window_tiles` gives them."""
+		them, from the windows' tiles as `_window_tiles` gives them, as
+		(tasks, whether a batch was cut inside a window of a binned read,
+		which happens when a window is longer than a batch may grow)."""
 
 		tile = self.tile
 		kinds, sizes, raws, offsets, crcs = self._group_index(g)
 		rows, local, unique, first, inverse, total = tiles
 		if total == 0:
-			return []
+			return [], False
 
 		chunk_kinds = kinds[unique]
 		live = chunk_kinds != 0
 		bounds = raws[unique].astype(numpy.int64) + 8
 
 		# Batches of chunks, cut where a batch would hold too many bytes
-		# before compression or too many chunks.
+		# before compression or too many chunks; a binned read's batches
+		# are not cut inside a window, whose bins would otherwise be summed
+		# by two tasks at once, unless the window runs past twice a batch.
 		tasks = []
+		cut_inside = False
+		continues = _continuing_windows(rows, inverse, len(unique)) if bins > 1 \
+			else None
 		a = 0
 		while a < len(unique):
 			total_bytes, n_live, b = 0, 0, a
@@ -3217,6 +3271,14 @@ class FigWigReader:
 				total_bytes += int(bounds[b])
 				n_live += int(live[b])
 				b += 1
+			if bins > 1:
+				while b < len(unique) and continues[b - 1]:
+					if total_bytes + bounds[b] > 2 * _BATCH_BYTES or n_live >= 2 * most:
+						cut_inside = True
+						break
+					total_bytes += int(bounds[b])
+					n_live += int(live[b])
+					b += 1
 
 			p0, p1 = int(first[a]), int(first[b]) if b < len(unique) else total
 			chunk = numpy.where(live[inverse[p0:p1]], inverse[p0:p1] - a, -1)
@@ -3225,13 +3287,14 @@ class FigWigReader:
 				sizes[unique[a:b][live[a:b]]].astype(numpy.int64), int(total_bytes),
 				_compact(chunk, live[a:b]), local[p0:p1] * tile, starts[rows[p0:p1]],
 				rows[p0:p1], out, width, mode, accumulate, bins, crcs[unique[a:b][
-				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]]))
+				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]],
+				nan_mode))
 			a = b
 
-		return tasks
+		return tasks, cut_inside
 
 	def _plan_tracks(self, channels, tids, starts, lengths, width, out, mode,
-		accumulate, bins, n_jobs, stops=None):
+		accumulate, bins, n_jobs, stops=None, nan_mode=0):
 		"""The tasks that read windows from a file in track order: each a
 		batch of blocks and the (window, block, channel) pairs."""
 
@@ -3295,7 +3358,7 @@ class FigWigReader:
 			tasks.append(_BlockTask(self, records[a:b], int(total_bytes),
 				inverse[p0:p1] - a, slots[p0:p1], starts[rows[p0:p1]], rows[p0:p1],
 				out, width, mode, accumulate, bins, _empty_pairs if stops is None
-				else stops[rows[p0:p1]]))
+				else stops[rows[p0:p1]], nan_mode))
 			a = b
 
 		return tasks
@@ -3364,6 +3427,27 @@ class FigWigReader:
 
 
 _empty_pairs = numpy.zeros(0, dtype=numpy.int64)
+_NAN_MODES = {'propagate': 0, 'skip': 1, 'count': 2}
+
+
+def _continuing_windows(rows, inverse, n_unique):
+	"""For each distinct tile i of a read, whether a window has pairs on
+	both tile i and tile i + 1, from the pairs' window rows and distinct
+	tiles: a window's tiles are consecutive, so it spans every boundary
+	from its first to its last."""
+
+	if len(rows) == 0:
+		return numpy.zeros(n_unique, dtype=numpy.bool_)
+	n = int(rows.max()) + 1
+	lo = numpy.full(n, n_unique, dtype=numpy.int64)
+	hi = numpy.full(n, -1, dtype=numpy.int64)
+	numpy.minimum.at(lo, rows, inverse)
+	numpy.maximum.at(hi, rows, inverse)
+	spans = lo < hi
+	edges = numpy.zeros(n_unique + 1, dtype=numpy.int64)
+	numpy.add.at(edges, lo[spans], 1)
+	numpy.add.at(edges, hi[spans], -1)
+	return numpy.cumsum(edges)[:n_unique] > 0
 
 
 def _window_tiles(tile, tile_offsets, tids, starts, lengths, width, stops=None):
@@ -3402,19 +3486,24 @@ def _batch_chunks(n, n_jobs):
 	return min(_BATCH_CHUNKS, max(_MIN_BATCH_CHUNKS, -(-n // n_jobs)))
 
 
-def _split_tasks(tasks, n_threads):
+def _split_tasks(tasks, n_threads, by_window=False):
 	"""Tasks of a read with fewer batches than threads, each with many
 	pairs, cut into tasks of fewer pairs on the same chunks, so that the
-	windows packed into a few tiles are copied on every thread."""
+	windows packed into a few tiles are copied on every thread; a binned
+	read's are cut between windows. Returns (tasks, whether a cut fell
+	inside a window)."""
 
 	total = sum(len(task.pair_rows) for task in tasks)
 	if total < _SPLIT_PAIRS:
-		return tasks
+		return tasks, False
 	parts = -(-n_threads // len(tasks))
 	out = []
+	cut_inside = False
 	for task in tasks:
-		out.extend(task.split(parts))
-	return out
+		pieces, cut = task.split(parts, by_window)
+		out.extend(pieces)
+		cut_inside |= cut
+	return out, cut_inside
 
 
 def _compact(chunk, live):
@@ -3464,6 +3553,7 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 	starts_in[order] = starts
 	sizes_in = sizes.astype(numpy.int64)
 
+	stored = (kinds & _STORED) > 0
 	if reader.verify and crcs is not None:
 		found = _crcs(raw, numpy.concatenate([[0], ends]))
 		found_in = numpy.empty_like(found)
@@ -3471,6 +3561,15 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 		if (found_in != crcs.astype(numpy.int64)).any():
 			raise ValueError("a chunk of {} does not match its checksum; the "
 				"file is corrupt.".format(reader.path))
+	elif crcs is not None and reader._codec != _CODEC_NONE and stored.any():
+		# A chunk stored as it is inside a compressed file has no checksum
+		# of its own, so its CRC is checked as a compressed chunk's
+		# Adler-32 is on every read.
+		view = memoryview(raw)
+		for j in numpy.flatnonzero(stored[order]).tolist():
+			if zlib.crc32(view[int(starts[j]):int(ends[j])]) != int(crcs[order[j]]):
+				raise ValueError("a chunk of {} does not match its checksum; the "
+					"file is corrupt.".format(reader.path))
 
 	if reader._codec == _CODEC_NONE:
 		return raw, starts_in, sizes_in
@@ -3478,7 +3577,6 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 	# libdeflate inflates about twice as fast as zlib, when the deflate
 	# package is installed; zlib's uncompress() is next, and the zlib module
 	# takes any chunk neither handles, or every chunk when neither loads.
-	stored = (kinds & _STORED) > 0
 	positions = numpy.zeros(len(sizes), dtype=numpy.int64)
 	lengths = numpy.zeros(len(sizes), dtype=numpy.int64)
 	inflate = _libdeflate_inflate()
@@ -3539,7 +3637,7 @@ class _Task:
 
 	def __init__(self, reader, g, slots, gtiles, kinds, offsets, sizes, bound,
 		pair_chunks, pair_bases, pair_starts, pair_rows, out, width, mode,
-		accumulate, bins, crcs, pair_stops):
+		accumulate, bins, crcs, pair_stops, nan_mode=0):
 		self.reader, self.g, self.slots = reader, g, slots
 		self.gtiles, self.kinds, self.crcs = gtiles, kinds, crcs
 		self.offsets, self.sizes, self.bound = offsets, sizes, bound
@@ -3549,15 +3647,27 @@ class _Task:
 		self.pair_rows = numpy.ascontiguousarray(pair_rows, dtype=numpy.int64)
 		self.pair_stops = numpy.ascontiguousarray(pair_stops, dtype=numpy.int64)
 		self.out, self.width, self.mode = out, width, mode
-		self.accumulate, self.bins = accumulate, bins
+		self.accumulate, self.bins, self.nan_mode = accumulate, bins, nan_mode
 		self.entries = None
 
-	def split(self, parts):
+	def split(self, parts, by_window=False):
 		"""This task as `parts` tasks over the same chunks, each with a
-		share of the pairs."""
+		share of the pairs; with `by_window` the shares are cut between
+		windows where there are enough windows, since a binned read sums a
+		window's pairs into one row. Returns (tasks, whether a cut fell
+		inside a window)."""
 
 		n = len(self.pair_rows)
 		cuts = numpy.linspace(0, n, parts + 1).astype(numpy.int64)
+		cut_inside = False
+		if by_window:
+			rows = self.pair_rows
+			windows = numpy.flatnonzero(numpy.diff(rows) != 0) + 1
+			if len(windows) + 1 >= parts:
+				cuts[1:-1] = windows[numpy.searchsorted(windows, cuts[1:-1])]
+				cuts = numpy.unique(cuts)
+			else:
+				cut_inside = parts > 1
 		out = []
 		for a, b in zip(cuts[:-1], cuts[1:]):
 			if b > a:
@@ -3566,8 +3676,8 @@ class _Task:
 					self.pair_chunks[a:b], self.pair_bases[a:b], self.pair_starts[a:b],
 					self.pair_rows[a:b], self.out, self.width, self.mode,
 					self.accumulate, self.bins, self.crcs, self.pair_stops[a:b] if
-					len(self.pair_stops) else self.pair_stops))
-		return out
+					len(self.pair_stops) else self.pair_stops, self.nan_mode))
+		return out, cut_inside
 
 	def run(self, fd):
 		reader = self.reader
@@ -3603,21 +3713,18 @@ class _Task:
 			self.entries = (rows, channels, offsets, values)
 			return
 
-		# A scratch tile for chunks that many windows fall on, and for
-		# binned reads, which decode every chunk through it.
+		# A scratch tile for chunks that many windows fall on, when it fits
+		# _SCRATCH_BYTES; a read of more channels than that decodes each
+		# pair on its own.
 		n_channels = self.out.shape[1]
 		scratch = numpy.zeros((0, 0), dtype=numpy.float64)
 		if n_channels * reader.tile * 8 <= _SCRATCH_BYTES:
 			scratch = numpy.empty((n_channels, reader.tile), dtype=numpy.float64)
-		elif self.bins > 1:
-			raise ValueError("bins= over {} channels needs {:.1f} GiB of scratch "
-				"per thread; read fewer tracks at a time, or sum them with labels="
-				.format(n_channels, n_channels * reader.tile * 8 / 2 ** 30))
 
 		_read_tiles(reader.tile, data, positions, self.kinds, len(self.slots),
 			self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
 			self.pair_rows, self.out, self.accumulate, scratch, self.bins,
-			self.pair_stops)
+			self.pair_stops, self.nan_mode)
 
 
 class _BlockTask:
@@ -3625,7 +3732,8 @@ class _BlockTask:
 	(window, block, channel) pairs that may fall in them."""
 
 	def __init__(self, reader, records, bound, pair_blocks, pair_slots,
-		pair_starts, pair_rows, out, width, mode, accumulate, bins, pair_stops):
+		pair_starts, pair_rows, out, width, mode, accumulate, bins, pair_stops,
+		nan_mode=0):
 		self.reader, self.records, self.bound = reader, records, bound
 		self.pair_blocks = numpy.ascontiguousarray(pair_blocks, dtype=numpy.int64)
 		self.pair_slots = numpy.ascontiguousarray(pair_slots, dtype=numpy.int64)
@@ -3633,7 +3741,7 @@ class _BlockTask:
 		self.pair_rows = numpy.ascontiguousarray(pair_rows, dtype=numpy.int64)
 		self.pair_stops = numpy.ascontiguousarray(pair_stops, dtype=numpy.int64)
 		self.out, self.width, self.mode = out, width, mode
-		self.accumulate, self.bins = accumulate, bins
+		self.accumulate, self.bins, self.nan_mode = accumulate, bins, nan_mode
 		self.entries = None
 
 	def run(self, fd):
@@ -3660,28 +3768,30 @@ class _BlockTask:
 			count = _read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
 				False, True, False, empty, empty, empty, numpy.zeros(0,
-				dtype=numpy.float64), scratch, 1, empty)
+				dtype=numpy.float64), scratch, 1, empty, 0)
 			rows = numpy.empty(count, dtype=numpy.int64)
 			channels = numpy.empty(count, dtype=numpy.int64)
 			offsets = numpy.empty(count, dtype=numpy.int64)
 			values = numpy.empty(count, dtype=numpy.float64)
 			_read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
-				False, True, True, rows, channels, offsets, values, scratch, 1, empty)
+				False, True, True, rows, channels, offsets, values, scratch, 1, empty,
+				0)
 			self.entries = (rows, channels, offsets, values)
 			return
 
 		_read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 			self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
 			self.accumulate, False, False, empty, empty, empty, numpy.zeros(0,
-			dtype=numpy.float64), scratch, self.bins, self.pair_stops)
+			dtype=numpy.float64), scratch, self.bins, self.pair_stops, self.nan_mode)
 
 
 def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray, width: int,
 	tracks: str | int | list | None = None, out: numpy.ndarray | None = None,
 	dtype=None, n_jobs: int = 8, sparse: bool = False, labels: list |
-	numpy.ndarray | None = None, bins: int | None = None) -> numpy.ndarray | \
+	numpy.ndarray | None = None, bins: int | None = None, nan: str =
+	'propagate') -> numpy.ndarray | \
 	SparseWindows:
 	"""Read the per-base values of many windows of one width from a figwig
 	file.
@@ -3733,6 +3843,10 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 		The bases per bin to sum each window over; see `FigWigReader.read`.
 		Default is None.
 
+	nan: str, optional
+		What a NaN base does to a binned sum; see `FigWigReader.read`.
+		Default is 'propagate'.
+
 
 	Returns
 	-------
@@ -3747,7 +3861,8 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 
 	reader = figwig if isinstance(figwig, FigWigReader) else FigWigReader(figwig)
 	return reader.read(chroms, starts, width, tracks=tracks, out=out,
-		dtype=dtype, n_jobs=n_jobs, sparse=sparse, labels=labels, bins=bins)
+		dtype=dtype, n_jobs=n_jobs, sparse=sparse, labels=labels, bins=bins,
+		nan=nan)
 
 
 def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,

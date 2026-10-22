@@ -62,6 +62,13 @@ def _parser():
 
 
 def main(argv=None):
+	try:
+		_main(argv)
+	except KeyboardInterrupt:
+		raise SystemExit(130)
+
+
+def _main(argv=None):
 	argv = sys.argv[1:] if argv is None else list(argv)
 
 	# A command's own arguments are parsed by the command, so that its usage
