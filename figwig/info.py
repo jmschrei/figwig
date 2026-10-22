@@ -9,6 +9,7 @@ sum and attributes, as a tab-separated table.
 """
 
 import argparse
+import errno
 import json
 import os
 import sys
@@ -103,9 +104,13 @@ def main(argv=None, prog='figwig info'):
 		for line in _describe(reader, args.bytes):
 			print(line)
 		sys.stdout.flush()
-	except BrokenPipeError:
-		# The reader of the output, such as `head`, has gone; say nothing.
-		os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-		raise SystemExit(0)
-	except (ValueError, TypeError, OSError) as e:
+	except OSError as e:
+		if isinstance(e, BrokenPipeError) or e.errno == errno.EINVAL:
+			# The reader of the output, such as `head`, has gone (Windows
+			# reports a closed pipe as EINVAL); say nothing, and point stdout
+			# at nothing so that the flush at exit does not fail either.
+			os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+			raise SystemExit(0)
+		raise _exit(prog, e)
+	except (ValueError, TypeError) as e:
 		raise _exit(prog, e)

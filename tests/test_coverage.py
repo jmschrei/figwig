@@ -1241,8 +1241,9 @@ def test_info_stops_quietly_when_its_reader_goes(tmp_path):
 		env=ENV, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 	assert process.stdout.readline()
 	process.stdout.close()
-	_, error = process.communicate(timeout=120)
-	assert process.returncode == 0 and error == b''
+	error = process.stderr.read()
+	process.stderr.close()
+	assert process.wait(timeout=120) == 0 and error == b''
 
 
 def test_reorder_keeps_exact_values_in_every_class(tmp_path):
@@ -1593,7 +1594,7 @@ def test_crafted_matrix_chunk_fails_without_a_crash():
 def test_only_regular_files_are_opened(tmp_path):
 	with pytest.raises(ValueError, match="is not a regular file"):
 		FigWigReader(str(tmp_path))
-	with pytest.raises(ValueError, match="cannot be read: No such file"):
+	with pytest.raises(ValueError, match="absent.fw cannot be read: "):
 		FigWigReader(str(tmp_path / 'absent.fw'))
 
 
