@@ -268,6 +268,19 @@ def test_nan_intervals_are_kept(tmp_path):
 	assert numpy.isnan(y[:100]).all() and y[200] == 0 and y[100] == 2
 
 
+def test_missing_is_recorded_for_fw2bw(tmp_path, bigwigs):
+	"""The file's `missing` attribute says what bw2fw wrote for uncovered
+	bases, which fw2bw follows by default."""
+
+	out = str(tmp_path / 'm.fw')
+	main(['bw2fw', '-o', out, bigwigs[0]])
+	assert FigWigReader(out).attributes['missing'] == '0.0'
+	main(['bw2fw', '-o', out, '-f', '--missing', 'nan', bigwigs[0]])
+	assert FigWigReader(out).attributes['missing'] == 'nan'
+	main(['bw2fw', '-o', out, '-f', '--missing', '-1', bigwigs[0]])
+	assert FigWigReader(out).attributes['missing'] == '-1.0'
+
+
 def test_append_adds_bigwigs_to_a_file(tmp_path, bigwigs):
 	out = str(tmp_path / 'grow.fw')
 	main(['bw2fw', '-o', out] + bigwigs[:2])

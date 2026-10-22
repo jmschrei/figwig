@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import struct
 import tempfile
 import threading
@@ -70,10 +71,13 @@ from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_entries
 from ._figwig_kernels import _encode_tiles
 from ._figwig_kernels import _inflate_chunks
+from ._figwig_kernels import _bucket_sort
 from ._figwig_kernels import _inflate_chunks_libdeflate
+from ._figwig_kernels import _pread_runs
 from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
+from ._kernels import _libc_pread
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
 from ._kernels import _pread_into
@@ -87,7 +91,7 @@ from .writer import _compress_blocks
 
 
 _FIGWIG_MAGIC = int.from_bytes(b'FIGW', 'little')
-_VERSION = 4
+_VERSION = 5
 _CODEC_NONE, _CODEC_ZLIB = 0, 1
 _FLAG_TRACKS = 1
 _ORDERS = {'positions': 'positions', 'csc': 'positions', 'tracks': 'tracks',
@@ -139,7 +143,15 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 	('n_tracks', '<u4'), ('n_groups', '<u4'), ('tables_crc', '<u4'),
 	('chroms', '<u8'), ('tracks', '<u8'), ('index', '<u8'), ('data', '<u8'),
 	('metadata', '<u8'), ('metadata_length', '<u8'), ('zooms', '<u8'),
-	('length', '<u8'), ('padding', 'V32')])
+	('length', '<u8'), ('required', '<u4'), ('optional', '<u4'),
+	('header_crc', '<u4'), ('padding', 'V20')])
+# Feature bits a reader must know to read the file (`required`) or may
+# ignore (`optional`); none are defined yet, so a reader refuses any
+# required bit and ignores every optional one.
+_KNOWN_REQUIRED = 0
+# The metadata keys the format itself writes; any other key of a file's
+# metadata is kept as it is through an append.
+_METADATA_KEYS = ('figwig', 'genome', 'attributes', 'order', 'tracks')
 _STATS = numpy.dtype([('sum', '<f8'), ('nonzero', '<u8'), ('min', '<f8'),
 	('max', '<f8')])
 _RUN = numpy.dtype([('first', '<u8'), ('last', '<u8'), ('offset', '<u8'),
@@ -335,7 +347,7 @@ def _tile_offsets(lengths, tile):
 	return offsets[:-1], int(offsets[-1])
 
 
-def _infer_dtype(sum_, nonzero, low, high, flags):
+def _infer_dtype(nonzero, low, high, flags):
 	"""The narrowest dtype that holds a track's values: float32 for a
 	fraction, float64 for an integer beyond int32 and uint32, which float32
 	would round, and otherwise the narrowest integer type."""
@@ -373,6 +385,47 @@ def _positions(positions, name):
 	return positions.astype(numpy.int64)
 
 
+def _track_indices(tracks, track_ids, n_tracks, whose):
+	"""The tracks `tracks` names, by name or index, one or a list, as (ids,
+	whether one track was named); `whose` says whose tracks they are in a
+	message."""
+
+	single = isinstance(tracks, (str, int, numpy.integer)) and not isinstance(
+		tracks, bool)
+	items = [tracks] if single else tracks
+	if isinstance(items, (str, dict)) or not hasattr(items, '__iter__'):
+		raise TypeError("tracks must be a name, an index, or a list of them, "
+			"not {}.".format(type(tracks).__name__))
+
+	ids = []
+	for item in items:
+		if isinstance(item, str):
+			if item not in track_ids:
+				raise ValueError("{!r} is not one of {} tracks.".format(item, whose))
+			ids.append(track_ids[item])
+		elif isinstance(item, (int, numpy.integer)) and not isinstance(item,
+				bool):
+			if not 0 <= item < n_tracks:
+				raise ValueError("track {} is out of range; there are {} tracks."
+					.format(item, n_tracks))
+			ids.append(int(item))
+		else:
+			raise TypeError("tracks must be names or indices, not {}.".format(
+				type(item).__name__))
+	return numpy.array(ids, dtype=numpy.int64), single
+
+
+def _check_exact(values):
+	"""Raise for a 64-bit integer array with a value beyond 2**53, which
+	float64, and so the file, cannot hold exactly."""
+
+	values = numpy.asarray(values)
+	if values.dtype.kind in 'iu' and values.dtype.itemsize == 8 and values.size:
+		if int(values.max()) > 2 ** 53 or int(values.min()) < -2 ** 53:
+			raise ValueError("an integer lies beyond 2**53, which a figwig file "
+				"cannot hold exactly; scale or clip the values first.")
+
+
 def _check_values_fit(name, dtype, values):
 	"""Raise if the values of a track with a declared dtype do not fit it."""
 
@@ -391,6 +444,13 @@ def _check_values_fit(name, dtype, values):
 	if block.size and (block.min() < info.min or block.max() > info.max):
 		raise ValueError("track {!r} is {}, and a value is outside {} to {}."
 			.format(name, dtype, info.min, info.max))
+
+
+def _header_crc(header_bytes):
+	"""The CRC-32 of a header's 128 bytes with its own CRC field as 0."""
+
+	at = _HEADER.fields['header_crc'][1]
+	return zlib.crc32(header_bytes[:at] + bytes(4) + header_bytes[at + 4:])
 
 
 def _chromosome_difference(theirs, ours):
@@ -424,6 +484,23 @@ def _unknown_chromosome(name, chrom_sizes):
 		shown += ", ... ({} in all)".format(len(names))
 	return "chromosome {!r} is not one of the file's chromosomes, {}.".format(
 		name, shown)
+
+
+def _lock_for_appending(handle, path):
+	"""Take the file's lock while appending to it, so that a second writer
+	appending at once, which would write its chunks over the first's, is
+	refused; the lock goes with the handle when it closes."""
+
+	try:
+		import fcntl
+	except ImportError:
+		return
+	try:
+		fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+	except OSError:
+		handle.close()
+		raise ValueError("{} is being appended to by another writer.".format(
+			path)) from None
 
 
 def _temporary_path(path):
@@ -602,6 +679,7 @@ class FigWigWriter:
 		self._times = None
 		self._written = False
 		self._adopted = set()
+		self._metadata = {}
 
 		source = None
 		if append:
@@ -618,6 +696,8 @@ class FigWigWriter:
 				source._level, source.order
 			if genome is None:
 				genome = source.genome
+			self._metadata = {key: value for key, value in source._metadata.items()
+				if key not in _METADATA_KEYS}
 			if attributes is None:
 				attributes = source.attributes
 			elif isinstance(attributes, dict):
@@ -715,7 +795,9 @@ class FigWigWriter:
 			# written at close, so the file reads as it did until then.
 			self._length = source._file_size
 			self._times = os.stat(self.path)
-			self._file = open(self.path, 'r+b')
+			handle = open(self.path, 'r+b')
+			_lock_for_appending(handle, self.path)
+			self._file = handle
 			self._file.seek(self._length)
 
 		if self.n_jobs > 1:
@@ -786,30 +868,8 @@ class FigWigWriter:
 			# from another file.
 			return numpy.array([i for i in range(len(self.tracks)) if int(
 				self._group_of[i]) not in self._adopted], dtype=numpy.int64), False
-
-		single = isinstance(tracks, (str, int, numpy.integer)) and \
-			not isinstance(tracks, bool)
-		items = [tracks] if single else tracks
-		if isinstance(items, (str, dict)) or not hasattr(items, '__iter__'):
-			raise TypeError("tracks must be a name, an index, or a list of "
-				"them, not {}.".format(type(tracks).__name__))
-
-		ids = []
-		for item in items:
-			if isinstance(item, str):
-				if item not in self._track_ids:
-					raise ValueError("{!r} is not one of the tracks.".format(item))
-				ids.append(self._track_ids[item])
-			elif isinstance(item, (int, numpy.integer)) and not isinstance(item,
-					bool):
-				if not 0 <= item < len(self.tracks):
-					raise ValueError("track {} is out of range; there are {} "
-						"tracks.".format(item, len(self.tracks)))
-				ids.append(int(item))
-			else:
-				raise TypeError("tracks must be names or indices, not {}.".format(
-					type(item).__name__))
-
+		ids, single = _track_indices(tracks, self._track_ids, len(self.tracks),
+			"the writer's")
 		return numpy.array(ids, dtype=numpy.int64), single
 
 	def _whole_groups(self, ids):
@@ -1114,6 +1174,7 @@ class FigWigWriter:
 		groups = self._whole_groups(ids)
 
 		values = numpy.asarray(values)
+		_check_exact(values)
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 
@@ -1315,6 +1376,7 @@ class FigWigWriter:
 		positions = _positions(positions, 'positions')
 		n = len(positions)
 		values = numpy.asarray(values)
+		_check_exact(values)
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 		if values.shape != (n,):
@@ -1446,6 +1508,11 @@ class FigWigWriter:
 		high = tids * len(self._groups) + group_ids
 		if (high[1:] == high[:-1]).all():
 			return numpy.argsort(low, kind='stable')
+		# One key of the two sorts in a third of a lexsort's time where the
+		# chromosome and group fit above the position's bits.
+		high_bits = int(high.max()).bit_length()
+		if longest + 25 + high_bits <= 63:
+			return numpy.argsort((high << (longest + 25)) | low, kind='stable')
 		return numpy.lexsort((low, high))
 
 	def _write_group(self, g, tid, starts, ends, values, by_base):
@@ -1459,13 +1526,12 @@ class FigWigWriter:
 
 		first_tile = int(starts[0] // tile)
 		open_ = self._open[g]
-		preset = False
 		if open_ is not None:
-			if open_[0] == tid and open_[1] == first_tile:
-				preset = True
-			else:
+			# A tile the earlier calls left open is continued when it is the
+			# first of this call's, and sealed otherwise.
+			if open_[0] != tid or open_[1] != first_tile:
 				self._encode(g, open_[0], numpy.array([open_[1]]), None, None,
-					None, True, False)
+					None, False)
 			self._open[g] = None
 
 		# The tiles the items touch; the others stay zero and take nothing. A
@@ -1521,8 +1587,7 @@ class FigWigWriter:
 					keep_last = b == len(tiles) and f == len(segment) and \
 						not last_full
 					self._encode(g, tid, segment[e:f], lo[e:f], hi[e:f], (starts,
-						ends, values, by_base), preset and a == 0 and e == 0,
-						keep_last)
+						ends, values, by_base), keep_last)
 
 		if not last_full:
 			self._open[g] = (tid, last_tile)
@@ -1544,7 +1609,7 @@ class FigWigWriter:
 		open_ = self._open[g]
 		if open_ is not None:
 			self._encode(g, open_[0], numpy.array([open_[1]]), None, None, None,
-				True, False)
+				False)
 			self._open[g] = None
 
 		tiles = positions // tile
@@ -1603,7 +1668,7 @@ class FigWigWriter:
 			done = _encode_entries(self.tile, n_tracks, tiles[t:], first[t:],
 				slots, positions, values, self._classes[g], self._matrix,
 				self.level > 0, out, bounds, kinds, stats, tile_sums[t:])
-			parts.append(self._compress(g, tid, tiles[t:], done, out, bounds,
+			parts.append(self._compress(tid, tiles[t:], done, out, bounds,
 				kinds))
 			t += done
 		return _gather_parts(parts) + (stats, self._summary_of(tid, tiles,
@@ -1643,13 +1708,13 @@ class FigWigWriter:
 			done = _encode_dense_tiles(tile, values, items[t:], columns[t:],
 				self._classes[g], self._matrix, self.level > 0, out, bounds, kinds,
 				stats, tile_sums[t:])
-			parts.append(self._compress(g, tid, tiles[t:], done, out, bounds,
+			parts.append(self._compress(tid, tiles[t:], done, out, bounds,
 				kinds))
 			t += done
 		return _gather_parts(parts) + (stats, self._summary_of(tid, tiles,
 			tile_sums))
 
-	def _encode(self, g, tid, tiles, lo, hi, items, preset, keep_last):
+	def _encode(self, g, tid, tiles, lo, hi, items, keep_last):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
 		on this thread, since it fills the group's buffer, and hand the
 		chunks it made to the compressors."""
@@ -1683,12 +1748,12 @@ class FigWigWriter:
 			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
 			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
 			n_done = _encode_tiles(tile, tiles[t:], lo[t:], hi[t:], starts, ends,
-				values, by_base, self._buffers[g], preset and t == 0, keep_last,
+				values, by_base, self._buffers[g], keep_last,
 				self._classes[g], self._matrix, self.level > 0, out, bounds, kinds,
 				stats, tile_sums[t:])
 			live = numpy.flatnonzero(kinds[:n_done])
 			if len(live) > 0:
-				args = (g, tid, tiles[t:], n_done, out, bounds, kinds)
+				args = (tid, tiles[t:], n_done, out, bounds, kinds)
 				if self._pool is None:
 					self._inflight.append((self._compress(*args), g, None))
 				else:
@@ -1747,7 +1812,7 @@ class FigWigWriter:
 				"declare the track float64 to keep it.".format(self.tracks[i][
 				'name']))
 
-	def _compress(self, g, tid, tiles, n_done, out, bounds, kinds):
+	def _compress(self, tid, tiles, n_done, out, bounds, kinds):
 		"""Compress the first `n_done` encoded tiles of a batch. Returns
 		(compressed bytes, sizes, raw sizes, kind bytes, file tiles) of the
 		live tiles. A chunk that compression would grow is stored as it is,
@@ -1883,7 +1948,9 @@ class FigWigWriter:
 		if self._summaries:
 			tiles = positions // self.tile
 			unique, inverse = numpy.unique(tiles, return_inverse=True)
-			sums = numpy.bincount(inverse, weights=values, minlength=len(unique))
+			# NaN bases are no part of the sums, as in position order.
+			sums = numpy.bincount(inverse, weights=numpy.where(values == values,
+				values, 0.0), minlength=len(unique))
 			summary = (self._tile_offsets[tid] + unique, sums.astype(
 				numpy.float32)[:, None])
 		return compressed, sizes, raw, kinds, records, None, stats, summary
@@ -1957,7 +2024,7 @@ class FigWigWriter:
 			for g, open_ in enumerate(self._open):
 				if open_ is not None:
 					self._encode(g, open_[0], numpy.array([open_[1]]), None, None,
-						None, True, False)
+						None, False)
 					self._open[g] = None
 			for t in range(len(self._pending)):
 				if self._pending[t] is not None:
@@ -1967,7 +2034,7 @@ class FigWigWriter:
 			for i, track in enumerate(self.tracks):
 				if track['dtype'] is None:
 					sum_, nonzero, low, high, flags, _ = self._stats[i]
-					track['dtype'] = _infer_dtype(sum_, nonzero, low, high, flags)
+					track['dtype'] = _infer_dtype(nonzero, low, high, flags)
 
 			chroms_offset = self._file.tell()
 			chrom_table = b''.join(struct.pack('<H', len(name.encode())) +
@@ -1982,17 +2049,17 @@ class FigWigWriter:
 			stats['max'] = numpy.where(self._stats[:, 1] > 0, self._stats[:, 3], 0)
 
 			metadata_offset = tracks_offset + stats.nbytes
-			metadata = _json({'genome': self.genome, 'attributes': self.attributes,
-				'order': self.order, 'tracks': self.tracks}, "the metadata").encode()
+			from . import __version__
+			metadata = _json({**self._metadata, 'figwig': __version__, 'genome':
+				self.genome, 'attributes': self.attributes, 'order': self.order,
+				'tracks': self.tracks}, "the metadata").encode()
 
 			# Each group's record carries the CRC-32 of its index bytes, and
 			# the header that of the tables and the directory, so that a
 			# reader refuses a damaged table rather than reading by it.
 			index_offset = metadata_offset + len(metadata)
-			directory = numpy.zeros(len(self._groups), dtype='<u8')
-			position = index_offset + directory.nbytes
-			records = []
-			for g in range(len(self._groups)):
+
+			def record_of(g):
 				if self.order == 'tracks':
 					blocks = numpy.concatenate(self._blocks[g]) if self._blocks[g] \
 						else numpy.zeros(0, dtype=_BLOCK)
@@ -2010,10 +2077,19 @@ class FigWigWriter:
 					body = runs.tobytes() + struct.pack('<II', len(live), len(stream)) \
 						+ stream
 					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
-				record += self._summary_record(g)
+				return record + self._summary_record(g)
+
+			# Each group's record deflates its live tiles and summary, which
+			# for thousands of groups is seconds on one thread.
+			if self._pool is None:
+				records = [record_of(g) for g in range(len(self._groups))]
+			else:
+				records = list(self._pool.map(record_of, range(len(self._groups))))
+			directory = numpy.zeros(len(self._groups), dtype='<u8')
+			position = index_offset + directory.nbytes
+			for g, record in enumerate(records):
 				directory[g] = position
 				position += len(record)
-				records.append(record)
 
 			tables = chrom_table + stats.tobytes() + metadata + directory.tobytes()
 			self._file.write(tables)
@@ -2039,6 +2115,7 @@ class FigWigWriter:
 			header['metadata'] = metadata_offset
 			header['metadata_length'] = len(metadata)
 			header['length'] = length
+			header['header_crc'] = _header_crc(header.tobytes())
 			if self._length is not None:
 				# The header is the one write over the file as it was, so
 				# everything it points to is on disk before it.
@@ -2128,7 +2205,16 @@ def _items_to_entries(starts, ends, values):
 
 
 def _open_read(path):
-	return os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+	"""A descriptor on `path` for reading, which must be a regular file:
+	a directory, a FIFO or a device would hang or fail inside a read."""
+
+	try:
+		if not stat.S_ISREG(os.stat(path).st_mode):
+			raise ValueError("{} is not a regular file.".format(path))
+		return os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+	except OSError as e:
+		raise ValueError("{} cannot be read: {}".format(path, e.strerror or
+			e)) from None
 
 
 class FigWigReader:
@@ -2199,7 +2285,9 @@ class FigWigReader:
 
 	stats: numpy.ndarray, shape=(tracks,)
 		A structured array with each track's 'sum', 'nonzero' bases, 'min'
-		and 'max'.
+		and 'max', over the bases that are not NaN: a NaN base is stored
+		and read back but is no part of the statistics, so a track whose
+		uncovered bases are NaN keeps those of its covered ones.
 	"""
 
 	def __init__(self, path: str | os.PathLike, verify: bool = False):
@@ -2219,6 +2307,10 @@ class FigWigReader:
 			header = numpy.frombuffer(raw, dtype=_HEADER)[0]
 			if int(header['magic']) != _FIGWIG_MAGIC:
 				raise ValueError("{} is not a figwig file.".format(self.path))
+			if _header_crc(header_bytes) != int(header['header_crc']) and int(
+					header['version']) == _VERSION:
+				raise ValueError(error + ": its header does not match its "
+					"checksum; the file is corrupt.")
 			if int(header['version']) != _VERSION:
 				raise ValueError(error + ": it is version {} of the format, and "
 					"this figwig reads version {}; {}".format(int(header[
@@ -2227,6 +2319,13 @@ class FigWigReader:
 					if int(header['version']) < _VERSION else "a newer figwig "
 					"wrote it."))
 
+			if int(header['required']) & ~_KNOWN_REQUIRED:
+				raise ValueError(error + ": it needs a feature this figwig does not "
+					"know (bits {:#x}); a newer figwig wrote it.".format(int(header[
+					'required']) & ~_KNOWN_REQUIRED))
+			if int(header['flags']) & ~_FLAG_TRACKS:
+				raise ValueError(error + ": its flags hold a bit this figwig does "
+					"not know; a newer figwig wrote it.")
 			tile, codec = int(header['tile']), int(header['codec'])
 			if not _MIN_TILE <= tile <= _MAX_TILE or tile & (tile - 1) != 0:
 				raise ValueError(error + ": its tile size, {}, is not a power of "
@@ -2286,9 +2385,13 @@ class FigWigReader:
 			raw = _pread(fd, metadata_length, offsets[2])
 			try:
 				metadata = json.loads(raw.decode())
-			except (UnicodeDecodeError, ValueError):
+			except (UnicodeDecodeError, ValueError, RecursionError):
 				raise ValueError(error + ": its metadata is not a JSON "
 					"document.") from None
+			if not isinstance(metadata, dict) or not isinstance(metadata.get(
+					'attributes', {}), dict) or metadata.get('attributes') is None:
+				raise ValueError(error + ": its metadata is not a JSON object with "
+					"attributes.")
 
 			directory = tables[offsets[3] - offsets[0]:]
 		finally:
@@ -2314,6 +2417,8 @@ class FigWigReader:
 		self.tracks = tracks
 		self.genome = metadata.get('genome')
 		self.attributes = metadata.get('attributes') or {}
+		self.written_by = metadata.get('figwig')
+		self._metadata = metadata
 		self.order = order
 		self.stats = stats
 		self.tile = tile
@@ -2343,6 +2448,9 @@ class FigWigReader:
 		self._lengths = numpy.array([length for _, length in chroms],
 			dtype=numpy.int64)
 		self._tile_offsets, self._n_tiles = _tile_offsets(self._lengths, tile)
+		if self._n_tiles > _MAX_TILES:
+			raise ValueError(error + ": its chromosomes make {:,} tiles of {} "
+				"bases, more than a figwig file holds.".format(self._n_tiles, tile))
 		self._index = [None] * n_groups
 		self._summary_at = [None] * n_groups
 		self._runs = [None] * n_groups
@@ -2547,6 +2655,14 @@ class FigWigReader:
 				).any() or ((kinds & _STORED > 0) & (sizes != raws)).any() or (
 				self._codec == _CODEC_NONE and (sizes != raws).any()):
 			raise ValueError(error + ": a chunk's kind and size disagree.")
+		# No chunk of the group is larger than its dense float64 form plus
+		# its headers, so a declared size past that asks for memory the
+		# chunk cannot fill.
+		n_tracks = len(self._groups[g])
+		largest = n_tracks * self.tile * 8 + 16 * n_tracks + 64
+		if (raws > largest).any() or (sizes > largest + 64).any():
+			raise ValueError(error + ": a chunk's size is larger than any chunk "
+				"of {} tracks can be.".format(n_tracks))
 
 		offsets = numpy.zeros(n, dtype=numpy.int64)
 		covered = numpy.zeros(n, dtype=numpy.bool_)
@@ -2569,6 +2685,12 @@ class FigWigReader:
 
 		if (sizes[~covered] != 0).any():
 			raise ValueError(error + ": a chunk lies in no run.")
+		if len(runs) > 1:
+			order = numpy.argsort(runs['offset'], kind='stable')
+			ends = runs['offset'][order] + runs['bytes'][order]
+			if (runs['offset'][order][1:] < ends[:-1]).any():
+				raise ValueError(error + ": two runs of chunks overlap in the "
+					"file.")
 
 		self._runs[g] = runs
 		return kinds, sizes, raws, offsets, crcs
@@ -2653,6 +2775,9 @@ class FigWigReader:
 			names = list(self.chrom_sizes)
 		else:
 			names = [chroms] if isinstance(chroms, str) else list(chroms)
+			if len(names) == 0:
+				raise ValueError("chroms must name at least one chromosome, or be "
+					"None for all of them.")
 			for name in names:
 				if name not in self._tids:
 					raise ValueError(_unknown_chromosome(name, self.chrom_sizes))
@@ -2667,9 +2792,9 @@ class FigWigReader:
 					"an earlier figwig.".format(self.path, self.tracks[int(
 					self._groups[g][0])]['name']))
 			tiles, sums = summary
-			for channel, i in enumerate(ids.tolist()):
-				if self._group_of[i] == g:
-					out[channel, tiles] = sums[:, self._slot_of[i]]
+			channels = numpy.flatnonzero(self._group_of[ids] == g)
+			out[numpy.ix_(channels, tiles)] = sums[:, self._slot_of[ids[
+				channels]]].T
 
 		pieces = []
 		for name in names:
@@ -2717,6 +2842,10 @@ class FigWigReader:
 		if (blocks['offset'] > limit).any() or (blocks['size'].astype(
 				numpy.uint64) > limit - blocks['offset']).any():
 			raise ValueError(error + ": a block lies outside the file.")
+		if (blocks['raw'].astype(numpy.int64) > 12 * blocks['n'].astype(
+				numpy.int64) + 64).any():
+			raise ValueError(error + ": a block's size is larger than its entries "
+				"can be.")
 		keys = (blocks['chrom'].astype(numpy.int64) << 32) | blocks['first']
 		if (keys[1:] <= keys[:-1]).any() or ((blocks['chrom'][1:] == blocks[
 				'chrom'][:-1]) & (blocks['first'][1:] <= blocks['last'][:-1])).any():
@@ -2817,8 +2946,8 @@ class FigWigReader:
 
 	def sums(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, ends: list[int] | numpy.ndarray, tracks: str | int | list
-		| None = None, dtype=None, n_jobs: int = 8, nan: str = 'propagate') -> \
-		numpy.ndarray:
+		| None = None, dtype=None, n_jobs: int = 8, nan: str = 'propagate',
+		paired: bool = False) -> numpy.ndarray:
 		"""The sum of each track over intervals of any lengths.
 
 		Each interval is `chroms[i]`, from `starts[i]` to `ends[i]`, and
@@ -2856,10 +2985,16 @@ class FigWigReader:
 			'count', for a file written with its uncovered bases NaN. Default
 			is 'propagate'.
 
+		paired: bool, optional
+			Whether `tracks` names one track per interval, interval i being
+			summed over track tracks[i] alone, as a read's span over the read
+			that is its track; the result is then (n,). Default is False.
+
 		Returns
 		-------
 		sums: numpy.ndarray, shape=(n, tracks) or (n,)
-			Each interval's sum in each track, or in the one track named.
+			Each interval's sum in each track, or in the one track named, or
+			in its own track with `paired`.
 		"""
 
 		starts = _positions(starts, 'starts')
@@ -2869,10 +3004,38 @@ class FigWigReader:
 				.format(starts.shape, ends.shape))
 		if (ends < starts).any():
 			raise ValueError("an interval's end is before its start.")
+		if paired:
+			return self._paired_sums(chroms, starts, ends, tracks, dtype, n_jobs,
+				nan)
 		width = int((ends - starts).max()) if len(starts) else 1
 		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
 			n_jobs, False, None, max(width, 1), ends, nan)
 		return out[..., 0]
+
+	def _paired_sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan):
+		"""`sums` with a track per interval: one summed read per distinct
+		track over its intervals, which is linear where a sum of every
+		track over every interval is quadratic."""
+
+		if tracks is None:
+			raise ValueError("paired=True needs one track per interval in tracks.")
+		ids, _ = _track_indices(tracks, self._track_ids, len(self.tracks),
+			"the file's")
+		if ids.shape != starts.shape:
+			raise ValueError("paired=True needs one track per interval, {}, not "
+				"{}.".format(starts.shape, ids.shape))
+		names, codes = _chrom_codes(chroms, len(starts))
+		chroms = numpy.array(names)[codes]
+		out = None
+		for i in numpy.unique(ids).tolist():
+			mine = numpy.flatnonzero(ids == i)
+			found = self.sums(chroms[mine], starts[mine], ends[mine], tracks=i,
+				dtype=dtype, n_jobs=n_jobs, nan=nan)
+			if out is None:
+				out = numpy.zeros(len(starts), dtype=found.dtype)
+			out[mine] = found
+		return out if out is not None else numpy.zeros(0, dtype=self._dtype(ids,
+			dtype, True))
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
 		labels, bins, stops, nan='propagate'):
@@ -2968,8 +3131,13 @@ class FigWigReader:
 			tasks = []
 			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
 			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
-			for g in groups_read:
-				mine = self._group_of[read_ids] == g
+			# The tracks read, grouped once: a scan per group would cost
+			# tracks times groups on a read of thousands of each.
+			by_group = numpy.argsort(self._group_of[read_ids], kind='stable')
+			edges = numpy.searchsorted(self._group_of[read_ids][by_group],
+				numpy.array(groups_read + [len(self._groups)]))
+			for k, g in enumerate(groups_read):
+				mine = by_group[edges[k]:edges[k + 1]]
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 				slots[self._slot_of[read_ids[mine]]] = channels[mine]
 				planned, cut = self._plan(g, slots, tiles, starts, width, None, mode,
@@ -2997,8 +3165,10 @@ class FigWigReader:
 		inner = None
 		if not sparse:
 			n_bytes = int(numpy.prod(shape)) * dtype.itemsize
+			accumulator = int(numpy.prod(shape)) * 8 if summing and dtype.itemsize \
+				< 8 else 0
 			if out is None:
-				if n_bytes * (1 + buffers) > _MAX_DENSE_BYTES:
+				if n_bytes * (1 + buffers) + accumulator > _MAX_DENSE_BYTES:
 					raise ValueError("the dense output would take {:.1f} GiB{}; read "
 						"fewer windows or tracks at a time, pass out=, or, for tracks "
 						"that are mostly zero, ask for sparse=True or labels=.".format(
@@ -3107,7 +3277,15 @@ class FigWigReader:
 				_, s in extra])
 			channels = numpy.concatenate([channels] + [c for c, _ in extra])
 
-		# One key per entry sorts several times faster than three keys.
+		# The tasks list each window's offsets in order, so a stable
+		# counting sort on (row, channel) is enough, in linear time; a key
+		# per entry sorts the rest.
+		if n * n_channels <= 4 * len(rows) + 1024:
+			rows_, channels_, offsets_, values_, ok = _bucket_sort(rows, channels,
+				offsets, values, n_channels, n * n_channels)
+			if ok:
+				return SparseWindows(rows_, channels_, offsets_, values_.astype(
+					dtype, copy=False), (n, n_channels, width))
 		key = (rows * n_channels + channels) * width + offsets
 		order = numpy.argsort(key)
 		del key
@@ -3175,37 +3353,16 @@ class FigWigReader:
 			in range(4)])
 
 	def _select(self, tracks):
+		"""The tracks a call names, as (track ids in channel order, whether a
+		single track was named); None is every track."""
+
 		if tracks is None:
 			return numpy.arange(len(self.tracks)), False
-
-		single = isinstance(tracks, (str, int, numpy.integer)) and \
-			not isinstance(tracks, bool)
-		items = [tracks] if single else tracks
-		if isinstance(items, (str, dict)) or not hasattr(items, '__iter__'):
-			raise TypeError("tracks must be a name, an index, or a list of "
-				"them, not {}.".format(type(tracks).__name__))
-
-		ids = []
-		for item in items:
-			if isinstance(item, str):
-				if item not in self._track_ids:
-					raise ValueError("{!r} is not one of the file's tracks."
-						.format(item))
-				ids.append(self._track_ids[item])
-			elif isinstance(item, (int, numpy.integer)) and not isinstance(item,
-					bool):
-				if not 0 <= item < len(self.tracks):
-					raise ValueError("track {} is out of range; the file has {} "
-						"tracks.".format(item, len(self.tracks)))
-				ids.append(int(item))
-			else:
-				raise TypeError("tracks must be names or indices, not {}.".format(
-					type(item).__name__))
-
+		ids, single = _track_indices(tracks, self._track_ids, len(self.tracks),
+			"the file's")
 		if len(ids) == 0:
 			raise ValueError("tracks must name at least one track.")
-
-		return numpy.array(ids, dtype=numpy.int64), single
+		return ids, single
 
 	def _dtype(self, ids, dtype, summing=False):
 		"""The output dtype for these tracks, checked against their values:
@@ -3218,7 +3375,9 @@ class FigWigReader:
 		own = [numpy.dtype(_DTYPES[c]) for c in codes.tolist()]
 		if dtype is None:
 			if summing:
-				dtype = numpy.result_type(numpy.float32, *own)
+				# Integer counts sum past float32's 2**24 in a few windows.
+				dtype = numpy.dtype(numpy.float64) if any(d.kind in 'iu' for d in
+					own) else numpy.result_type(numpy.float32, *own)
 			elif len(own) == 1:
 				dtype = own[0]
 			else:
@@ -3400,37 +3559,59 @@ class FigWigReader:
 		if len(tasks) == 0:
 			return
 
-		kernels = (_read_tiles, _check_chunks, _list_tiles, _read_blocks,
-			_check_blocks, _inflate_chunks)
+		# The first task runs alone only while a kernel this read calls is
+		# not compiled yet; a kernel another kind of read uses does not
+		# matter, or every read would start with a serial task.
+		if isinstance(tasks[0], _BlockTask):
+			kernels = (_read_blocks, _check_blocks)
+		elif tasks[0].mode == 'list':
+			kernels = (_list_tiles, _check_chunks)
+		else:
+			kernels = (_read_tiles, _check_chunks)
 		first = []
 		if any(not getattr(kernel, 'signatures', True) for kernel in kernels):
 			first.append(tasks[0])
 
 		rest = tasks[len(first):]
 		fd = _open_read(self.path)
+		pool = self._pool_for(n_threads) if n_threads > 1 and len(rest) > 1 \
+			else None
+
+		def run_all(tasks_):
+			# The tasks in n_threads shares, so that a read on fewer threads
+			# than the pool has takes no more than it asked for.
+			if pool is None or len(tasks_) <= 1:
+				for task in tasks_:
+					task.run(fd)
+				return
+
+			def run_share(k):
+				for task in tasks_[k::n_threads]:
+					task.run(fd)
+
+			list(pool.map(run_share, range(min(n_threads, len(tasks_)))))
+
 		try:
 			for task in first:
 				task.run(fd)
 
-			if n_threads == 1 or len(rest) <= 1:
-				for task in rest:
-					task.run(fd)
-			elif summed is None or not copies:
-				pool = self._pool_for(n_threads)
-				if summed is None:
-					list(pool.map(lambda task: task.run(fd), rest))
+			if summed is None or not copies:
+				if summed is None or not rest or isinstance(rest[0], _BlockTask):
+					run_all(rest)
 				else:
 					a = 0
 					while a < len(rest):
 						b = a + 1
 						while b < len(rest) and rest[b].g == rest[a].g:
 							b += 1
-						list(pool.map(lambda task: task.run(fd), rest[a:b]))
+						run_all(rest[a:b])
 						a = b
+			elif pool is None:
+				for task in rest:
+					task.run(fd)
 			else:
 				# Each thread adds its copy as it finishes, under a lock, so
 				# the adds overlap the threads still reading.
-				pool = self._pool_for(n_threads)
 				lock = threading.Lock()
 
 				def run_share(k):
@@ -3561,12 +3742,22 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 	ends = numpy.cumsum(s)
 	starts = ends - s
 	raw = numpy.empty(int(s.sum()) + 8, dtype=numpy.uint8)
-	for r0, r1 in zip(breaks[:-1], breaks[1:]):
-		position, end = int(starts[r0]), int(ends[r1 - 1])
-		got = _pread_into(fd, raw[position:end], int(o[r0]))
-		if got < end - position:
-			raise ValueError("{} ends inside a chunk; the file is truncated."
-				.format(reader.path))
+	run_starts = starts[breaks[:-1]]
+	run_ends = ends[numpy.asarray(breaks[1:], dtype=numpy.int64) - 1]
+	run_offsets = o[breaks[:-1]].astype(numpy.int64)
+	got = numpy.zeros(len(run_starts), dtype=numpy.int64)
+	pread = _libc_pread()
+	if pread is not None:
+		# Without the GIL: the threads of a read would otherwise take turns
+		# holding it through every pread.
+		_pread_runs(pread, fd, raw, run_offsets, run_starts, run_ends, got)
+	for k in range(len(run_starts)):
+		position, end = int(run_starts[k]), int(run_ends[k])
+		if got[k] != end - position:
+			if _pread_into(fd, raw[position:end], int(run_offsets[k])) < end - \
+					position:
+				raise ValueError("{} ends inside a chunk; the file is truncated."
+					.format(reader.path))
 
 	# Back to the batch's own order.
 	starts_in = numpy.empty_like(starts)

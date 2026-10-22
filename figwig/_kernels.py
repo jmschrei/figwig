@@ -841,3 +841,23 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing,
 					i += 1
 
 				offset = item + count * size
+
+
+_LIBC_PREAD = []
+
+
+def _libc_pread():
+	"""libc's pread() as a ctypes function, for `_pread_runs` to call
+	without the GIL, or None where there is none (Windows)."""
+
+	if not _LIBC_PREAD:
+		import ctypes
+		try:
+			function = ctypes.CDLL(None).pread
+			function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+				ctypes.c_int64]
+			function.restype = ctypes.c_ssize_t
+			_LIBC_PREAD.append(function)
+		except (OSError, AttributeError, TypeError):
+			_LIBC_PREAD.append(None)
+	return _LIBC_PREAD[0]

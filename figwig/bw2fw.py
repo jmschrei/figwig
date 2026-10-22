@@ -35,7 +35,11 @@ from .figwig import FigWigWriter
 
 # A chromosome is read and written this many bases at a time, as windows of
 # this many bases.
+# A piece of a chromosome is read as one call on the bigWigs and written
+# as one call on the figwig file; the reader thread is the bottleneck at
+# -p 8, so pieces are as long as 64 MB of float32 across a group allows.
 _PIECE = 1 << 22
+_PIECE_BYTES = 1 << 26
 _WINDOW = 1 << 16
 
 
@@ -175,8 +179,10 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 				# A piece is read as windows of a tile's width, so that the
 				# bigWig reader's batches spread over the threads.
 				width = int(min(_WINDOW, length))
-				for a in range(0, length, _PIECE):
-					starts = numpy.arange(a, min(length, a + _PIECE), width)
+				piece = max(_PIECE, min(1 << 24, _PIECE_BYTES // (4 * len(group))))
+				piece -= piece % width
+				for a in range(0, length, piece):
+					starts = numpy.arange(a, min(length, a + piece), width)
 					yield g, group, names, chrom, starts, width
 
 	def read_piece(piece):
@@ -190,9 +196,13 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 	# encodes and compresses on its own threads, and the arrays read here
 	# are handed to it without a copy, since nothing here touches them
 	# again.
+	# The file records how its bases that no interval covered were written,
+	# so that fw2bw can write them back the same way.
+	attributes = {'missing': 'nan' if missing != missing else repr(float(
+		missing))}
 	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
-			groups=groups, level=level, n_jobs=n_jobs, append=append) as writer, \
-			ThreadPoolExecutor(1) as reader:
+			groups=groups, level=level, n_jobs=n_jobs, append=append,
+			attributes=attributes) as writer, ThreadPoolExecutor(1) as reader:
 		writer._copies = False
 		ahead = None
 		for piece in pieces(writer):

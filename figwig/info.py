@@ -9,10 +9,12 @@ sum and attributes, as a tab-separated table.
 """
 
 import argparse
+import json
 import os
 import sys
 
 from ._tables import _exit
+from .figwig import _VERSION
 from .figwig import FigWigReader
 
 
@@ -33,6 +35,8 @@ def _describe(reader, count_bytes=False):
 	size = os.path.getsize(reader.path)
 	lines = [
 		"{}".format(reader.path),
+		"version\t{}".format(_VERSION),
+		"written by\tfigwig {}".format(reader.written_by or ''),
 		"genome\t{}".format(reader.genome if reader.genome is not None else ''),
 		"order\t{}".format(reader.order),
 		"tile\t{}".format(reader.tile),
@@ -61,7 +65,7 @@ def _describe(reader, count_bytes=False):
 			lines.append("bytes past the end\t{}".format(size - int(
 				reader._file_size)))
 	for key, value in reader.attributes.items():
-		lines.append("attribute\t{}\t{}".format(key, value))
+		lines.append("attribute\t{}\t{}".format(_shown(key), _shown(value)))
 
 	keys = []
 	for track in reader.tracks:
@@ -69,13 +73,24 @@ def _describe(reader, count_bytes=False):
 			if key not in ('name', 'dtype', 'group') and key not in keys:
 				keys.append(key)
 	lines.append('')
-	lines.append('\t'.join(['name', 'dtype', 'group', 'nonzero', 'sum'] + keys))
+	lines.append('\t'.join(['name', 'dtype', 'group', 'nonzero', 'sum'] + [
+		_shown(key) for key in keys]))
 	for i, track in enumerate(reader.tracks):
 		stat = reader.stats[i]
-		lines.append('\t'.join([track['name'], track['dtype'], str(track['group']),
-			str(int(stat['nonzero'])), repr(float(stat['sum']))] + [str(track.get(
-			key, '')) for key in keys]))
+		lines.append('\t'.join([_shown(track['name']), track['dtype'], str(track[
+			'group']), str(int(stat['nonzero'])), repr(float(stat['sum']))] + [
+			_shown(track.get(key, '')) for key in keys]))
 	return lines
+
+
+def _shown(value):
+	"""A value from the file as one line of printable text: a string with
+	its control characters escaped, anything else as JSON."""
+
+	if not isinstance(value, str):
+		value = json.dumps(value, ensure_ascii=False)
+	return ''.join(c if c.isprintable() or c == ' ' else '\\x{:02x}'.format(
+		ord(c)) if ord(c) < 256 else '\\u{:04x}'.format(ord(c)) for c in value)
 
 
 def main(argv=None, prog='figwig info'):
@@ -88,9 +103,9 @@ def main(argv=None, prog='figwig info'):
 		for line in _describe(reader, args.bytes):
 			print(line)
 		sys.stdout.flush()
-	except (ValueError, TypeError, OSError) as e:
-		raise _exit(prog, e)
 	except BrokenPipeError:
 		# The reader of the output, such as `head`, has gone; say nothing.
 		os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
 		raise SystemExit(0)
+	except (ValueError, TypeError, OSError) as e:
+		raise _exit(prog, e)

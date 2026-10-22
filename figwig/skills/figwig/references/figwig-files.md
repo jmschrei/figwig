@@ -14,9 +14,11 @@ directory of bigWigs is read in windows again and again.
 FigWigReader(path)
 reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
 	sparse=False, labels=None, bins=None, nan='propagate')
-reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8, nan='propagate')
+reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8, nan='propagate',
+	paired=False)
 	# -> (n, tracks): totals over intervals of any lengths; nan='skip' leaves NaN
-	# bases out, nan='count' gives the bases that are not NaN (covered-base means)
+	# bases out, nan='count' gives the bases that are not NaN (covered-base means);
+	# paired=True sums interval i over track tracks[i] alone, (n,)
 reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
 reader.tile_sums(tracks=None, chroms=None)  # -> float32 (tracks, tiles): sums per tile, no decoding
 reader.select(**attributes)          # -> int64 indices, for `tracks`
@@ -43,8 +45,8 @@ write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genom
 |---|---|
 | dense `(n, tracks, width)` in the tracks' dtype | default; raises past 8 GiB unless `out=` is given |
 | `SparseWindows(rows, channels, offsets, values, shape)` | `sparse=True`; sorted by row, channel, offset |
-| dense `(n, labels, width)` float32 sums | `labels=` one int per track read, -1 skips |
-| dense `(n, tracks, width // bins)` float32 sums per bin | `bins=` a divisor of `width`; `bins=width` is each window's total |
+| dense `(n, labels, width)` sums, float64 for integer tracks and float32 otherwise | `labels=` one int per track read, -1 skips |
+| dense `(n, tracks, width // bins)` sums per bin, the same dtypes | `bins=` a divisor of `width`; `bins=width` is each window's total |
 
 | `order=` | layout | fast | slow |
 |---|---|---|---|
@@ -52,7 +54,9 @@ write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genom
 | `'tracks'` / `'csr'` | each track's nonzero bases in blocks per chromosome, raw by default | `read_entries` of a few tracks | windows over thousands of tracks (one block per track per window) |
 
 `figwig reorder in.fw out.fw --order tracks|positions` rewrites a file in the
-other order, keeping its tile, groups and level; `out.fw` may be `in.fw`.
+other order, keeping its tile and groups, and its level only within one
+order (track order is level 0 unless `-l` is given, 3 to 4x larger);
+`out.fw` may be `in.fw`.
 `figwig merge -o all.fw a.fw b.fw` copies several files' tracks into one
 (same chromosomes, tile, level and order; `reorder` first otherwise).
 `FigWigWriter(path, None, new_tracks, append=True)` adds tracks to a file in
@@ -137,7 +141,13 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
   one track of a group of 8 decodes all 8. Files meant to be read a track at a
   time should be written with small groups, and groups should hold tracks of
   one kind: a count track grouped with a float track is stored as float
-  values and decoded with it. The defaults (tile 16,384, groups of 8) suit
+  values and decoded with it. For a *reads* dimension (Fiber-seq reads or
+  cells as tracks, read all at once over a window), the rule is the other
+  way: one group per channel over all the reads is 20-50x faster than a
+  group per read, and position order beats track order. Reads as their own
+  "chromosomes" (each read a chromosome of its length, with 2 tracks) also
+  works for per-read access, with genome coordinates in the attributes. The
+  defaults (tile 16,384, groups of 8) suit
   count tracks, for which one group of many tracks reads 8 of 48 tracks
   2-4x faster than 48 groups of one, since a sparse chunk's other tracks
   are stepped over cheaply; dense float tracks read in short windows
@@ -317,4 +327,10 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
 | `was written with order|tile|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of files with different layouts or chromosome sets; `reorder` one first, or `bw2fw -s` the same sizes |
 | `does not match its checksum` | `verify=True` found a corrupt chunk |
+| `its header does not match its checksum` | a damaged header (version 5 keeps a CRC-32 of it); the file is corrupt |
+| `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it; upgrade figwig |
+| `is being appended to by another writer` | two `append=True` writers on one file at once; wait for the first to close |
+| `an integer lies beyond 2**53, which a figwig file cannot hold exactly` | a 64-bit integer the file's float64 cannot keep; scale or clip first |
+| `is not a regular file` | the path is a directory, FIFO or device |
+| `paired=True needs one track per interval` | `sums(paired=True)` without `tracks`, or with another count than the intervals |
 | `cannot be read as a figwig file`, `a chunk of ... cannot be read` | a truncated or corrupt file; every such case raises `ValueError` |

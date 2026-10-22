@@ -87,8 +87,9 @@ later.
 
 | You see… | Read |
 |---|---|
-| any `ValueError`, `TypeError` or `UserWarning` raised by figwig | `references/errors.md` |
-| a file written by figwig that no reader opens ("is not a bigWig file") | `references/errors.md` |
+| any `ValueError`, `TypeError` or `UserWarning` raised by figwig's bigWig reader, writer or `bam2bw` | `references/errors.md` |
+| any error from a figwig file (`.fw`): its `FigWigReader`, `FigWigWriter` or converters | the Errors table of `references/figwig-files.md` |
+| a bigWig written by figwig that no reader opens ("is not a bigWig file") | `references/errors.md` |
 | values that are 0 where you expected NaN, or the reverse | `references/reading.md` |
 | `figwig bam2bw` running on one core, or a minus-strand bigWig that is empty | `references/bam2bw.md` |
 | threads that do not make a read faster | `references/threads-and-memory.md` |

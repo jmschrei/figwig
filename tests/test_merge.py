@@ -72,6 +72,27 @@ def test_merge_errors(tmp_path, parts):
 		main(['merge', '-o', str(tmp_path / 'o.fw'), str(tmp_path / 'no.fw')])
 
 
+def test_merge_checks_the_genomes(tmp_path, parts):
+	"""Files naming different genomes are refused unless -g says which to
+	record; a file naming none takes the others'."""
+
+	ref, first, second = parts
+	mouse = str(tmp_path / 'mouse.fw')
+	write_figwig(mouse, CHROM_SIZES, ['m'], 'chr1', [0], numpy.ones((1, 1, 10)),
+		tile=FigWigReader(first).tile, genome='mm10')
+	out = str(tmp_path / 'o.fw')
+	with pytest.raises(SystemExit, match="different genomes, 'hg38', 'mm10'"):
+		main(['merge', '-o', out, first, mouse])
+	assert not os.path.exists(out)
+	main(['merge', '-o', out, '-g', 'mm10', first, mouse])
+	assert FigWigReader(out).genome == 'mm10'
+	unnamed = str(tmp_path / 'unnamed.fw')
+	write_figwig(unnamed, CHROM_SIZES, ['u'], 'chr1', [0], numpy.ones((1, 1,
+		10)), tile=FigWigReader(first).tile)
+	main(['merge', '-o', out, '-f', unnamed, first])
+	assert FigWigReader(out).genome == 'hg38'
+
+
 def test_existing_output_is_refused_without_force(tmp_path):
 	ref = reference_tracks()
 	a, b = str(tmp_path / 'a.fw'), str(tmp_path / 'b.fw')

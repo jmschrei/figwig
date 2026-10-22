@@ -4,9 +4,12 @@ figwig bw2fw, fw2bw, bam2fw, reorder, merge and info
 Five commands move tracks between bigWigs, reads and :doc:`figwig files
 <figwig>`, between a figwig file's two orders, and between figwig files,
 and ``figwig info`` prints what a file holds. Each converter but ``merge``
-takes ``-p``, the number of threads to read and compress on, and all take
-``-v``, which prints a line per group of tracks and a summary of the
-output on stderr. Every converter refuses to write over an output that
+takes ``-p``, the number of threads to read and compress on (1 by
+default), and every converter takes ``-v``, which prints a line per group
+of tracks and a summary of the output on stderr; ``-t`` is the tile in
+``bw2fw``, ``bam2fw`` and ``reorder`` and the track list in ``fw2bw``, and
+``-m`` takes a tab-separated table, or a comma-separated one when its name
+ends in ``.csv``. Every converter refuses to write over an output that
 exists unless ``-f`` is given (``--force`` for ``bam2fw``, whose ``-f``
 means fragments), ``bw2fw`` and ``fw2bw`` write their outputs beside
 their names and move them into place when complete, so a conversion that
@@ -78,7 +81,9 @@ p-value track, which the default drops (``bw2fw`` then ``fw2bw`` with
 ``--missing nan`` on both is lossless); the track is then float32, which
 costs a compressed
 file little (0.4% on nine chr22 annotation tracks, nothing measurable on
-a genome-wide fold-change track) and doubles an uncompressed one. A value
+a genome-wide fold-change track) and doubles an uncompressed one. The
+convention is recorded as the file's ``missing`` attribute (``'0.0'``,
+``'nan'`` or the value given), which ``fw2bw`` follows by default. A value
 is equal as a number: -0.0 reads as 0. An empty cell of the table is no
 attribute.
 
@@ -108,7 +113,11 @@ are left out of its bigWig, as ``BigWigWriter.write`` leaves them out with
 ``missing=0.0``, so reading the bigWig with ``read_bigwig`` gives the same
 numbers as reading the track, with NaN as 0; ``--missing nan`` leaves the
 NaN bases out and writes the zeros, for a file ``bw2fw --missing nan``
-made.
+made. Without ``--missing``, ``fw2bw`` follows the file's ``missing``
+attribute when ``bw2fw`` recorded one, so a round trip through the two
+needs the flag on neither. Two tracks whose names make the same file name
+(``a/b`` and ``a_b``) get one file each, the second with its track index
+appended (``a_b.1.bw``), and the table says which file is whose.
 
 figwig bam2fw
 -------------
@@ -141,7 +150,7 @@ needs the ``bam2bw`` extra and runs on Linux and macOS.
                          [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                          [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
                          -n NAME [-m METADATA] [-g GENOME] [-t TILE]
-                         [--dtype DTYPE] [-l LEVEL] [-v]
+                         [--dtype DTYPE] [-l LEVEL] [--force] [-v]
                          filename [filename ...]
 
 figwig reorder
@@ -196,10 +205,13 @@ figwig info
     figwig info k562.fw
     figwig info -b k562.fw
 
-``figwig info`` prints a file's path, genome, order, tile, compression
-level, chromosomes, groups, tracks, size in bytes and attributes, one per
-line, then a tab-separated table of its tracks with their name, dtype,
-group, nonzero bases, sum and every attribute. ``-b`` also counts the
+``figwig info`` prints a file's path, format version, the figwig that
+wrote it, genome, order, tile, compression level, chromosomes, groups,
+tracks, size in bytes and attributes, one per line, then a tab-separated
+table of its tracks with their name, dtype, group, nonzero bases (NaN
+bases are not counted), sum and every attribute. A control character in a
+name or attribute is escaped and a nested attribute is printed as JSON, so
+every value takes one line. ``-b`` also counts the
 bytes its chunks take, its tables and index take, the bytes nothing uses,
 which an append in place leaves behind and ``merge`` drops, and any bytes
 past the end the header names, which a killed append leaves and the next

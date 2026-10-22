@@ -57,7 +57,13 @@ thread, which the 8 GiB guard counts.
 Writing
 -------
 
-A writer lays out values on the calling thread in batches of about a million
+A ``FigWigWriter`` encodes whole tiles that a ``write`` call's windows cover
+on its pool and partial tiles on the calling thread, compresses on the
+pool, and holds about 0.5 GB plus two to three times the call's values, so
+a call of a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
+each piece of a chromosome on one thread while the writer takes the last,
+and ``-p 8`` is where it stops gaining. A bigWig writer lays out values on
+the calling thread in batches of about a million
 items, and compresses each batch's data blocks on up to ``n_jobs`` other
 threads while it lays out the next one. With libdeflate, the calling thread
 becomes the limit: writing 15.9 million per-base counts took 1.07 s on one

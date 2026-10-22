@@ -360,10 +360,14 @@ def test_stats(fw, ref):
 		values = numpy.concatenate([ref[chrom][i] for chrom in CHROM_SIZES])
 		if i == 2:
 			values = values.astype(numpy.float32).astype(numpy.float64)
-		nonzero = values != 0
+		# A NaN base is stored and read back, but is no part of the sum
+		# and no nonzero base, so a file written with its uncovered bases
+		# NaN keeps the statistics of its covered ones.
+		nonzero = (values != 0) & ~numpy.isnan(values)
 		assert reader.stats['nonzero'][i] == nonzero.sum()
 		if i == 2:
-			assert numpy.isnan(reader.stats['sum'][i])
+			assert reader.stats['sum'][i] == pytest.approx(numpy.nansum(values),
+				rel=1e-12)
 			assert reader.stats['min'][i] == numpy.nanmin(values)
 			assert reader.stats['max'][i] == numpy.nanmax(values)
 		elif i == 4:
@@ -509,7 +513,7 @@ def test_write_whole_groups_only(tmp_path):
 		writer.write('chr1', [0], numpy.ones((1, 2, 10)), tracks=['a', 'c'])
 	with pytest.raises(ValueError, match="named twice"):
 		writer.write('chr1', [0], numpy.ones((1, 2, 10)), tracks=['c', 'c'])
-	with pytest.raises(ValueError, match="not one of the tracks"):
+	with pytest.raises(ValueError, match="not one of the writer's tracks"):
 		writer.write('chr1', [0], numpy.ones((1, 1, 10)), tracks=['z'])
 	with pytest.raises(ValueError, match="out of range"):
 		writer.write('chr1', [0], numpy.ones((1, 1, 10)), tracks=[3])
@@ -981,7 +985,7 @@ def test_encode_tiles_layout():
 	classes = numpy.zeros(2, dtype=numpy.int64)
 
 	n = _encode_tiles(tile, tiles, lo, hi, starts, ends, values, True, buffer,
-		False, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 2 and not buffer.any()
 	assert kinds[0] == 1 | (0 << 3) and kinds[1] == 2 | (1 << 3)
 	# The sparse chunk: the entries in all, the bytes of each track's
@@ -1012,8 +1016,7 @@ def test_encode_tiles_varints_and_ones():
 	stats = numpy.zeros((1, 5))
 	classes = numpy.zeros(1, dtype=numpy.int64)
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
-		numpy.array([0]), numpy.array([1024]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		numpy.array([0]), numpy.array([1024]), values, True, buffer, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 2 | (7 << 3)
 	assert out[:8].view(numpy.uint32).tolist() == [4, 5]
 	# The differences 0, 127 and 1 take a byte each, and 895 two.
@@ -1038,8 +1041,7 @@ def test_encode_tiles_runs_and_float64():
 	stats = numpy.zeros((2, 5))
 	classes = numpy.zeros(2, dtype=numpy.int64)
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
-		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (6 << 3)
 	# Five changes: the bytes of each track's varints, the varints (0; 10,
 	# 10, 20, 10), padding to 4, five float32 values.
@@ -1051,8 +1053,7 @@ def test_encode_tiles_runs_and_float64():
 	values[0, 0, 5] = 16777217
 	kinds[:] = 0
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
-		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (8 << 3)
 	assert out[20:28].view(numpy.float64).tolist() == [3]
 	assert out[28:36].view(numpy.float64).tolist() == [16777217]
@@ -1061,8 +1062,7 @@ def test_encode_tiles_runs_and_float64():
 	classes[0] = 1
 	kinds[:] = 0
 	_encode_tiles(tile, numpy.array([0]), numpy.array([0]), numpy.array([1]),
-		numpy.array([0]), numpy.array([64]), values, True, buffer, False,
-		False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		numpy.array([0]), numpy.array([64]), values, True, buffer, False, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert kinds[0] == 4 | (6 << 3)
 	assert out[24:28].view(numpy.float32).tolist() == [16777216]
 
@@ -1078,7 +1078,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	classes = numpy.zeros(1, dtype=numpy.int64)
 	n = _encode_tiles(tile, numpy.array([0, 1]), numpy.array([0, 0]),
 		numpy.array([1, 1]), numpy.array([0]), numpy.array([24]), values, True,
-		buffer, False, True, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
+		buffer, True, classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	# A tile of ones is one run: its change at 0, to 1, as uint8.
 	assert n == 1 and kinds[0] == 4 and buffer[0, :8].sum() == 8
 	assert out[:8].view(numpy.uint32).tolist() == [1, 1]
@@ -1089,7 +1089,7 @@ def test_encode_tiles_keeps_an_open_tile():
 	# a later call adds: two runs.
 	more = numpy.full((1, 1, 8), 2.0)
 	n = _encode_tiles(tile, numpy.array([1]), numpy.array([0]), numpy.array([1]),
-		numpy.array([24]), numpy.array([32]), more, True, buffer, True, False,
+		numpy.array([24]), numpy.array([32]), more, True, buffer, False,
 		classes, True, False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 1 and kinds[0] == 4 and not buffer.any()
 	assert out[:8].view(numpy.uint32).tolist() == [2, 2]
@@ -1220,7 +1220,7 @@ def test_labels_sum_tracks(fw, ref, read_batching):
 	reader = FigWigReader(fw)
 	labels = numpy.array([0, 0, 1, -1, 1])
 	y = reader.read(chroms, starts, 150, labels=labels)
-	assert y.shape == (100, 2, 150) and y.dtype == numpy.float32
+	assert y.shape == (100, 2, 150) and y.dtype == numpy.float64
 	dense = reader.read(chroms, starts, 150, dtype='float64')
 	exp = numpy.stack([dense[:, 0] + dense[:, 1], dense[:, 2] + dense[:, 4]],
 		axis=1)
@@ -1279,7 +1279,9 @@ def test_read_entries(fw, ref):
 	numpy.testing.assert_array_equal(got, expected)
 
 	everything = reader.read_entries()
-	assert len(everything.values) == int(reader.stats['nonzero'].sum())
+	# The NaN bases are entries, but no nonzero bases of the statistics.
+	assert len(everything.values) == int(reader.stats['nonzero'].sum()) + int(
+		numpy.isnan(everything.values).sum())
 	with pytest.raises(ValueError, match="not one of the file's chromosomes"):
 		reader.read_entries(chroms=['chr9'])
 
@@ -1766,7 +1768,7 @@ def test_bins_sum_each_window(fw, ref, scratch_mode):
 	dense = numpy.nan_to_num(reader.read(chroms, starts, 256, dtype='float64'))
 	for bins in (1, 32, 256):
 		y = reader.read(chroms, starts, 256, bins=bins)
-		assert y.shape == (60, 5, 256 // bins) and y.dtype == numpy.float32
+		assert y.shape == (60, 5, 256 // bins) and y.dtype == numpy.float64
 		numpy.testing.assert_allclose(y, dense.reshape(60, 5, -1, bins).sum(-1),
 			rtol=1e-5)
 	y = reader.read(chroms, starts, 256, bins=64, tracks='atac_plus')
@@ -1882,8 +1884,9 @@ def test_sums_over_intervals_of_any_length(fw, track_fw, ref, read_batching,
 		y = reader.sums(chroms, starts, ends, dtype='float64', n_jobs=n_jobs)
 		assert y.shape == (n, 5)
 		numpy.testing.assert_array_equal(y, expected_sums)
+		# Sums of an integer track come back float64, which holds them exactly.
 		y = reader.sums(chroms, starts, ends, tracks='atac_plus', n_jobs=n_jobs)
-		assert y.shape == (n,) and y.dtype == numpy.float32
+		assert y.shape == (n,) and y.dtype == numpy.float64
 		numpy.testing.assert_array_equal(y, expected_sums[:, 0])
 		# A float32 output accumulates the tiles' partial sums in float32.
 		y = reader.sums(chroms, starts, ends, tracks=[2, 0], dtype='float32',
@@ -1982,7 +1985,7 @@ def test_many_windows_in_one_tile(fw, ref):
 	y = reader.read('chr1', starts, 20, labels=[0, 1, 1, 0, 0], n_jobs=4)
 	dense = reader.read('chr1', starts, 20, dtype='float64')
 	numpy.testing.assert_array_equal(y[:, 0], dense[:, [0, 3, 4]].sum(1))
-	assert_identical(y[:, 1], (dense[:, 1] + dense[:, 2]).astype(numpy.float32))
+	assert_identical(y[:, 1], (dense[:, 1] + dense[:, 2]).astype(y.dtype))
 
 
 def test_write_sparse_that_raises_writes_nothing(tmp_path):
@@ -2163,11 +2166,11 @@ def test_encode_tiles_stops_before_a_tile_that_might_not_fit():
 	tiles, lo, hi = numpy.arange(4), numpy.zeros(4, dtype=numpy.int64), \
 		numpy.ones(4, dtype=numpy.int64)
 	n = _encode_tiles(tile, tiles, lo, hi, numpy.array([0]), numpy.array([64]),
-		values, True, buffer, False, False, classes, True, False, out, bounds,
+		values, True, buffer, False, classes, True, False, out, bounds,
 		kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert n == 2 and (kinds[:n] > 0).all() and not buffer.any()
 	m = _encode_tiles(tile, tiles[n:], lo[n:], hi[n:], numpy.array([0]),
-		numpy.array([64]), values, True, buffer, False, False, classes, True,
+		numpy.array([64]), values, True, buffer, False, classes, True,
 		False, out, bounds, kinds, stats, numpy.zeros((len(kinds), buffer.shape[0]), numpy.float32))
 	assert m == 2 and stats[0, 1] == 64
 
@@ -2186,11 +2189,11 @@ def test_tile_sums(fw, ref):
 	expected = []
 	for chrom, length in CHROM_SIZES.items():
 		padded = numpy.pad(ref[chrom], ((0, 0), (0, -length % TILE)))
-		expected.append(padded.reshape(5, -1, TILE).sum(-1))
+		expected.append(numpy.nansum(padded.reshape(5, -1, TILE), axis=-1))
 	expected = numpy.concatenate(expected, axis=1).astype(numpy.float32)
 	assert sums.shape == expected.shape and sums.dtype == numpy.float32
 	numpy.testing.assert_allclose(sums, expected, rtol=1e-6)
-	assert numpy.isnan(sums[2, 777 // TILE]) and numpy.isnan(sums[2]).sum() == 1
+	assert not numpy.isnan(sums).any()
 	numpy.testing.assert_allclose(reader.tile_sums('signal', 'chr2'),
 		expected[2, 79:79 + 47], rtol=1e-6)
 	numpy.testing.assert_allclose(reader.tile_sums(['empty', 'atac_plus'],

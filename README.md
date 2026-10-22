@@ -323,7 +323,10 @@ the genome, and `write_sparse` takes nonzero bases as entries, such as the
 cut sites of single cells. `fw.tracks`, `fw.stats` and `fw.chrom_sizes`
 say what a file holds, as `figwig info` does from the shell; the first
 read in a fresh environment compiles its kernels for about 27 s, and later
-processes load them in a tenth of a second. Each chunk of a group's tiles is stored densely,
+processes load them in a tenth of a second. A base no track wrote is 0,
+as is a bigWig's no-data unless `bw2fw --missing nan` keeps them apart;
+there are no zoom levels, and `tile_sums` stands in for them; and `figwig
+reorder` rewrites a file in the other order. Each chunk of a group's tiles is stored densely,
 as nonzero bases, as runs of one value or as a matrix of the tracks present,
 whichever is smallest, in the narrowest type that holds it exactly. Six
 genome-wide count tracks that take 971 MB as bigWigs take 225 MB as one

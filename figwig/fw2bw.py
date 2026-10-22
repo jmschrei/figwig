@@ -47,7 +47,7 @@ def _parser(prog):
 		"levels to write in each bigWig. Default is 0.")
 	parser.add_argument('-l', '--level', default=6, type=int, help="The "
 		"compression level of the bigWigs. Default is 6.")
-	parser.add_argument('--missing', default=0.0, type=float, help="The value "
+	parser.add_argument('--missing', default=None, type=float, help="The value "
 		"left out of the bigWigs: 0, or nan for a figwig file written with "
 		"bw2fw --missing nan, whose zeros are then written. Default is 0.")
 	parser.add_argument('-f', '--force', action='store_true', help="Write "
@@ -87,28 +87,44 @@ def _selected_tracks(reader, names=None, select=None):
 	return numpy.arange(len(reader.tracks))
 
 
-def _bigwig_name(track):
+def _bigwig_name(track, taken=None):
 	"""The file name of a track's bigWig: its name with path separators
-	replaced, plus .bw."""
+	replaced, plus .bw; with `taken`, the names given out so far, a name
+	another track already has gets the track's index appended."""
 
 	name = track['name'].replace(os.sep, '_')
 	if os.altsep is not None:
 		name = name.replace(os.altsep, '_')
+	if taken is not None:
+		if name in taken:
+			name = '{}.{}'.format(name, track.get('index', len(taken)))
+		taken.add(name)
 	return name + '.bw'
 
 
 def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
-	missing=0.0, force=True):
+	missing=None, force=True):
 	"""Write the tracks `ids` of the figwig file `path` as bigWigs in
 	`directory`, and the metadata table. Returns the table's path."""
 
 	reader = FigWigReader(path)
+	if missing is None:
+		# The file says how bw2fw wrote its uncovered bases; a file from
+		# another writer has no such note, and 0 is the default.
+		noted = reader.attributes.get('missing')
+		missing = float('nan') if noted == 'nan' else float(noted) if isinstance(
+			noted, str) and noted not in ('', 'None') else 0.0
 	os.makedirs(directory, exist_ok=True)
 	chrom_sizes = list(reader.chrom_sizes.items())
+	names, taken = {}, set()
+	for i in ids.tolist():
+		names[i] = _bigwig_name(dict(reader.tracks[i], index=i), taken)
+	table = os.path.join(directory, os.path.splitext(os.path.basename(path))[0]
+		+ '.tsv')
 	if not force:
 		for i in ids.tolist():
-			_refuse_existing(os.path.join(directory, _bigwig_name(reader.tracks[
-				i])), '-f')
+			_refuse_existing(os.path.join(directory, names[i]), '-f')
+		_refuse_existing(table, '-f')
 
 	by_group = {}
 	for i in ids.tolist():
@@ -126,7 +142,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 		writers = {}
 		try:
 			for i in members:
-				paths[i] = os.path.join(directory, _bigwig_name(reader.tracks[i]))
+				paths[i] = os.path.join(directory, names[i])
 				partials[i] = _temporary_path(paths[i])
 				writers[i] = BigWigWriter(partials[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
@@ -178,8 +194,6 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 		record['file'] = os.path.basename(paths[i])
 		records.append(record)
 
-	table = os.path.join(directory, os.path.splitext(os.path.basename(path))[0]
-		+ '.tsv')
 	_write_table(table, keys, records)
 	return table
 

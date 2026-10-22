@@ -41,9 +41,18 @@ def _merge(paths, output, genome=None, verbose=False):
 	"""Write the tracks of the figwig files `paths` into `output`."""
 
 	first = FigWigReader(paths[0])
-	with FigWigWriter(output, first.chrom_sizes, None, genome=first.genome if
-			genome is None else genome, attributes=first.attributes,
-			tile=first.tile, level=first._level, order=first.order) as writer:
+	if genome is None:
+		# The files that name a genome must agree; one that names none
+		# takes the others'.
+		genomes = {FigWigReader(path).genome for path in paths} - {None}
+		if len(genomes) > 1:
+			raise ValueError("the files name different genomes, {}; give -g to "
+				"say which the merged file is on.".format(', '.join(repr(g) for g in
+				sorted(genomes))))
+		genome = genomes.pop() if genomes else None
+	with FigWigWriter(output, first.chrom_sizes, None, genome=genome,
+			attributes=first.attributes, tile=first.tile, level=first._level,
+			order=first.order) as writer:
 		for path in paths:
 			writer.add_file(path)
 			if verbose:

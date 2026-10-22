@@ -196,11 +196,11 @@ tracks  threads  bigWigs, f32  figwig   figwig, f32
 96      32       1.233 s       0.497 s  0.517 s    
 ======  =======  ============  =======  ===========
 
-On one thread the figwig file read 5.3 to 9.8 times faster than the
-bigWigs, and on 8 threads 2.0 to 5.1 times. A read of 8,192 windows from a
+On one thread the figwig file read 4.8 to 9.7 times faster than the
+bigWigs, and on 8 threads 1.3 to 4.5 times. A read of 8,192 windows from a
 figwig file is done in tens of milliseconds, and gained nothing past 8
 threads, so at 32 threads one or two bigWigs read as fast as the figwig
-file; at 6 to 96 tracks the figwig file stayed 2.2 to 2.7 times faster at
+file; at 6 to 96 tracks the figwig file stayed 1.7 to 2.5 times faster at
 32 threads. Reading into float32 costs up to a tenth over the tracks' own
 types, which are half or a quarter of the bytes.
 

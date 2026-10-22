@@ -177,13 +177,15 @@ into one channel, which turns cells into pseudobulks in the read itself:
 
 An entry is a window's row, the track's channel, the base's offset in the
 window and its value, sorted by row, channel and offset; ``shape`` is what
-the dense array would have been, and ``scipy.sparse.coo_array`` or
+the dense array would have been, and ``scipy.sparse.coo_array((values,
+(rows * width + offsets, channels)), shape=(n * width, channels))`` or
 ``torch.sparse_coo_tensor`` take the arrays as they are. A sparse read
 takes about 40 bytes of memory per entry while it sorts them, so it is for
 tracks that are mostly zero, not for dense ones, whose dense read is
 smaller. ``labels`` gives one integer per track read, from 0, with -1
-leaving a track out, and the sums come back as float32, or as float64 where
-float32 would round a track, unless ``dtype`` says otherwise; a sum asked
+leaving a track out, and the sums come back as float64 where a track is
+an integer type, since counts sum past float32's 2**24 in a few windows,
+and as float32 for float32 tracks, unless ``dtype`` says otherwise; a sum asked
 for in an integer type is taken in int64 and checked against that type,
 since a sum can overflow a type that each track fits. A dense read whose
 output would pass 8 GiB raises unless ``out`` is given, with a message
@@ -219,7 +221,7 @@ does for windows of one width, from the tiles the intervals overlap:
 
     totals = fw.sums(chroms, starts, ends, tracks=["atac.+", "atac.-"])
     print(totals.shape, totals.dtype)
-    # (172732, 2) float32
+    # (172732, 2) float64
     means = totals / (ends - starts)[:, None]
 
 These sums count every base of an interval, so a mean is a sum over the
@@ -235,7 +237,11 @@ mean over covered bases is one over the other:
 
     covered = fw.sums(chroms, starts, ends, nan="skip") / fw.sums(chroms, starts, ends, nan="count")
 
-``read`` takes ``nan`` with ``bins`` the same way. An analysis of count
+``read`` takes ``nan`` with ``bins`` the same way. ``sums(..., paired=True)``
+takes one track per interval and sums interval ``i`` over track ``i``
+alone, in one read per distinct track, for a reads dimension where each
+read's span is its own track; without it, a sum of every track over every
+interval is quadratic in the reads. An analysis of count
 tracks ported from those tools gives other means for regions with
 uncovered bases unless the file was written so. ``sums`` takes any number
 of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
@@ -265,7 +271,9 @@ resolution of the tiles, a per-chromosome total, or a coarser binning by
 a reshape, in the time it takes to inflate a few hundred kilobytes.
 Chromosome by chromosome, tile ``k`` holds bases ``[k * tile, (k + 1) *
 tile)`` and a chromosome of length ``L`` has ``ceil(L / tile)`` tiles. A
-NaN in a tile makes its sum NaN, as it makes the track's. The sums are
+NaN base is left out of its tile's sum, as it is left out of the track's
+sum and its count of nonzero bases, so a file written with its uncovered
+bases NaN keeps the statistics of its covered ones. The sums are
 kept while every track's take at most 256 MB together, which is 350 tracks
 on hg38 at the default tile; a file of thousands of cells keeps none, and
 ``tile_sums`` says so.
@@ -305,10 +313,11 @@ only where its values are NaN or 0. A base that is not written is 0, and a
 call that raises writes nothing.
 
 ``tracks`` are names, or dicts with a ``name``, an optional ``dtype`` and
-any JSON-serializable attributes; NaN is not JSON and is refused. A track's
-``dtype`` is what ``read`` returns it as, and a file is created with the
-mode the umask gives a new file: given, it is checked against
-every value written; left out, it is set when the writer closes to the
+any JSON-serializable attributes; NaN is not JSON and is refused, and
+``group`` is set by the writer. The file is created with the mode the
+umask gives a new file. A track's ``dtype`` is what ``read`` returns it
+as: given, it is checked against every value written; left out, it is set
+when the writer closes to the
 narrowest type that holds the track's values, uint8 here, float32 where a
 value is not an integer, and float64 where an integer lies beyond int32 and
 uint32, which float32 would round. Either way each chunk is stored as
@@ -391,6 +400,9 @@ Adding tracks to a file
         fw.add_file("hepg2.fw")
 
 ``append=True`` adds the tracks given to the file at the path, in place,
+holding the file's lock while it does (a second writer appending to the
+same file at the same time is refused, since its chunks would land on the
+first's),
 in new groups after its own: the file's chunks stay where they are, the
 new chunks are written after its end, and the tables, the index and last
 the header are written when the writer closes, so that until then the
@@ -470,6 +482,50 @@ figwig file as ``read_bigwig`` gives them with ``missing=0.0`` and
 value is NaN is NaN; ``bw2fw --missing nan`` keeps the uncovered bases
 apart from 0 instead, for tracks where the two differ.
 
+Reads, cells and channels as tracks
+-----------------------------------
+
+A dimension that is not a track in the bigWig sense, such as the reads of
+a Fiber-seq experiment with a methylation call and a base quality per
+base, or the cells of a single-cell experiment with a count and a
+fragment-end flag, is stored as tracks with attributes that name the
+dimension: a record per read and channel, ``{"name": "r17.m6a", "read":
+"r17", "channel": "m6a", "strand": "+"}``, and ``select(channel="m6a")`` or
+``select(read="r17")`` picks a slice, which ``read`` returns as (windows,
+tracks, width) to be reshaped by the caller to (windows, reads, channels,
+width) when the tracks are listed read-major. Group the tracks by channel
+over all the reads, not by read: a window over all reads decodes one
+chunk per channel that way, and twenty to fifty times more chunks the
+other way. Position order beats track order for this, and ``sums(...,
+paired=True)`` gives each read's total over its own span. A read may also
+be its own "chromosome", of its length, with one track per channel, which
+gives (reads, channels, length) in one call, with the genome coordinates
+kept in the file's attributes. A built-in channels dimension, returning
+(windows, tracks, channels, width) without the reshape, is the planned
+next step and would change no bytes of a file without channels.
+
+Versions
+--------
+
+The header names the format's version, 5, and a reader refuses a file of
+any other version with a message that says whether an earlier or a later
+figwig wrote it. The version changes when the layout changes in a way an
+older reader would misread; an addition an older reader could ignore is
+marked instead in the header's ``optional`` bits, and one it must know in
+its ``required`` bits, which a reader refuses when it does not know them.
+Versions 1 to 4 were written only by development builds of this release,
+and ``figwig reorder`` cannot read them; they have to be converted again
+from their sources. Within a version, a file written by any figwig reads
+in any later figwig, and a rebuild from the same inputs with the same
+options is byte-identical, which is why the file carries no timestamp.
+
+An undeclared track that turns out to hold a fraction is float32, and its
+values are what float32 makes of them; a chunk written before the fraction
+was seen may hold an integer exactly where float32 would round it, so a
+read with ``dtype='float64'`` can differ between a position-order and a
+track-order file of the same writes above 2**24. Read such a track in its
+own dtype, or declare it ``float64``.
+
 What the format is for, and what it is not
 ------------------------------------------
 
@@ -512,8 +568,10 @@ The layout
 A figwig file is, in order: a 128-byte header; the chunks or blocks, as
 they were written; the chromosome table; a table of each track's sum,
 nonzero bases, minimum and maximum; the metadata, a JSON document with the
-genome, the file's attributes, its order and every track's record; and the
-index. Every integer is little-endian, and every chunk starts on an 8-byte
+writing figwig's version (``figwig``), the ``genome``, the file's
+``attributes``, its ``order`` and every track's record (``tracks``), in
+which any other key is kept through an append for whoever put it there;
+and the index. Every integer is little-endian, and every chunk starts on an 8-byte
 boundary of the file. The index finds every chunk by its offset, so a
 file appended to holds its old tables and index between its chunks, and
 bytes past the header's ``length`` are ignored. A reader checks each
@@ -527,7 +585,7 @@ The header, 128 bytes:
 field              type  meaning
 =================  ====  ==================================================
 magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
-version            u2    4; a reader refuses any other
+version            u2    5; a reader refuses any other
 flags              u2    bit 0 set for track order
 tile               u4    bases per tile, a power of two from 16 to 65,536
 codec              u2    0 for uncompressed chunks, 1 for zlib streams
@@ -544,7 +602,10 @@ metadata           u8    offset of the metadata
 metadata_length    u8    bytes of the metadata
 zooms              u8    0, a place held for zoom levels
 length             u8    bytes of the file
-padding            32    0
+required           u4    feature bits a reader must know; none defined, so a reader refuses any set bit
+optional           u4    feature bits a reader may ignore; none defined
+header_crc         u4    CRC-32 of these 128 bytes with this field as 0
+padding            20    0
 =================  ====  ==================================================
 
 The chromosome table is, for each chromosome in the file's order, the
@@ -634,7 +695,7 @@ nonzero bases per track-order      65,536 per block, any number of blocks
 block
 dense read                         8 GiB unless ``out`` is given
 scratch tile for sums              256 MB per thread, channels times tile times 8 bytes; a read of more channels bins each window from its chunks without one
-values                             integers to 2**53 exactly, float32 or float64 otherwise
+values                             integers to 2**53 exactly; a 64-bit integer beyond it is refused; float32 or float64 otherwise
 =================================  ===================================================================
 
 The position-order index on disk holds the tiles with values, so a group

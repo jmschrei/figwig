@@ -7,11 +7,17 @@ import os
 import sys
 import subprocess
 
+import numpy
+
 import pytest
 
+from figwig import __version__
 from figwig import FigWigReader
+from figwig import FigWigWriter
 from figwig.__main__ import main
+from figwig.figwig import _VERSION
 from figwig.info import _describe
+from figwig.info import _shown
 
 from .test_figwig import TRACKS
 from .test_figwig import reference_tracks
@@ -39,6 +45,8 @@ def test_describe_lists_the_file_and_its_tracks(fw):
 	fields = {line.split('\t')[0]: line.split('\t')[1:] for line in lines[1:]
 		if line and not line.startswith('name\t')}
 	assert fields['genome'] == ['hg38'] and fields['order'] == ['positions']
+	assert fields['version'] == [str(_VERSION)]
+	assert fields['written by'] == ['figwig ' + __version__]
 	assert fields['tile'] == [str(reader.tile)] and fields['level'] == ['6']
 	assert fields['chromosomes'] == ['3', 'chr1, chr2, chrM']
 	assert fields['tracks'] == [str(len(TRACKS))]
@@ -54,6 +62,27 @@ def test_describe_lists_the_file_and_its_tracks(fw):
 	assert rows[0][header.index('assay')] == 'ATAC-seq'
 	assert int(rows[0][3]) == int(reader.stats['nonzero'][0])
 	assert float(rows[0][4]) == float(reader.stats['sum'][0])
+
+
+def test_values_are_shown_on_one_printable_line(tmp_path):
+	"""Control characters in a name or attribute are escaped, and a nested
+	attribute is shown as JSON."""
+
+	assert _shown('a\tb\nc\x1b[0m') == 'a\\x09b\\x0ac\\x1b[0m'
+	assert _shown('caf\u00e9 \u2028') == 'caf\u00e9 \\u2028'
+	assert _shown({'k': [1, 'x']}) == '{"k": [1, "x"]}'
+	assert _shown(None) == 'null' and _shown(2.5) == '2.5'
+	path = str(tmp_path / 'esc.fw')
+	with FigWigWriter(path, {'chr1': 100}, [{'name': 'bad\nname', 'note': {
+			'depth': 2}}], attributes={'nested': {'a': [1]}, 'line': 'x\ry'},
+			tile=64) as writer:
+		writer.write('chr1', [0], numpy.ones((1, 1, 10)))
+	lines = _describe(FigWigReader(path), count_bytes=False)
+	assert all('\n' not in line and '\r' not in line for line in lines)
+	assert 'attribute\tnested\t{"a": [1]}' in lines
+	assert 'attribute\tline\tx\\x0dy' in lines
+	assert any(line.startswith('bad\\x0aname\t') and line.endswith(
+		'{"depth": 2}') for line in lines)
 
 
 def test_unused_bytes_after_an_append(tmp_path, ref):
