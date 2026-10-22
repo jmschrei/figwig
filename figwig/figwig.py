@@ -364,8 +364,8 @@ def _positions(positions, name):
 
 	positions = numpy.asarray(positions)
 	if positions.ndim != 1:
-		raise ValueError("{} must be one-dimensional, not of shape {}.".format(
-			name, positions.shape))
+		raise ValueError("{} must be one-dimensional, not of shape {}: give one "
+			"per window, as a list or array.".format(name, positions.shape))
 	if positions.size and positions.dtype.kind not in 'iu':
 		raise TypeError("{} must be integers, not {}.".format(name,
 			positions.dtype))
@@ -393,6 +393,39 @@ def _check_values_fit(name, dtype, values):
 			.format(name, dtype, info.min, info.max))
 
 
+def _chromosome_difference(theirs, ours):
+	"""How two chromosome tables differ, in a few words."""
+
+	only_theirs = [name for name in theirs if name not in ours]
+	only_ours = [name for name in ours if name not in theirs]
+	lengths = [name for name in theirs if name in ours and theirs[name] !=
+		ours[name]]
+	parts = []
+	if only_theirs:
+		parts.append("it has {} the writer lacks, such as {!r}".format(
+			"{} chromosomes".format(len(only_theirs)) if len(only_theirs) > 1
+			else "a chromosome", only_theirs[0]))
+	if only_ours:
+		parts.append("it lacks {} the writer has, such as {!r}".format(
+			"{} chromosomes".format(len(only_ours)) if len(only_ours) > 1 else
+			"a chromosome", only_ours[0]))
+	if lengths:
+		parts.append("{!r} is {} bases long in it and {} in the writer".format(
+			lengths[0], theirs[lengths[0]], ours[lengths[0]]))
+	return '; '.join(parts)
+
+
+def _unknown_chromosome(name, chrom_sizes):
+	"""The message for a chromosome name the file does not have."""
+
+	names = list(chrom_sizes)
+	shown = ', '.join(map(repr, names[:6]))
+	if len(names) > 6:
+		shown += ", ... ({} in all)".format(len(names))
+	return "chromosome {!r} is not one of the file's chromosomes, {}.".format(
+		name, shown)
+
+
 def _temporary_path(path):
 	"""A new file beside `path` to write into, renamed over `path` when the
 	writer closes, so that a reader of `path` never sees a part of a file
@@ -402,6 +435,14 @@ def _temporary_path(path):
 	fd, name = tempfile.mkstemp(prefix=base + '.', suffix='.partial',
 		dir=directory)
 	os.close(fd)
+	# mkstemp makes the file readable by its owner alone; the file is for
+	# whoever the umask lets read a file, as open() would make it.
+	mask = os.umask(0)
+	os.umask(mask)
+	try:
+		os.chmod(name, 0o666 & ~mask)
+	except OSError:
+		pass
 	return name
 
 
@@ -708,7 +749,10 @@ class FigWigWriter:
 		what it held before the writer was made."""
 
 		if self._pool is not None:
-			self._pool.shutdown(cancel_futures=True)
+			# Nothing is waited for: close has already collected what it
+			# needs, and a writer dropped with work in flight may be
+			# finalized on one of the pool's own threads.
+			self._pool.shutdown(wait=False, cancel_futures=True)
 			self._pool = None
 		if self._file is not None:
 			if self._length is not None:
@@ -819,14 +863,15 @@ class FigWigWriter:
 		chunks are copied in and whose tracks come after."""
 
 		if source.chrom_sizes != self.chrom_sizes:
-			raise ValueError("{} was written with other chromosomes or lengths."
-				.format(source.path))
-		if source.tile != self.tile or source._level != self.level or \
-				source.order != self.order:
-			raise ValueError("{} was written with tile {}, level {} and {} order "
-				"where this writer has {}, {} and {}; figwig reorder writes it "
-				"again with others.".format(source.path, source.tile,
-				source._level, source.order, self.tile, self.level, self.order))
+			raise ValueError("{} was written with other chromosomes or lengths: "
+				"{}.".format(source.path, _chromosome_difference(
+				source.chrom_sizes, self.chrom_sizes)))
+		for name, theirs, ours in (('order', source.order, self.order), ('tile',
+				source.tile, self.tile), ('level', source._level, self.level)):
+			if theirs != ours:
+				raise ValueError("{} was written with {} {} where this writer has "
+					"{}; figwig reorder writes it again with another.".format(
+					source.path, name, theirs, ours))
 		taken = set(self._track_ids) & {track['name'] for track in source.tracks}
 		if taken:
 			raise ValueError("track {!r} of {} is already one of the writer's."
@@ -2158,6 +2203,7 @@ class FigWigReader:
 			if len(raw) < _HEADER.itemsize:
 				raise ValueError(error + ": it is too short to hold a header.")
 
+			header_bytes = bytes(raw)
 			header = numpy.frombuffer(raw, dtype=_HEADER)[0]
 			if int(header['magic']) != _FIGWIG_MAGIC:
 				raise ValueError("{} is not a figwig file.".format(self.path))
@@ -2256,7 +2302,8 @@ class FigWigReader:
 		self._codec = codec
 		self._level = int(header['level'])
 		self._file_size = length
-		self._identity = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
+		self._tables_at = offsets[0]
+		self._identity = (stat.st_ino, stat.st_dev, header_bytes)
 		self._directory = numpy.frombuffer(directory, dtype='<u8').astype(
 			numpy.int64)
 		self._track_ids = {track['name']: i for i, track in enumerate(tracks)}
@@ -2329,17 +2376,27 @@ class FigWigReader:
 
 	def _check_file(self):
 		"""Raise if the file at the path is no longer the one that was
-		opened, which its size, modification time and inode tell."""
+		opened, which its inode and its header tell: a file replaced by a
+		new write has another inode, one rewritten or appended to in place
+		has another header once the writer closes, and until then the
+		chunks this reader's index names are where they were."""
 
 		try:
 			stat = os.stat(self.path)
+			fd = _open_read(self.path)
+			try:
+				raw = _pread(fd, _HEADER.itemsize, 0)
+			finally:
+				os.close(fd)
 		except OSError as e:
 			raise ValueError("{} cannot be read: {}".format(self.path,
 				e.strerror)) from None
-		identity = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
-		if identity != self._identity:
+		if (stat.st_ino, stat.st_dev, raw) != self._identity:
 			raise ValueError("{} has been replaced or rewritten since this reader "
 				"opened it; open it again.".format(self.path))
+		if stat.st_size < self._file_size:
+			raise ValueError("{} has been truncated since this reader opened it."
+				.format(self.path))
 
 	def _threads(self, n_jobs, n_chunks):
 		"""The threads a read of n_chunks chunks or blocks uses: one per
@@ -2377,6 +2434,13 @@ class FigWigReader:
 			to `read` as `tracks`.
 		"""
 
+		known = set()
+		for track in self.tracks:
+			known.update(track)
+		for key in attributes:
+			if key not in known:
+				raise ValueError("no track has an attribute {!r}; the tracks' keys "
+					"are {}.".format(key, ', '.join(sorted(known))))
 		return numpy.array([i for i, track in enumerate(self.tracks) if all(
 			key in track and track[key] == value for key, value in
 			attributes.items())], dtype=numpy.int64)
@@ -2569,8 +2633,7 @@ class FigWigReader:
 			names = [chroms] if isinstance(chroms, str) else list(chroms)
 			for name in names:
 				if name not in self._tids:
-					raise ValueError("chromosome {!r} is not one of the file's "
-						"chromosomes.".format(name))
+					raise ValueError(_unknown_chromosome(name, self.chrom_sizes))
 		self._check_file()
 
 		out = numpy.zeros((len(ids), self._n_tiles), dtype=numpy.float32)
@@ -2717,6 +2780,65 @@ class FigWigReader:
 			label with `labels`, or per bin with `bins`.
 		"""
 
+		return self._read(chroms, starts, width, tracks, out, dtype, n_jobs,
+			sparse, labels, bins, None)
+
+	def sums(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
+		numpy.ndarray, ends: list[int] | numpy.ndarray, tracks: str | int | list
+		| None = None, dtype=None, n_jobs: int = 8) -> numpy.ndarray:
+		"""The sum of each track over intervals of any lengths.
+
+		Each interval is `chroms[i]`, from `starts[i]` to `ends[i]`, and
+		its sum is taken as `read` takes it with `bins`, from the tiles it
+		overlaps and without laying its bases out; the intervals may differ
+		in length, which `read`, with one `width` for every window, cannot
+		take. Bases past the end of a chromosome count as 0.
+
+		Parameters
+		----------
+		chroms: str or list of str
+			The chromosome of each interval, or one for all of them.
+
+		starts: list of int or numpy.ndarray
+			Each interval's first base, 0-based.
+
+		ends: list of int or numpy.ndarray
+			Each interval's end, exclusive, at or after its start.
+
+		tracks: str, int, list, or None, optional
+			The tracks, as `read` takes them. Default is None, every track.
+
+		dtype: optional
+			The type of the sums, as `read` takes it with `bins`: the tracks'
+			own type, or one that holds their sums. Default is None.
+
+		n_jobs: int, optional
+			The threads, as `read` takes it. Default is 8.
+
+		Returns
+		-------
+		sums: numpy.ndarray, shape=(n, tracks) or (n,)
+			Each interval's sum in each track, or in the one track named.
+		"""
+
+		starts = _positions(starts, 'starts')
+		ends = _positions(ends, 'ends')
+		if ends.shape != starts.shape:
+			raise ValueError("ends must hold one end per start, {}, not {}."
+				.format(starts.shape, ends.shape))
+		if (ends < starts).any():
+			raise ValueError("an interval's end is before its start.")
+		width = int((ends - starts).max()) if len(starts) else 1
+		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
+			n_jobs, False, None, max(width, 1), ends)
+		return out[..., 0]
+
+	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
+		labels, bins, stops):
+		"""`read`, with `stops` the windows' ends when they differ in
+		length (`sums`), and then `width` the longest and `bins` equal to
+		it, so that each window's sum is its one bin."""
+
 		n_jobs = _check_n_jobs(n_jobs)
 		ids, single = self._select(tracks)
 		windows = _Windows(chroms, starts, width)
@@ -2724,8 +2846,7 @@ class FigWigReader:
 
 		unknown = [name for name in windows.names if name not in self._tids]
 		if len(unknown) > 0:
-			raise ValueError("chromosome {!r} is not one of the file's "
-				"chromosomes.".format(unknown[0]))
+			raise ValueError(_unknown_chromosome(unknown[0], self.chrom_sizes))
 		windows.check_range()
 		if sparse and (labels is not None or bins is not None):
 			raise ValueError("sparse cannot be given with labels or bins.")
@@ -2786,7 +2907,7 @@ class FigWigReader:
 			read_ids = numpy.array(list(first_channel), dtype=numpy.int64)
 			groups_read = numpy.unique(self._group_of[read_ids]).tolist()
 			tiles = _window_tiles(self.tile, self._tile_offsets, tids, starts,
-				lengths, width)
+				lengths, width, stops)
 			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
 			self._load_indexes(groups_read, n_threads)
 		else:
@@ -2795,7 +2916,7 @@ class FigWigReader:
 			self._load_indexes(list(first_channel), n_jobs)
 			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
 				None, 'list' if sparse else 'sum' if summing else 'dense', labels
-				is not None, bins or 1, n_jobs)
+				is not None, bins or 1, n_jobs, stops)
 			n_threads = max(1, min(n_jobs, len(tasks)))
 		# In position order a group's tasks sum straight into the output when
 		# they write disjoint cells: a label's cells are one per window base,
@@ -2829,7 +2950,8 @@ class FigWigReader:
 			elif out.shape != shape or out.dtype != dtype or not out.flags[
 					'C_CONTIGUOUS'] or not out.flags['WRITEABLE']:
 				raise ValueError("out must be a writeable, C-contiguous {} array "
-					"of shape {}.".format(dtype, shape))
+					"of shape {}; pass dtype= to read as another type.".format(
+					dtype, shape))
 			elif summing or self.order == 'tracks':
 				out[...] = 0
 
@@ -2864,7 +2986,7 @@ class FigWigReader:
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 				slots[self._slot_of[read_ids[mine]]] = channels[mine]
 				tasks.extend(self._plan(g, slots, tiles, starts, width, out3, mode,
-					accumulate, bins or 1, most))
+					accumulate, bins or 1, most, stops))
 			if len(tasks) < n_threads:
 				tasks = _split_tasks(tasks, n_threads)
 
@@ -2969,8 +3091,7 @@ class FigWigReader:
 			names = [chroms] if isinstance(chroms, str) else list(chroms)
 			for name in names:
 				if name not in self._tids:
-					raise ValueError("chromosome {!r} is not one of the file's "
-						"chromosomes.".format(name))
+					raise ValueError(_unknown_chromosome(name, self.chrom_sizes))
 
 		parts = []
 		for name in names:
@@ -3039,6 +3160,8 @@ class FigWigReader:
 			else:
 				dtype = numpy.result_type(*own)
 		else:
+			if type(dtype).__module__ == 'torch':
+				dtype = str(dtype).split('.')[-1]
 			try:
 				dtype = numpy.dtype(dtype)
 			except TypeError:
@@ -3068,7 +3191,7 @@ class FigWigReader:
 		return dtype
 
 	def _plan(self, g, slots, tiles, starts, width, out, mode, accumulate, bins,
-		most):
+		most, stops=None):
 		"""The tasks that read group g's part of the windows: each a batch
 		of up to `most` chunks and the (window, tile) pairs that fall in
 		them, from the windows' tiles as `_window_tiles` gives them."""
@@ -3102,13 +3225,13 @@ class FigWigReader:
 				sizes[unique[a:b][live[a:b]]].astype(numpy.int64), int(total_bytes),
 				_compact(chunk, live[a:b]), local[p0:p1] * tile, starts[rows[p0:p1]],
 				rows[p0:p1], out, width, mode, accumulate, bins, crcs[unique[a:b][
-				live[a:b]]]))
+				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]]))
 			a = b
 
 		return tasks
 
 	def _plan_tracks(self, channels, tids, starts, lengths, width, out, mode,
-		accumulate, bins, n_jobs):
+		accumulate, bins, n_jobs, stops=None):
 		"""The tasks that read windows from a file in track order: each a
 		batch of blocks and the (window, block, channel) pairs."""
 
@@ -3124,9 +3247,10 @@ class FigWigReader:
 					continue
 				firsts = blocks['first'][mine].astype(numpy.int64)
 				lasts = blocks['last'][mine].astype(numpy.int64)
-				stops = numpy.minimum(starts[windows] + width, lengths[windows])
+				ends = numpy.minimum(starts[windows] + width if stops is None else
+					stops[windows], lengths[windows])
 				lo = numpy.searchsorted(lasts, starts[windows], side='left')
-				hi = numpy.searchsorted(firsts, stops, side='left')
+				hi = numpy.searchsorted(firsts, ends, side='left')
 				counts = numpy.maximum(hi - lo, 0)
 				total = int(counts.sum())
 				if total == 0:
@@ -3170,7 +3294,8 @@ class FigWigReader:
 			p0, p1 = int(edges[a]), int(edges[b])
 			tasks.append(_BlockTask(self, records[a:b], int(total_bytes),
 				inverse[p0:p1] - a, slots[p0:p1], starts[rows[p0:p1]], rows[p0:p1],
-				out, width, mode, accumulate, bins))
+				out, width, mode, accumulate, bins, _empty_pairs if stops is None
+				else stops[rows[p0:p1]]))
 			a = b
 
 		return tasks
@@ -3238,13 +3363,17 @@ class FigWigReader:
 			os.close(fd)
 
 
-def _window_tiles(tile, tile_offsets, tids, starts, lengths, width):
+_empty_pairs = numpy.zeros(0, dtype=numpy.int64)
+
+
+def _window_tiles(tile, tile_offsets, tids, starts, lengths, width, stops=None):
 	"""The tiles the windows overlap, clipped to their chromosomes, as
 	(window rows, tiles on the chromosome, distinct file tiles, where each
 	distinct tile's pairs start, each pair's distinct tile, pairs), the
-	pairs sorted by file tile."""
+	pairs sorted by file tile. The windows are `width` wide, or end at
+	`stops`."""
 
-	stops = numpy.minimum(starts + width, lengths)
+	stops = numpy.minimum(starts + width if stops is None else stops, lengths)
 	k0 = starts // tile
 	k1 = (stops - 1) // tile
 	counts = numpy.maximum(k1 - k0 + 1, 0)
@@ -3384,8 +3513,14 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 		if stored[k]:
 			block = stream
 		else:
+			# The stream's Adler-32 is only checked once the inflater reaches
+			# its end, so a stream that stops short is as corrupt as one
+			# that fails.
 			try:
-				block = zlib.decompressobj().decompress(stream, bound + 1)
+				inflater = zlib.decompressobj()
+				block = inflater.decompress(stream, bound + 1)
+				if not inflater.eof:
+					block = b''
 			except zlib.error:
 				block = b''
 
@@ -3404,7 +3539,7 @@ class _Task:
 
 	def __init__(self, reader, g, slots, gtiles, kinds, offsets, sizes, bound,
 		pair_chunks, pair_bases, pair_starts, pair_rows, out, width, mode,
-		accumulate, bins, crcs):
+		accumulate, bins, crcs, pair_stops):
 		self.reader, self.g, self.slots = reader, g, slots
 		self.gtiles, self.kinds, self.crcs = gtiles, kinds, crcs
 		self.offsets, self.sizes, self.bound = offsets, sizes, bound
@@ -3412,6 +3547,7 @@ class _Task:
 		self.pair_bases = numpy.ascontiguousarray(pair_bases, dtype=numpy.int64)
 		self.pair_starts = numpy.ascontiguousarray(pair_starts, dtype=numpy.int64)
 		self.pair_rows = numpy.ascontiguousarray(pair_rows, dtype=numpy.int64)
+		self.pair_stops = numpy.ascontiguousarray(pair_stops, dtype=numpy.int64)
 		self.out, self.width, self.mode = out, width, mode
 		self.accumulate, self.bins = accumulate, bins
 		self.entries = None
@@ -3429,7 +3565,8 @@ class _Task:
 					self.kinds, self.offsets, self.sizes, self.bound,
 					self.pair_chunks[a:b], self.pair_bases[a:b], self.pair_starts[a:b],
 					self.pair_rows[a:b], self.out, self.width, self.mode,
-					self.accumulate, self.bins, self.crcs))
+					self.accumulate, self.bins, self.crcs, self.pair_stops[a:b] if
+					len(self.pair_stops) else self.pair_stops))
 		return out
 
 	def run(self, fd):
@@ -3479,7 +3616,8 @@ class _Task:
 
 		_read_tiles(reader.tile, data, positions, self.kinds, len(self.slots),
 			self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
-			self.pair_rows, self.out, self.accumulate, scratch, self.bins)
+			self.pair_rows, self.out, self.accumulate, scratch, self.bins,
+			self.pair_stops)
 
 
 class _BlockTask:
@@ -3487,12 +3625,13 @@ class _BlockTask:
 	(window, block, channel) pairs that may fall in them."""
 
 	def __init__(self, reader, records, bound, pair_blocks, pair_slots,
-		pair_starts, pair_rows, out, width, mode, accumulate, bins):
+		pair_starts, pair_rows, out, width, mode, accumulate, bins, pair_stops):
 		self.reader, self.records, self.bound = reader, records, bound
 		self.pair_blocks = numpy.ascontiguousarray(pair_blocks, dtype=numpy.int64)
 		self.pair_slots = numpy.ascontiguousarray(pair_slots, dtype=numpy.int64)
 		self.pair_starts = numpy.ascontiguousarray(pair_starts, dtype=numpy.int64)
 		self.pair_rows = numpy.ascontiguousarray(pair_rows, dtype=numpy.int64)
+		self.pair_stops = numpy.ascontiguousarray(pair_stops, dtype=numpy.int64)
 		self.out, self.width, self.mode = out, width, mode
 		self.accumulate, self.bins = accumulate, bins
 		self.entries = None
@@ -3521,21 +3660,21 @@ class _BlockTask:
 			count = _read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
 				False, True, False, empty, empty, empty, numpy.zeros(0,
-				dtype=numpy.float64), scratch, 1)
+				dtype=numpy.float64), scratch, 1, empty)
 			rows = numpy.empty(count, dtype=numpy.int64)
 			channels = numpy.empty(count, dtype=numpy.int64)
 			offsets = numpy.empty(count, dtype=numpy.int64)
 			values = numpy.empty(count, dtype=numpy.float64)
 			_read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
-				False, True, True, rows, channels, offsets, values, scratch, 1)
+				False, True, True, rows, channels, offsets, values, scratch, 1, empty)
 			self.entries = (rows, channels, offsets, values)
 			return
 
 		_read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 			self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
 			self.accumulate, False, False, empty, empty, empty, numpy.zeros(0,
-			dtype=numpy.float64), scratch, self.bins)
+			dtype=numpy.float64), scratch, self.bins, self.pair_stops)
 
 
 def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |

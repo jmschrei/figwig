@@ -119,8 +119,8 @@ def test_metadata_table_names_and_describes_tracks(tmp_path, bigwigs):
 	assert [track['group'] for track in reader.tracks] == [0, 1, 2]
 	assert reader.tracks[0]['assay'] == 'ATAC-seq' and reader.tracks[0][
 		'strand'] == '+'
-	assert reader.tracks[1]['assay'] == 'DNase-seq' and reader.tracks[1][
-		'strand'] == ''
+	assert reader.tracks[1]['assay'] == 'DNase-seq' and 'strand' not in \
+		reader.tracks[1]
 	assert 'file' not in reader.tracks[0]
 
 
@@ -179,7 +179,21 @@ def test_declared_dtype(tmp_path, bigwigs):
 	main(['bw2fw', '-o', out, '--dtype', 'uint16', bigwigs[0]])
 	assert FigWigReader(out).tracks[0]['dtype'] == 'uint16'
 	with pytest.raises(SystemExit, match="not an integer"):
-		main(['bw2fw', '-o', out, '--dtype', 'uint16', bigwigs[1]])
+		main(['bw2fw', '-o', out, '-f', '--dtype', 'uint16', bigwigs[1]])
+	assert FigWigReader(out).tracks[0]['dtype'] == 'uint16'
+
+
+def test_existing_output_is_refused_without_force(tmp_path, bigwigs):
+	out = str(tmp_path / 'out.fw')
+	main(['bw2fw', '-o', out] + bigwigs[:2])
+	with pytest.raises(SystemExit, match="exists; --append adds tracks to it, "
+			"and -f writes over it"):
+		main(['bw2fw', '-o', out, bigwigs[2]])
+	assert len(FigWigReader(out).tracks) == 2
+	main(['bw2fw', '-o', out, '-f', bigwigs[2]])
+	assert len(FigWigReader(out).tracks) == 1
+	with pytest.raises(SystemExit, match="-p"):
+		main(['bw2fw', '-o', out, '-f', '-p', '0', bigwigs[2]])
 
 
 def test_chromosomes_absent_from_a_bigwig_are_zero(tmp_path, bigwigs):
@@ -249,7 +263,7 @@ def test_nan_intervals_are_kept(tmp_path):
 	y = FigWigReader(out).read('chr1', [0], 300, tracks=0)[0]
 	assert numpy.isnan(y[10:20]).all() and y[100] == 2 and y[0] == 0
 	assert FigWigReader(out).tracks[0]['dtype'] == 'float32'
-	main(['bw2fw', '-o', out, '--missing', 'nan', bw])
+	main(['bw2fw', '-o', out, '-f', '--missing', 'nan', bw])
 	y = FigWigReader(out).read('chr1', [0], 300, tracks=0)[0]
 	assert numpy.isnan(y[:100]).all() and y[200] == 0 and y[100] == 2
 

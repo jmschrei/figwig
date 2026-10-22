@@ -55,4 +55,4 @@ def main(argv=None, prog='figwig merge'):
 		_merge(args.figwig, args.output, genome=args.genome,
 			verbose=args.verbose)
 	except (ValueError, TypeError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

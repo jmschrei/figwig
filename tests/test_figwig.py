@@ -4,6 +4,7 @@
 import os
 import sys
 import pickle
+import shutil
 import struct
 import subprocess
 
@@ -1133,7 +1134,8 @@ def test_read_tiles_zero_chunk_writes_zeros():
 	_read_tiles(16, numpy.zeros(8, dtype=numpy.uint8), numpy.zeros(0,
 		dtype=numpy.int64), numpy.zeros(0, dtype=numpy.uint8), 2,
 		numpy.array([1, -1]), numpy.array([-1]), numpy.array([0]),
-		numpy.array([4]), numpy.array([0]), out, False, numpy.zeros((0, 0)), 1)
+		numpy.array([4]), numpy.array([0]), out, False, numpy.zeros((0, 0)), 1,
+		numpy.zeros(0, dtype=numpy.int64))
 	numpy.testing.assert_array_equal(out[0, 1], 0)
 	numpy.testing.assert_array_equal(out[0, 0], 9)
 
@@ -1818,6 +1820,52 @@ def test_bins_that_straddle_tiles_on_threads(fw, ref, read_batching,
 	assert seen == [False, True, False, False]
 
 
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_sums_over_intervals_of_any_length(fw, track_fw, ref, read_batching,
+	n_jobs):
+	"""sums takes intervals that differ in length and gives each track's
+	total over each, in position and in track order, as the dense windows
+	sum to; an empty interval sums to 0, and one past a chromosome's end
+	counts the bases past it as 0."""
+
+	rng = numpy.random.default_rng(14)
+	n = 60
+	names = numpy.array(list(CHROM_SIZES))
+	chroms = names[rng.integers(0, 3, n)]
+	lengths = numpy.array([CHROM_SIZES[c] for c in chroms])
+	starts = (rng.random(n) * lengths).astype(numpy.int64)
+	ends = starts + rng.integers(0, 700, n)
+	ends[:3] = starts[:3]
+	ends[3] = CHROM_SIZES[chroms[3]] + 50
+	expected_sums = numpy.zeros((n, 5))
+	for i in range(n):
+		width = int(min(ends[i], CHROM_SIZES[chroms[i]]) - starts[i])
+		if width > 0:
+			expected_sums[i] = expected(ref, chroms[i:i + 1], starts[i:i + 1],
+				width, list(range(5)), numpy.float64)[0].sum(-1)
+	for path in (fw, track_fw):
+		reader = FigWigReader(path)
+		y = reader.sums(chroms, starts, ends, dtype='float64', n_jobs=n_jobs)
+		assert y.shape == (n, 5)
+		numpy.testing.assert_array_equal(y, expected_sums)
+		y = reader.sums(chroms, starts, ends, tracks='atac_plus', n_jobs=n_jobs)
+		assert y.shape == (n,) and y.dtype == numpy.float32
+		numpy.testing.assert_array_equal(y, expected_sums[:, 0])
+		# A float32 output accumulates the tiles' partial sums in float32.
+		y = reader.sums(chroms, starts, ends, tracks=[2, 0], dtype='float32',
+			n_jobs=n_jobs)
+		assert y.dtype == numpy.float32
+		numpy.testing.assert_allclose(y, expected_sums[:, [2, 0]], rtol=1e-5,
+			atol=1e-2)
+		assert reader.sums('chr1', [], [], dtype='float64').shape == (0, 5)
+		with pytest.raises(ValueError, match="one end per start"):
+			reader.sums(chroms, starts, ends[:-1])
+		with pytest.raises(ValueError, match="end is before its start"):
+			reader.sums('chr1', [10], [9])
+		with pytest.raises(ValueError, match="'chr1', 'chr2', 'chrM'"):
+			reader.sums('chr9', [0], [10])
+
+
 def test_bins_in_track_order(track_fw, fw):
 	rng = numpy.random.default_rng(12)
 	chroms, starts = random_windows(rng, 40, 512)
@@ -2295,9 +2343,9 @@ def test_add_file_copies_tracks(tmp_path, ref, cells):
 		writer.add_file(first)
 		with pytest.raises(ValueError, match="already one of the writer's"):
 			writer.add_file(first)
-		with pytest.raises(ValueError, match="was written with tile"):
+		with pytest.raises(ValueError, match="was written with (tile|level)"):
 			writer.add_file(paths['positions', 120])
-		with pytest.raises(ValueError, match="was written with tile"):
+		with pytest.raises(ValueError, match="was written with order tracks"):
 			writer.add_file(paths['tracks', 1])
 	reader = FigWigReader(merged, verify=True)
 	assert [t['name'] for t in reader.tracks] == ['own'] + [t['name'] for t in
@@ -2318,3 +2366,137 @@ def test_add_file_copies_tracks(tmp_path, ref, cells):
 		with pytest.raises(ValueError, match="other chromosomes"):
 			writer.add_file(other)
 		writer.add_file(first)
+
+
+###
+# Found by the persona test
+
+
+@pytest.mark.parametrize('fallback', [False, True])
+def test_damaged_compressed_chunk_never_reads_wrong(fw, tmp_path, monkeypatch,
+	fallback):
+	"""A bit flipped anywhere in a compressed chunk is refused or, when the
+	flip is invisible, read as before: a chunk whose stream libdeflate
+	rejects is inflated by zlib up to its checksum, never short of it. With
+	`fallback` every chunk takes that path, as when no C library loads."""
+
+	if fallback:
+		monkeypatch.setattr(figwig.figwig, '_libdeflate_inflate', lambda: None)
+		monkeypatch.setattr(figwig.figwig, '_zlib_uncompress', lambda: None)
+	path = str(tmp_path / 'flipped.fw')
+	shutil.copy(fw, path)
+	reader = FigWigReader(path)
+	kinds, sizes, raws, offsets, crcs = reader._group_index(0)
+	t = int(numpy.argmax(sizes * (sizes != raws)))
+	assert sizes[t] > 0 and sizes[t] != raws[t]
+	offset, size = int(offsets[t]), int(sizes[t])
+	tid = int(numpy.searchsorted(reader._tile_offsets, t, side='right') - 1)
+	chrom = list(reader.chrom_sizes)[tid]
+	start = (t - int(reader._tile_offsets[tid])) * reader.tile
+	width = min(reader.tile, reader.chrom_sizes[chrom] - start)
+	good = reader.read(chrom, [start], width, dtype='float64', n_jobs=1)
+	with open(path, 'rb') as handle:
+		handle.seek(offset)
+		original = bytearray(handle.read(size))
+	outcomes = {'refused': 0, 'same': 0}
+	for i in range(size):
+		damaged = bytearray(original)
+		damaged[i] ^= 0x10
+		with open(path, 'r+b') as handle:
+			handle.seek(offset)
+			handle.write(damaged)
+		try:
+			y = FigWigReader(path).read(chrom, [start], width, dtype='float64',
+				n_jobs=1)
+		except ValueError:
+			outcomes['refused'] += 1
+			continue
+		assert_identical(y, good)
+		outcomes['same'] += 1
+	assert outcomes['refused'] > size // 2
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason="no file modes")
+def test_files_are_readable_as_the_umask_allows(tmp_path):
+	path = str(tmp_path / 'mode.fw')
+	write_figwig(path, {'chr1': 100}, ['x'], 'chr1', [0], numpy.ones((1, 1, 100)))
+	mask = os.umask(0)
+	os.umask(mask)
+	assert os.stat(path).st_mode & 0o777 == 0o666 & ~mask
+
+
+def test_writer_abandoned_from_a_pool_thread(tmp_path):
+	"""A writer dropped with work in flight is finalized on a pool thread;
+	its _abandon must not wait for that thread."""
+
+	path = str(tmp_path / 'dropped.fw')
+	writer = FigWigWriter(path, {'chr1': 100000}, ['x'], n_jobs=2)
+	writer.write('chr1', [0], numpy.ones((1, 1, 100000)))
+	partial = writer._partial
+	writer._pool.submit(writer._abandon).result()
+	assert writer._file is None and not os.path.exists(partial)
+	assert not os.path.exists(path)
+
+
+def test_reader_reads_through_an_append(tmp_path, ref):
+	"""A reader open on a file keeps reading while a writer appends to it,
+	since the chunks its index names stay where they are, and is told to
+	open the file again once the append has closed, or when the file has
+	been truncated."""
+
+	path = str(tmp_path / 'during.fw')
+	write_reference(path, ref, tile=TILE)
+	reader = FigWigReader(path)
+	rng = numpy.random.default_rng(13)
+	chroms, starts = random_windows(rng, 30, 300)
+	before = reader.read(chroms, starts, 300, dtype='float64')
+	writer = FigWigWriter(path, None, ['more'], append=True, n_jobs=1)
+	writer.write('chr1', [0], numpy.full((1, 1, 4 * TILE), 2.0))
+	writer._write(len(writer._inflight))
+	writer._file.flush()
+	assert os.path.getsize(path) > reader._file_size
+	assert_identical(reader.read(chroms, starts, 300, dtype='float64'), before)
+	writer.close()
+	with pytest.raises(ValueError, match="open it again"):
+		reader.read(chroms, starts, 300)
+
+	reader = FigWigReader(path)
+	with open(path, 'r+b') as handle:
+		handle.truncate(reader._file_size - 1)
+	with pytest.raises(ValueError, match="truncated"):
+		reader.read(chroms, starts, 300)
+
+
+def test_messages_say_what_to_do(fw):
+	reader = FigWigReader(fw)
+	with pytest.raises(ValueError, match="no track has an attribute 'strnd'; "
+			"the tracks' keys are"):
+		reader.select(strnd='+')
+	with pytest.raises(ValueError, match="'chr1', 'chr2', 'chrM'"):
+		reader.read('chr3', [0], 10)
+	with pytest.raises(ValueError, match="'chr1', 'chr2', 'chrM'"):
+		reader.tile_sums(chroms='Chr1')
+	with pytest.raises(ValueError, match="pass dtype="):
+		reader.read('chr1', [0], 10, out=numpy.zeros((1, 5, 10), dtype='float64'))
+	with pytest.raises(ValueError, match="give one per window"):
+		reader.read('chr1', 0, 10)
+	torch = pytest.importorskip('torch')
+	assert reader.read('chr1', [0], 10, dtype=torch.float32).dtype == \
+		numpy.float32
+	assert reader.read('chr1', [0], 10, dtype=torch.int32, tracks='atac_plus'
+		).dtype == numpy.int32
+
+
+def test_chromosome_mismatch_is_described(tmp_path, ref):
+	first = str(tmp_path / 'a.fw')
+	write_reference(first, ref)
+	other = str(tmp_path / 'b.fw')
+	write_figwig(other, {'chr1': 5000, 'chr2': 3000, 'chrX': 9}, ['x'], 'chr1',
+		[0], numpy.ones((1, 1, 10)), tile=TILE)
+	with FigWigWriter(str(tmp_path / 'm.fw'), CHROM_SIZES, None, tile=TILE) as \
+			writer:
+		writer.add_file(first)
+		with pytest.raises(ValueError, match="has a chromosome the writer lacks, "
+				"such as 'chrX'; it lacks a chromosome the writer has, such as "
+				"'chrM'; 'chr2' is 3000 bases long in it and 3001 in the writer"):
+			writer.add_file(other)

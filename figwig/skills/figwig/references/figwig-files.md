@@ -14,6 +14,7 @@ directory of bigWigs is read in windows again and again.
 FigWigReader(path)
 reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
 	sparse=False, labels=None, bins=None)
+reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8)   # -> (n, tracks): totals over intervals of any lengths
 reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
 reader.tile_sums(tracks=None, chroms=None)  # -> float32 (tracks, tiles): sums per tile, no decoding
 reader.select(**attributes)          # -> int64 indices, for `tracks`
@@ -70,7 +71,11 @@ one. An unknown chromosome raises: a figwig file holds every chromosome it
 was written with, so there is no warning as for bigWigs. A read uses one
 thread per 64 chunks it touches, up to `n_jobs`, so small reads run on the
 calling thread. A reader checks on every read that the file at its path is
-the one it opened, and raises if a conversion replaced it.
+the one it opened (inode and header), and raises if a conversion replaced
+it or an append to it has closed; it keeps reading while the append runs.
+`figwig info k562.fw` prints the file's genome, order, tile, chromosomes,
+size and a table of its tracks; `-b` adds the bytes its chunks, tables
+and nothing use.
 
 ## Reading for training
 
@@ -79,32 +84,56 @@ import numpy
 from figwig import FigWigReader
 
 fw = FigWigReader("k562.fw")
-tracks = fw.select(assay="ATAC-seq")           # e.g. [0 1]
-y = fw.read(chroms, starts, width=2114, tracks=tracks)
-# (n, 2, 2114) uint16 for count tracks
+tracks = fw.select(assay="ATAC-seq", biosample="K562")   # [0 1]: both strands; without biosample= the unstranded track too
+chroms = numpy.array(["chr1", "chr1", "chr2"])            # one per window, from a peak table
+starts = numpy.array([1_000_000, 2_500_000, 300_000])
+y = fw.read(chroms, starts, width=2114, tracks=tracks, dtype="float32")
+# (3, 2, 2114); the tracks' own dtype (uint8/uint16) without dtype=
 counts = fw.read(chroms, starts, width=2114, tracks=tracks, bins=2114)[:, :, 0]
-binned = fw.read(chroms, starts, width=196_608, bins=128)   # (n, tracks, 1536)
+binned = fw.read(chroms, starts, width=2048, bins=128)    # (3, tracks, 16)
+totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # peaks of any lengths, (3, 2)
 ```
 
 - `select` matches equality on the keys of the track records: `name`,
   `dtype`, `group` and whatever attributes the file was written with (`assay`,
   `strand`, `biosample`, ...). Look at `fw.tracks` to see which exist;
   attributes from a metadata table are strings, so `select(units=1)` matches
-  nothing where `select(units="1")` would.
+  nothing where `select(units="1")` would, and a key no track has raises.
 - `out=` may be a numpy view of a pinned torch tensor of the output's shape
   and dtype; cast to float on the GPU, where a uint16 batch is half the bytes
   of float32. Integer outputs wrap in numpy and torch arithmetic the way any
-  uint8 does; pass `dtype='float32'` for code ported from `read_bigwig`.
+  uint8 does, and torch's uint16 lacks `add`, `mean` and `mse_loss`, so a
+  training path passes `dtype="float32"` (10-20% slower than the native
+  type) or casts at once; a torch dtype is accepted as `dtype=`. Which
+  native type comes back depends on the tracks asked for (uint8 for one,
+  uint16 for its neighbour), so a model should not rely on it.
+- `bins=` is a bin width in bases, not a count as pyBigWig's `nBins` is,
+  and must divide `width`; 2,114 has no divisor near 100, so bin a 2,048 or
+  1,000 bp window. A mean from a figwig file is a sum over every base;
+  pyBigWig `stats`, pybigtools and deepTools average over covered bases and
+  give NaN for an empty region, so an analysis of count tracks ported from
+  them changes numbers unless the file was written with `--missing nan`,
+  where a bin or interval holding a NaN base sums to NaN.
+- `sums(chroms, starts, ends, tracks)` is for intervals that differ in
+  length, peaks, genes or cCREs: 172,732 peaks x 6 tracks took 0.25 s on 8
+  threads, where a `read(bins=width)` per distinct width took 2.7 s and
+  pyBigWig `stats` 46 s.
 - A `FigWigReader` pickles without its index, which each worker reads
   again, and can be read from several threads, so it goes in a Dataset the
-  way `references/reading.md` shows for `BigWigReader`; DataLoader workers
-  do not make it faster, since one process reads about 70,000 windows per
-  second, and under `spawn` each worker loads the compiled kernels.
+  way `references/reading.md` shows for `BigWigReader`. DataLoader workers
+  help once reading is the bottleneck: four fork or spawn workers halved an
+  epoch of 8,192 windows from 0.15 s to 0.08 s, two spawn workers gained
+  nothing, and under `spawn` each worker pays 2-3 s on its first epoch to
+  load the compiled kernels.
 - Tracks of one *group* are stored together and decoded together, so reading
   one track of a group of 8 decodes all 8. Files meant to be read a track at a
   time should be written with small groups, and groups should hold tracks of
   one kind: a count track grouped with a float track is stored as float
-  values and decoded with it.
+  values and decoded with it. The defaults (tile 16,384, groups of 8) suit
+  count tracks; dense float tracks read in short windows (conservation,
+  fold change, p-value) want `tile=1024, groups=1` (`bw2fw -t 1024 --groups
+  1`): 7x faster random 1 kb windows for a file 50% larger, and a dense
+  track in a group of its own reads 12x faster than beside two others.
 - The first dense read of a fresh install compiles for about 27 s, the first
   sparse read for 21 s more, a second output dtype for 12 s and track order
   for 12 s; later processes load the cache in a tenth of a second. Warm up
@@ -182,9 +211,10 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
   twice as fast as zlib.
 - A chunk whose nonzero values are all 1, as single-cell cut sites usually
   are, stores no values at all.
-- The file is written beside its path and moved there at `close`, so a
-  failed write leaves the path as it was, and `reorder` or `bw2fw` may write
-  over their input. A writer never closed warns and writes nothing.
+- The file is written beside its path and moved there at `close`, with the
+  mode the umask gives a new file, so a failed write leaves the path as it
+  was, and `reorder` or `bw2fw` may write over their input. A writer never
+  closed warns and writes nothing.
 - The chunks depend on the values and on which calls wrote which groups, not
   on `n_jobs` or on how values were split between calls; the sum statistic
   is compensated.
@@ -198,13 +228,20 @@ figwig bw2fw -o wgbs.fw --missing nan -p 8 methylation.bw
 figwig merge -o all.fw k562.fw hepg2.fw                     # copy files' tracks into one
 figwig fw2bw k562.fw -o bigwigs -p 8 [--select assay=ATAC-seq | -t atac.+ atac.-]
 figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
+figwig info k562.fw [-b]                                     # what the file holds
 ```
+
+- `bw2fw` and `fw2bw` refuse to write over an output that exists unless
+  `-f` is given (`--append` adds to it instead); `-v` prints a line per
+  group and a summary. There is no bedGraph export: `fw2bw` then
+  `bigWigToBedGraph`, or `read_entries` and write the runs.
 
 - The metadata table is tab-separated (or `.csv`), with a header; its first
   column names the input file by path or base name, a `name` column names the
   track, a `dtype` column sets its dtype, and every other column is an
-  attribute, kept as a string. `fw2bw` writes such a table next to the
-  bigWigs, named after the figwig file, so `bw2fw -m` reads it back.
+  attribute, kept as a string (an empty cell is no attribute). `fw2bw`
+  writes such a table next to the bigWigs, named after the figwig file, so
+  `bw2fw -m` reads it back.
 - `bw2fw` takes the chromosomes from the bigWigs, which must agree on
   lengths; `-s sizes` sets them instead, must agree with every bigWig on the
   chromosomes they share (an hg19 bigWig with hg38 sizes is refused), warns
@@ -212,8 +249,12 @@ figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 - Values read from a converted file equal `read_bigwig(..., missing=0.0,
   keep_nan=True)` on the bigWigs: an interval whose value is NaN is NaN.
   `--missing nan` makes the bases no interval covers NaN too, for methylation
-  or conservation tracks whose zeros are measurements, at the cost of a dense
-  float32 track; `fw2bw --missing nan` writes such a file's zeros back.
+  or conservation tracks whose zeros are measurements; the track is then
+  float32, which costs a compressed file under 1% and doubles an
+  uncompressed one; `fw2bw --missing nan` writes such a file's zeros back.
+  `bw2fw --append` of a bigWig with chromosomes the file lacks drops them
+  with a warning; `bw2fw -s` fixes the chromosome set of files that will be
+  merged.
 - `bam2fw` takes `figwig bam2bw`'s options and writes each input file as its
   own pair of tracks `<name>.+` and `<name>.-` (one track with `-u`), in one
   group; `-r` divides by each file's own read depth. Linux and macOS, with
@@ -238,11 +279,15 @@ figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam
 | `entries ... both name base ...` | duplicate (track, position) entries in `write_sparse`; merge them first |
 | `which an earlier call already wrote`, `was begun by write` | `write` and `write_sparse` on one tile in two calls |
 | `has values from ... to ..., which uint8 does not hold` | `dtype=` too narrow for a track on read |
-| `is not one of the file's chromosomes` | a window on a chromosome the file was not written with |
-| `has been replaced or rewritten since this reader opened it` | the file changed under a reader; open it again |
+| `is not one of the file's chromosomes, 'chr1', ...` | a window on a chromosome the file was not written with; the message names the file's |
+| `has been replaced or rewritten since this reader opened it`, `has been truncated` | the file changed under a reader (a conversion, or an append that closed); open it again |
+| `no track has an attribute` | `select` with a key no track record has; the message names the keys |
+| `pass dtype= to read as another type` | `out=` of another dtype than the tracks' |
+| `ends must hold one end per start`, `an interval's end is before its start` | `sums` with mismatched or reversed intervals |
+| `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it` | `bw2fw` or `fw2bw` onto an existing output |
 | `it is version 1 of the format`, `version 2` | a file written by a figwig before the format's release; write it again |
 | `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB, or written by an earlier figwig |
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
-| `was written with tile ..., level ... and ... order where this writer has` | `add_file` or `merge` of files with different layouts; `reorder` one first |
+| `was written with order|tile|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of files with different layouts or chromosome sets; `reorder` one first, or `bw2fw -s` the same sizes |
 | `does not match its checksum` | `verify=True` found a corrupt chunk |
 | `cannot be read as a figwig file`, `a chunk of ... cannot be read` | a truncated or corrupt file; every such case raises `ValueError` |

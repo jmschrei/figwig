@@ -314,10 +314,15 @@ A figwig file holds many tracks over one genome, each with attributes that
 call, from any subset of the tracks, into `(windows, tracks, width)` in the
 tracks' own dtype, or as a sparse list of nonzero bases with `sparse=True`,
 summed per label with `labels=`, or summed per bin of each window with
-`bins=`. It is written in position order, tiles across tracks, for reading
+`bins=`, and `sums` gives each track's total over intervals of any
+lengths, such as peaks or genes. It is written in position order, tiles
+across tracks, for reading
 windows across many tracks, or in track order for reading a few tracks over
 the genome, and `write_sparse` takes nonzero bases as entries, such as the
-cut sites of single cells. Each chunk of a group's tiles is stored densely,
+cut sites of single cells. `fw.tracks`, `fw.stats` and `fw.chrom_sizes`
+say what a file holds, as `figwig info` does from the shell; the first
+read in a fresh environment compiles its kernels for about 27 s, and later
+processes load them in a tenth of a second. Each chunk of a group's tiles is stored densely,
 as nonzero bases, as runs of one value or as a matrix of the tracks present,
 whichever is smallest, in the narrowest type that holds it exactly. Six
 genome-wide count tracks that take 971 MB as bigWigs take 225 MB as one
@@ -416,13 +421,16 @@ options:
 figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> k562.fw
 figwig fw2bw k562.fw -o bigwigs -p 8 --select assay=ATAC-seq                      # tracks -> bigwigs/<name>.bw
 figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8          # reads -> k562.fw
+figwig info k562.fw                                                              # what the file holds
 ```
 
 `figwig bw2fw` writes bigWigs as the tracks of one figwig file, named after
-their files or by a metadata table whose other columns become the tracks'
+their files or by a metadata table (tab-separated, its first column the
+file) whose other columns become the tracks'
 attributes, or adds them to a file with `--append`; `figwig fw2bw` writes a
 figwig file's tracks back as bigWigs with such a table; `figwig merge`
-copies several files' tracks into one; and `figwig bam2fw` takes `figwig
+copies several files' tracks into one; `figwig info` prints a file's
+tracks, attributes and statistics; and `figwig bam2fw` takes `figwig
 bam2bw`'s arguments and
 writes each input file as its own pair of stranded tracks. The
 [converters](https://figwig.readthedocs.io/en/latest/converters.html) page

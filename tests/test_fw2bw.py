@@ -81,7 +81,7 @@ def test_round_trip_through_bw2fw(tmp_path, fw):
 	for a, b in zip(original.tracks, copy.tracks):
 		assert a['name'] == b['name'] and a['dtype'] == b['dtype']
 		assert a.get('assay') == b.get('assay')
-		assert a.get('strand', '') == b.get('strand')
+		assert a.get('strand') == b.get('strand')
 
 	for chrom, length in CHROM_SIZES.items():
 		a = original.read(chrom, [0], length, tracks=[0, 1, 2, 3], dtype='float32')
@@ -141,5 +141,14 @@ def test_command_line(tmp_path, fw):
 		str(tmp_path / 'cli'), '-v'], env=ENV, capture_output=True, text=True,
 		timeout=600)
 	assert result.returncode == 0, result.stderr
-	assert 'chrM' in result.stderr
+	assert 'group 0: ' in result.stderr and 'chrM' not in result.stderr
 	assert len(os.listdir(tmp_path / 'cli')) == 6
+	result = subprocess.run([sys.executable, '-m', 'figwig', 'fw2bw', fw, '-o',
+		str(tmp_path / 'cli')], env=ENV, capture_output=True, text=True,
+		timeout=600)
+	assert result.returncode != 0 and 'exists; -f writes over it' in \
+		result.stderr
+	result = subprocess.run([sys.executable, '-m', 'figwig', 'fw2bw', fw, '-o',
+		str(tmp_path / 'cli'), '-f'], env=ENV, capture_output=True, text=True,
+		timeout=600)
+	assert result.returncode == 0, result.stderr

@@ -135,8 +135,11 @@ Selecting tracks by their attributes
 indices of the tracks that have them all, in the file's order, to pass as
 ``tracks``; it returns an empty array, which ``read`` refuses, when no
 track matches, as when a value is given as a number where the table it was
-read from held a string. The records hold whatever attributes the tracks
-were written with, besides ``name``, ``dtype`` and ``group``. ``fw.stats``
+read from held a string, and raises when no track has the key at all,
+naming the keys there are. The records hold whatever attributes the tracks
+were written with, besides ``name``, ``dtype`` and ``group``; ``figwig
+info k562.fw`` prints them as a table, with the file's genome, order,
+tile, chromosomes and size. ``fw.stats``
 is a structured array with each track's ``sum``, ``nonzero`` bases, ``min``
 and ``max``, which a count model normalizes by:
 
@@ -197,7 +200,8 @@ window's total per track, which a count loss takes:
     # (64, 6, 1536) float32
     counts = fw.read(chroms, starts, width=2114, bins=2114)[:, :, 0]
 
-``bins`` must divide ``width``; the sums are taken without laying the
+``bins`` is a width in bases, where pyBigWig's ``nBins`` is a count, and
+must divide ``width``; the sums are taken without laying the
 window's bases out, from a scratch tile each chunk is decoded into once,
 and bases past the end of a chromosome count as 0. A bin that straddles
 two tiles is summed from both, which may lie on different threads, so a
@@ -205,6 +209,25 @@ read whose bins do not lie on the tile grid sums into a copy of its
 output per thread, which the memory guard counts; its output is
 ``width / bins`` times smaller than a dense one. ``bins`` and ``labels``
 can be given together.
+
+``sums`` takes intervals that differ in length, such as peaks, genes or
+cCREs, and gives each track's total over each, the way ``bins=width``
+does for windows of one width, from the tiles the intervals overlap:
+
+.. code-block:: python
+
+    totals = fw.sums(chroms, starts, ends, tracks=["atac.+", "atac.-"])
+    print(totals.shape, totals.dtype)
+    # (172732, 2) float32
+    means = totals / (ends - starts)[:, None]
+
+These sums count every base of an interval, so a mean is a sum over the
+interval's length. pyBigWig's ``stats(type="mean")``, pybigtools and
+deepTools average over the bases an interval covers and give NaN for a
+region no interval covers, which a figwig file cannot tell from 0 unless
+it was written with ``--missing nan``, where a bin or interval that holds
+a NaN base sums to NaN; an analysis of count tracks ported from those
+tools gives other means for regions with uncovered bases.
 
 ``read_entries(tracks, chroms)`` gives every nonzero base of some tracks
 over whole chromosomes as a ``SparseEntries`` of chromosome index,
@@ -269,7 +292,8 @@ call that raises writes nothing.
 
 ``tracks`` are names, or dicts with a ``name``, an optional ``dtype`` and
 any JSON-serializable attributes; NaN is not JSON and is refused. A track's
-``dtype`` is what ``read`` returns it as: given, it is checked against
+``dtype`` is what ``read`` returns it as, and a file is created with the
+mode the umask gives a new file: given, it is checked against
 every value written; left out, it is set when the writer closes to the
 narrowest type that holds the track's values, uint8 here, float32 where a
 value is not an integer, and float64 where an integer lies beyond int32 and
@@ -292,8 +316,13 @@ since a chunk's element type is chosen for the whole group: a count track
 grouped with a conservation track costs float32 bytes per count before
 compression, and its reads decode the conservation values too. A file of
 cells read as pseudobulks wants every cell in one group, and a file read a
-few tracks at a time wants track order. A ``write`` call covers whole
-groups. ``write_figwig`` writes one call's worth to a new file:
+few tracks at a time wants track order. The defaults, a tile of 16,384
+and groups of 8, suit count tracks, whose chunks are mostly zero; dense
+float tracks read in short windows, such as conservation, fold-change or
+p-value signal, want ``tile=1024`` and ``groups=1``, which
+:doc:`benchmarks` measures at seven times the speed of the defaults for a
+file half again as large. A ``write`` call covers whole groups.
+``write_figwig`` writes one call's worth to a new file:
 
 .. code-block:: python
 
@@ -326,7 +355,9 @@ with values written and no ``close`` warns. Every chunk's CRC-32 goes into
 the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
 reads against it; a compressed chunk's zlib checksum is checked on every
 read either way, so ``verify`` is for uncompressed files, at the cost of a
-pass over the bytes read.
+pass over the bytes read, and for the rare damage zlib's Adler-32 misses:
+of 2,715 single-bit flips in one compressed chunk, 2,714 were refused and
+one read as four wrong bases, which ``verify`` caught.
 
 Adding tracks to a file
 -----------------------
@@ -346,9 +377,11 @@ Adding tracks to a file
 in new groups after its own: the file's chunks stay where they are, the
 new chunks are written after its end, and the tables, the index and last
 the header are written when the writer closes, so that until then the
-file reads as it did, a writer that fails cuts it back to what it was,
-and a process killed part way leaves a file whose header still describes
-the old one. The file's chromosomes, tile, level and order are taken, and
+file reads as it did, a reader already open on it keeps reading and is
+told to open it again once the append has closed, a writer that fails
+cuts the file back to what it was, and a process killed part way leaves a
+file whose header still describes the old one. The file's chromosomes,
+tile, level and order are taken, and
 ``chrom_sizes``, ``tile``, ``level`` and ``order`` must agree with them or
 be left at None. Appending costs the new chunks alone, and leaves the
 old tables and index behind as dead bytes between the chunks, about the
@@ -411,9 +444,10 @@ the tracks of one figwig file, with a metadata table for their names and
 attributes; ``figwig fw2bw`` writes a figwig file's tracks back as bigWigs,
 with that table; ``figwig bam2fw`` counts reads or fragments as ``figwig
 bam2bw`` does, one pair of tracks per input file; ``figwig reorder``
-writes a figwig file in the other order; and ``figwig merge`` writes the
+writes a figwig file in the other order; ``figwig merge`` writes the
 tracks of several files into one, copying their chunks, as ``figwig bw2fw
---append`` adds bigWigs to a file. A bigWig's values read from the
+--append`` adds bigWigs to a file; and ``figwig info`` prints what a file
+holds. A bigWig's values read from the
 figwig file as ``read_bigwig`` gives them with ``missing=0.0`` and
 ``keep_nan=True``: a base no interval covers is 0, and an interval whose
 value is NaN is NaN; ``bw2fw --missing nan`` keeps the uncovered bases

@@ -9,8 +9,9 @@ file (see `figwig.bam2fw`), `figwig bw2fw` and `figwig fw2bw` convert
 between bigWigs and figwig files (see `figwig.bw2fw` and `figwig.fw2bw`),
 `figwig reorder` writes a figwig file in the other order (see
 `figwig.reorder`), `figwig merge` writes the tracks of several figwig files
-into one (see `figwig.merge`), and `figwig install-skill` installs figwig's
-Claude Code skill (see `figwig.install_skill`).
+into one (see `figwig.merge`), `figwig info` prints what a figwig file holds
+(see `figwig.info`), and `figwig install-skill` installs figwig's Claude
+Code skill (see `figwig.install_skill`).
 """
 
 import sys
@@ -40,6 +41,9 @@ def _parser():
 		"position order or in track order; see figwig reorder -h.")
 	commands.add_parser('merge', help="Write the tracks of several figwig "
 		"files into one, copying their chunks; see figwig merge -h.")
+	commands.add_parser('info', help="Print what a figwig file holds: its "
+		"genome, order, tile, chromosomes, size and a table of its tracks; see "
+		"figwig info -h.")
 
 	install = commands.add_parser('install-skill', help="Install figwig's "
 		"Claude Code skill into a skills directory.", description="Copy "
@@ -85,6 +89,10 @@ def main(argv=None):
 	if len(argv) > 0 and argv[0] == 'merge':
 		from . import merge
 		merge.main(argv[1:], prog='figwig merge')
+		return
+	if len(argv) > 0 and argv[0] == 'info':
+		from . import info
+		info.main(argv[1:], prog='figwig info')
 		return
 
 	args = _parser().parse_args(argv)

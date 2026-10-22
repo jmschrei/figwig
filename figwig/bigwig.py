@@ -537,7 +537,8 @@ class _Windows:
 
 		starts = numpy.asarray(starts)
 		if starts.ndim != 1:
-			raise ValueError("starts must be one-dimensional.")
+			raise ValueError("starts must be one-dimensional: give one per window, "
+				"as a list or array.")
 		if starts.dtype.kind not in 'iu' and len(starts) > 0:
 			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
 

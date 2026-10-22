@@ -43,8 +43,10 @@ def _read_table(path):
 		if len(row) != len(header):
 			raise ValueError("{}, line {}: expected {} columns, found {}.".format(
 				path, i + 2, len(header), len(row)))
-		records.append({column: value.strip() for column, value in zip(header,
-			row)})
+		# An empty cell is no attribute, except in the first column, which
+		# names the file or the track.
+		records.append({column: value.strip() for k, (column, value) in
+			enumerate(zip(header, row)) if k == 0 or value.strip() != ''})
 
 	return header, records
 

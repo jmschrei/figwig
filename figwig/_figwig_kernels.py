@@ -1573,12 +1573,15 @@ def _bin_into(dst, src, src0, s0, s1, bins):
 
 @numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
-	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins):
+	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins,
+	pair_stops):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
 	pair_bases[q] of its chromosome, the window at pair_starts[q] and is
-	out.shape[2] * bins bases wide, and the window's values go to row
+	out.shape[2] * bins bases wide, or ends at pair_stops[q] when
+	`pair_stops` is not empty (intervals of any length summed into one bin
+	each), and the window's values go to row
 	pair_rows[q] of `out`, of shape (windows, channels, width). The tile's
 	chunk is chunk pair_chunks[q] of the batch, whose bytes start at
 	positions[chunk] of `data` and whose kind byte is kinds[chunk], or -1
@@ -1650,7 +1653,8 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			start = pair_starts[r]
 			row = pair_rows[r]
 			a = max(start, base)
-			b = min(start + width, base + tile)
+			stop = start + width if pair_stops.shape[0] == 0 else pair_stops[r]
+			b = min(stop, base + tile)
 			if b <= a:
 				continue
 			if not via_scratch:
@@ -1784,13 +1788,14 @@ def _block_into(code, view, data, v0, n, start, end, row, slot, dst, adding,
 @numba.njit(nogil=True, cache=True)
 def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 	pair_starts, pair_rows, width, out, accumulate, list_entries, fill,
-	out_rows, out_channels, out_offsets, out_values, scratch, bins):
+	out_rows, out_channels, out_offsets, out_values, scratch, bins, pair_stops):
 	"""Windows out of a batch of track-order blocks.
 
 	Pair q is a window and one block of one track that may hold its bases:
 	block pair_blocks[q] of the batch, whose bytes start at
 	positions[block] of `data` with n_entries[block] entries, for the window
-	at pair_starts[q] of `width` bases, going to row pair_rows[q] and channel
+	at pair_starts[q] of `width` bases, or ending at pair_stops[q] when
+	`pair_stops` is not empty, going to row pair_rows[q] and channel
 	pair_slots[q] of `out`. The block's positions ascend, so the window's
 	entries are found by binary search. Without `list_entries` the values
 	are set into `out`, or added with `accumulate`; with it they are counted
@@ -1807,7 +1812,7 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 		code = _code_in(kinds[block])
 		position = positions[block]
 		start = pair_starts[q]
-		end = start + width
+		end = start + width if pair_stops.shape[0] == 0 else pair_stops[q]
 		row, slot = pair_rows[q], pair_slots[q]
 		view = data[position:position + 4 * n].view(numpy.uint32)
 		v0 = _pad8(position + 4 * n)

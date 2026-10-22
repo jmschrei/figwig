@@ -91,4 +91,4 @@ def main(argv=None, prog='figwig reorder'):
 			groups=args.groups, level=args.level, n_jobs=args.parallel,
 			verbose=args.verbose)
 	except (ValueError, TypeError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

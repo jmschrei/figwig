@@ -48,6 +48,9 @@ def _parser(prog):
 		"bigWigs as tracks to the figwig file at the output, which must exist, "
 		"in place; its chromosomes, tile and level are kept, and -s, -t and -l "
 		"are refused.")
+	parser.add_argument('-f', '--force', action='store_true', help="Write "
+		"over a figwig file at the output; without it an existing output is "
+		"refused, as it may hold tracks that --append would keep.")
 	parser.add_argument('-m', '--metadata', default=None, help="A tab- or "
 		"comma-separated table with a header and one row per bigWig, matched "
 		"on its first column by the path given here or its base name. A "
@@ -197,14 +200,18 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 			ahead = (piece, future)
 		if ahead is not None:
 			_write_piece(writer, output, ahead, verbose)
+	if verbose:
+		print("{}: {} tracks, {:.1f} MB.".format(output, len(FigWigReader(output)
+			.tracks), os.path.getsize(output) / 1e6), file=sys.stderr)
 
 
 def _write_piece(writer, output, ahead, verbose):
 	(g, group, names, chrom, starts, width), future = ahead
 	writer.write(chrom, starts, future.result(), tracks=names)
-	if verbose and int(starts[-1]) + width >= writer.chrom_sizes[chrom]:
-		print("{}: group {} of {}, {}".format(output, g + 1, len(
-			writer._groups), chrom), file=sys.stderr)
+	if verbose and chrom == next(iter(writer.chrom_sizes)) and int(starts[0]) \
+			== 0:
+		print("{}: group {} of {}: {}".format(output, g + 1, len(
+			writer._groups), ', '.join(names)), file=sys.stderr)
 
 
 def main(argv=None, prog='figwig bw2fw'):
@@ -227,10 +234,13 @@ def main(argv=None, prog='figwig bw2fw'):
 			chrom_sizes = _shared_chrom_sizes(readers, FigWigReader(args.output)
 				.chrom_sizes)
 		else:
+			if os.path.exists(args.output) and not args.force:
+				raise ValueError("{} exists; --append adds tracks to it, and -f "
+					"writes over it.".format(args.output))
 			chrom_sizes = _shared_chrom_sizes(readers, args.sizes)
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
 			append=args.append)
 	except (ValueError, TypeError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

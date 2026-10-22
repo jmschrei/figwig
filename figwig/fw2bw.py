@@ -47,6 +47,9 @@ def _parser(prog):
 	parser.add_argument('--missing', default=0.0, type=float, help="The value "
 		"left out of the bigWigs: 0, or nan for a figwig file written with "
 		"bw2fw --missing nan, whose zeros are then written. Default is 0.")
+	parser.add_argument('-f', '--force', action='store_true', help="Write "
+		"over bigWigs that exist in the output directory; without it an "
+		"existing one is refused.")
 	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
 		"number of threads to read and compress on. Default is 1.")
 	parser.add_argument('-v', '--verbose', action='store_true')
@@ -92,13 +95,18 @@ def _bigwig_name(track):
 
 
 def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
-	missing=0.0):
+	missing=0.0, force=True):
 	"""Write the tracks `ids` of the figwig file `path` as bigWigs in
 	`directory`, and the metadata table. Returns the table's path."""
 
 	reader = FigWigReader(path)
 	os.makedirs(directory, exist_ok=True)
 	chrom_sizes = list(reader.chrom_sizes.items())
+	if not force:
+		for i in ids.tolist():
+			name = os.path.join(directory, _bigwig_name(reader.tracks[i]))
+			if os.path.exists(name):
+				raise ValueError("{} exists; -f writes over it.".format(name))
 
 	by_group = {}
 	for i in ids.tolist():
@@ -131,8 +139,9 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 						list(pool.map(lambda k: writers[members[k]].write(chrom,
 							starts, values[:, k], missing=missing), range(len(
 							members))))
-				if verbose:
-					print("{}: group {}, {}".format(path, g, chrom), file=sys.stderr)
+				if verbose and chrom == chrom_sizes[0][0]:
+					print("{}: group {}: {}".format(path, g, ', '.join(paths[i] for i
+						in members)), file=sys.stderr)
 
 			for writer in writers.values():
 				writer.close()
@@ -184,6 +193,7 @@ def main(argv=None, prog='figwig fw2bw'):
 		reader = FigWigReader(args.figwig)
 		ids = _selected_tracks(reader, args.tracks, args.select)
 		_convert(args.figwig, args.output, ids, zooms=args.zooms, level=args.level,
-			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing)
+			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
+			force=args.force)
 	except (ValueError, TypeError) as e:
-		raise SystemExit("{}: {}".format(prog, e))
+		raise SystemExit("{}: {}".format(prog, str(e).replace('n_jobs', '-p')))

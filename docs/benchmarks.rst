@@ -304,6 +304,45 @@ tracks takes 1.1 to 1.7 bytes per nonzero base as sparse chunks of uint8
 sparse by the compressed rather than the raw size would have saved nothing
 on 20,000 sampled tiles of each of three of them.
 
+Sums over intervals of any length
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The 172,732 IDR peaks of the set, which differ in length, summed over
+the six tracks, on tmpfs, median of three at load about 60:
+
+=========================================================  ========  ========
+method                                                     seconds   peak RSS
+=========================================================  ========  ========
+``FigWigReader.sums``, 8 threads                           0.25 s    345 MB
+``read(bins=width)`` once per distinct width, 8 threads    2.70 s    233 MB
+pyBigWig ``stats(type="sum", exact=True)``, one process    46 s      201 MB
+=========================================================  ========  ========
+
+Dense float tracks and the layout
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The defaults, a tile of 16,384 and groups of 8, suit count tracks, whose
+chunks are mostly zero. Nine chr22 annotation tracks (phyloP, phastCons,
+GC content and mappability, 742 MB as bigWigs) were converted at the
+defaults and at ``-t 1024 --groups 1 -l 1``, and read as 10,000 random 1
+kb windows over every track on one thread, at load about 53:
+
+==================================  ========  ========  =========
+layout                              file      1 thread  8 threads
+==================================  ========  ========  =========
+tile 16,384, groups of 8, level 6   190 MB    9.6 s     2.3 s
+tile 1,024, groups of 1, level 1    290 MB    1.33 s    0.39 s
+nine bigWigs, ``read_bigwig``       742 MB    1.5 s     0.5 s
+==================================  ========  ========  =========
+
+A 1 kb window from a 16,384-base tile decodes 16 kb of float32 per
+track, and every track of its group with it; a dense GC track grouped
+with two phyloP tracks made a read of one of those 12 times slower (0.69
+s against 0.057 s for 20,000 windows) than with ``--groups 1``, for a
+file 3% smaller. The same tracks read in 100 bp bins over the whole of
+chr22 took 0.09 s from the small-tile file against 9.8 s for pyBigWig's
+``stats``.
+
 Many tracks, sparse reads and the two orders
 --------------------------------------------
 

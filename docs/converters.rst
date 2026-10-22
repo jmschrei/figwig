@@ -1,10 +1,13 @@
-figwig bw2fw, fw2bw, bam2fw, reorder and merge
-==============================================
+figwig bw2fw, fw2bw, bam2fw, reorder, merge and info
+====================================================
 
 Five commands move tracks between bigWigs, reads and :doc:`figwig files
-<figwig>`, between a figwig file's two orders, and between figwig files.
-Each but ``merge`` takes ``-p``, the number of threads to read and
-compress on, and all take ``-v`` for progress.
+<figwig>`, between a figwig file's two orders, and between figwig files,
+and ``figwig info`` prints what a file holds. Each converter but ``merge``
+takes ``-p``, the number of threads to read and compress on, and all take
+``-v``, which prints a line per group of tracks and a summary of the
+output; ``bw2fw`` and ``fw2bw`` refuse to write over an output that
+exists unless ``-f`` is given.
 
 figwig bw2fw
 ------------
@@ -34,10 +37,15 @@ a dense float track. Each piece of a chromosome is read on one thread of
 its own while the piece before it is encoded and compressed on ``-p``
 threads, and the arrays read are handed to the writer without a copy. The
 output is written beside its path and moved there when it is complete, so
-a failed conversion leaves what the path held. ``--append`` adds the
+a failed conversion leaves what the path held, and an output that exists
+is refused unless ``-f`` says to write over it. ``--append`` adds the
 bigWigs as tracks to the figwig file at the output, in place, in new
 groups after its tracks; its chromosomes, tile and level are kept, and
-``-s``, ``-t`` and ``-l`` are refused with it.
+``-s``, ``-t`` and ``-l`` are refused with it; a chromosome of a bigWig
+that the file does not have is left out with a warning. The defaults
+suit count tracks; for dense float tracks read in short windows, such as
+conservation or fold-change signal, ``-t 1024 --groups 1`` reads seven
+times faster for a file half again as large (:doc:`benchmarks`).
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -60,8 +68,11 @@ compartment track are, is NaN, which makes the track float32. ``--missing
 nan`` writes the bases no interval covers as NaN instead, for tracks whose
 zeros mean something other than their gaps, such as the 0% sites of a
 methylation track against its unsequenced sites, or the unaligned bases of
-a conservation track; the track is then float32 and dense, so it is larger.
-A value is equal as a number: -0.0 reads as 0.
+a conservation track; the track is then float32, which costs a compressed
+file little (0.4% on nine chr22 annotation tracks, nothing measurable on
+a genome-wide fold-change track) and doubles an uncompressed one. A value
+is equal as a number: -0.0 reads as 0. An empty cell of the table is no
+attribute.
 
 figwig fw2bw
 ------------
@@ -79,8 +90,10 @@ named after the figwig file, ``k562.tsv`` here, whose columns are ``file``,
 reads that table, so the two commands round-trip a file's tracks, names and
 attributes. ``-t`` names the tracks to write and ``--select`` takes
 ``KEY=VALUE`` pairs that their attributes must have. ``-z`` writes zoom
-levels into the bigWigs, for a genome browser, and ``-l`` sets their
-compression level. A track's bases that are 0, and a float track's NaN,
+levels into the bigWigs, for a genome browser, each level adding to the
+file, and ``-l`` sets their compression level; a bigWig that exists in
+the directory is refused unless ``-f`` is given. A track's bases that
+are 0, and a float track's NaN,
 are left out of its bigWig, as ``BigWigWriter.write`` leaves them out with
 ``missing=0.0``, so reading the bigWig with ``read_bigwig`` gives the same
 numbers as reading the track, with NaN as 0; ``--missing nan`` leaves the
@@ -138,7 +151,9 @@ across many tracks. In position order ``-t`` sets the tile size and
 input's when it is in position order and to 16,384 and 8 otherwise; ``-l``
 sets the compression level, which defaults to the input's when the output
 is in the input's order, and otherwise to 6 in position order and 0 in
-track order. The output may be the input's own path: the input is read
+track order, so a file reordered to track order is uncompressed, and
+about four times larger, unless ``-l`` says otherwise. The output may be
+the input's own path: the input is read
 whole before the output takes its place. The values are read in the
 narrowest type that holds every track exactly, so a uint32 track beside a
 float track keeps its integers.
@@ -156,6 +171,23 @@ attributes, dtypes, statistics and summaries. The files must have been
 written with the same chromosomes, tile, compression level and order, and
 their track names must differ; ``figwig reorder`` writes a file again with
 another tile, level or order first. The chunks are copied as they are, so
-a merge costs a read and a write of the bytes and no decoding. The output
-may be one of the inputs. ``-g`` records a reference genome; the first
-file's is kept otherwise.
+a merge costs a read and a write of the bytes and no decoding, and
+leaves out the tables and indexes a file appended to in place left
+behind. The output may be one of the inputs. ``-g`` records a reference
+genome; the first file's is kept otherwise.
+
+figwig info
+-----------
+
+.. code-block:: bash
+
+    figwig info k562.fw
+    figwig info -b k562.fw
+
+``figwig info`` prints a file's path, genome, order, tile, compression
+level, chromosomes, groups, tracks, size in bytes and attributes, one per
+line, then a tab-separated table of its tracks with their name, dtype,
+group, nonzero bases, sum and every attribute. ``-b`` also counts the
+bytes its chunks take, its tables and index take, and the bytes nothing
+uses, which an append in place leaves behind and ``merge`` drops; it reads
+every group's index, a few milliseconds per group.
