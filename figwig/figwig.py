@@ -2494,6 +2494,7 @@ class FigWigReader:
 		state['_summary_at'] = [None] * len(self._index)
 		state['_runs'] = [None] * len(self._index)
 		state['_pool'] = None
+		state.pop('_pinned', None)
 		return state
 
 	def __setstate__(self, state):
@@ -2854,8 +2855,8 @@ class FigWigReader:
 		numpy.ndarray, width: int, tracks: str | int | list | None = None,
 		out: numpy.ndarray | None = None, dtype=None, n_jobs: int = 8,
 		sparse: bool = False, labels: list | numpy.ndarray | None = None,
-		bins: int | None = None, nan: str = 'propagate') -> numpy.ndarray | \
-		SparseWindows:
+		bins: int | None = None, nan: str = 'propagate', device: str | int |
+		None = None) -> numpy.ndarray | SparseWindows:
 		"""Read the per-base values of many windows of one width.
 
 		Window j is [starts[j], starts[j] + width) on chroms[j], and its
@@ -2931,21 +2932,35 @@ class FigWigReader:
 			each bin the number of its bases that are not NaN. Default is
 			'propagate'.
 
+		device: str, int or None, optional
+			'cuda', 'cuda:N' or a device index to land the output in that
+			GPU's memory as a `cupy.ndarray`, which PyTorch, JAX, TensorFlow
+			and CuPy take without a copy through DLPack
+			(`torch.from_dlpack(y)`); needs the `cuda` extra. Sparse tracks
+			are scattered on the device from their entries, dense ones are
+			decoded into a pinned buffer and copied, and the device's stream
+			is synchronized before the array is returned. `out` must then
+			be a cupy array. Default is None, a numpy array in host memory.
+
 		Returns
 		-------
-		out: numpy.ndarray or SparseWindows
+		out: numpy.ndarray, cupy.ndarray or SparseWindows
 			The value of every base of every window in every track, dense;
 			or the nonzero bases as entries with `sparse`; or the sums per
 			label with `labels`, or per bin with `bins`.
 		"""
 
+		if device is not None:
+			from ._cuda import read_on_device
+			return read_on_device(self, device, chroms, starts, width, tracks, out,
+				dtype, n_jobs, sparse, labels, bins, None, nan)
 		return self._read(chroms, starts, width, tracks, out, dtype, n_jobs,
 			sparse, labels, bins, None, nan)
 
 	def sums(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, ends: list[int] | numpy.ndarray, tracks: str | int | list
 		| None = None, dtype=None, n_jobs: int = 8, nan: str = 'propagate',
-		paired: bool = False) -> numpy.ndarray:
+		paired: bool = False, device: str | int | None = None) -> numpy.ndarray:
 		"""The sum of each track over intervals of any lengths.
 
 		Each interval is `chroms[i]`, from `starts[i]` to `ends[i]`, and
@@ -2989,6 +3004,11 @@ class FigWigReader:
 			that is its track, in reads of a few tracks of one group at a
 			time; the result is then (n,). Default is False.
 
+		device: str, int or None, optional
+			'cuda', 'cuda:N' or a device index to land the sums in that
+			GPU's memory as a `cupy.ndarray`, as `read` does. Default is
+			None.
+
 		Returns
 		-------
 		sums: numpy.ndarray, shape=(n, tracks) or (n,)
@@ -3004,9 +3024,18 @@ class FigWigReader:
 		if (ends < starts).any():
 			raise ValueError("an interval's end is before its start.")
 		if paired:
-			return self._paired_sums(chroms, starts, ends, tracks, dtype, n_jobs,
+			sums = self._paired_sums(chroms, starts, ends, tracks, dtype, n_jobs,
 				nan)
+			if device is not None:
+				from ._cuda import _cupy
+				return _cupy().asarray(sums)
+			return sums
 		width = int((ends - starts).max()) if len(starts) else 1
+		if device is not None:
+			from ._cuda import read_on_device
+			return read_on_device(self, device, chroms, starts, max(width, 1),
+				tracks, None, dtype, n_jobs, False, None, max(width, 1), ends,
+				nan)[..., 0]
 		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
 			n_jobs, False, None, max(width, 1), ends, nan)
 		return out[..., 0]
@@ -4027,7 +4056,7 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	tracks: str | int | list | None = None, out: numpy.ndarray | None = None,
 	dtype=None, n_jobs: int = 8, sparse: bool = False, labels: list |
 	numpy.ndarray | None = None, bins: int | None = None, nan: str =
-	'propagate') -> numpy.ndarray | \
+	'propagate', device: str | int | None = None) -> numpy.ndarray | \
 	SparseWindows:
 	"""Read the per-base values of many windows of one width from a figwig
 	file.
@@ -4083,10 +4112,13 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 		What a NaN base does to a binned sum; see `FigWigReader.read`.
 		Default is 'propagate'.
 
+	device: str, int or None, optional
+		A GPU to land the output on, as a cupy array; see
+		`FigWigReader.read`. Default is None.
 
 	Returns
 	-------
-	out: numpy.ndarray or SparseWindows
+	out: numpy.ndarray, cupy.ndarray or SparseWindows
 		The value of every base of every window in every track, or the
 		entries, or the sums per label or bin.
 	"""
@@ -4098,7 +4130,7 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	reader = figwig if isinstance(figwig, FigWigReader) else FigWigReader(figwig)
 	return reader.read(chroms, starts, width, tracks=tracks, out=out,
 		dtype=dtype, n_jobs=n_jobs, sparse=sparse, labels=labels, bins=bins,
-		nan=nan)
+		nan=nan, device=device)
 
 
 def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,

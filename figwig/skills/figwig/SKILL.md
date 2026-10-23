@@ -82,6 +82,7 @@ later.
 | single-cell cut sites or any thousands of sparse tracks: `write_sparse`, `sparse=True`, `labels=` pseudobulks, `order='tracks'` vs `'positions'`, `figwig reorder` | `references/figwig-files.md` |
 | adding tracks to a figwig file (`append=True`, `add_file`, `figwig merge`, `bw2fw --append`), tile sums in place of zoom levels (`tile_sums`), checking a file (`verify=True`) | `references/figwig-files.md` |
 | converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
+| reading a figwig file straight onto a GPU, for PyTorch, JAX or TensorFlow (`device="cuda"`, DLPack, pinned `out=`) | `references/figwig-files.md` |
 
 ## Symptom → reference
 

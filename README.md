@@ -154,10 +154,15 @@ Optional extras:
 - `figwig[bam2bw]` adds pysam, pyfaidx, biopython, tqdm, isal and deflate,
   which `figwig bam2bw` needs. `figwig bam2bw` runs on Linux and macOS, since
   pysam does not support Windows.
+- `figwig[cuda]` adds cupy (for CUDA 12; install `cupy-cuda13x` or
+  `cupy-cuda11x` otherwise), with which `FigWigReader.read(..., device="cuda")`
+  lands windows in GPU memory, for `torch.from_dlpack` and its JAX and
+  TensorFlow equivalents.
 
 ```bash
 pip install "figwig[fast]"
 pip install "figwig[bam2bw]"
+pip install "figwig[cuda]"
 ```
 
 ### Development install
@@ -316,7 +321,9 @@ tracks' own dtype, or as a sparse list of nonzero bases with `sparse=True`,
 summed per label with `labels=`, or summed per bin of each window with
 `bins=`, and `sums` gives each track's total over intervals of any
 lengths, such as peaks or genes, or over thousands of cells at once, with
-`nan=` for means over the bases a track covers. It is written in position order, tiles
+`nan=` for means over the bases a track covers; `device="cuda"` lands any
+of these in GPU memory, where `torch.from_dlpack` takes them without a
+copy. It is written in position order, tiles
 across tracks, for reading
 windows across many tracks, or in track order for reading a few tracks over
 the genome, and `write_sparse` takes nonzero bases as entries, such as the

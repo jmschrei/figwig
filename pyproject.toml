@@ -41,6 +41,9 @@ dependencies = [
 fast = [
     "deflate>=0.9",
 ]
+cuda = [
+    "cupy-cuda12x>=13",
+]
 bam2bw = [
     "pysam>=0.22",
     "pyfaidx>=0.8",

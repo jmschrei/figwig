@@ -107,8 +107,31 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
   attributes from a metadata table are strings, so `select(units=1)` matches
   nothing where `select(units="1")` would, and a key no track has raises.
 - `out=` may be a numpy view of a pinned torch tensor of the output's shape
-  and dtype; cast to float on the GPU, where a uint16 batch is half the bytes
-  of float32. Integer outputs wrap in numpy and torch arithmetic the way any
+  and dtype, then `.to("cuda", non_blocking=True)`: the dense output is the
+  large object (8,192 x 48 x 2,048 float32 is 3.2 GB, more than the read
+  takes to decode), a pinned buffer moves at the bus's rate and overlaps
+  the next read, and a uint16 batch is half the bytes of float32; cast to
+  float on the GPU.
+- `device="cuda"` (or `"cuda:1"`, or an index) does the GPU step inside the
+  read and returns a `cupy.ndarray`; needs `pip install "figwig[cuda]"`
+  (cupy for CUDA 12; `cupy-cuda13x` / `cupy-cuda11x` otherwise). Hand it to
+  a framework through DLPack, no copy:
+
+  ```python
+  y = fw.read(chroms, starts, 2048, dtype="float32", device="cuda")
+  t = torch.from_dlpack(y)                               # PyTorch
+  a = jax.dlpack.from_dlpack(y)                          # JAX
+  x = tf.experimental.dlpack.from_dlpack(y.__dlpack__())  # TensorFlow
+  ```
+
+  The array is complete when the call returns (the stream is synchronized),
+  so no extra synchronization is needed; sparse tracks are scattered on the
+  device from their entries and dense ones copied from a pinned buffer kept
+  on the reader; `sums(..., device=)`, `labels=`, `bins=` and `sparse=True`
+  work the same way; `out=` must then be a cupy array of the output's shape
+  and dtype. Check once that `cupy.asnumpy(y)` equals the CPU read of the
+  same windows. Do not reuse `out=` while a tensor made from it is still in
+  use. Integer outputs wrap in numpy and torch arithmetic the way any
   uint8 does, and torch's uint16 lacks `add`, `mean` and `mse_loss`, so a
   training path passes `dtype="float32"` (10-20% slower than the native
   type) or casts at once; a torch dtype is accepted as `dtype=`. Which

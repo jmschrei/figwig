@@ -96,6 +96,48 @@ rather than allocating one, such as a numpy view of a pinned torch tensor:
     fw.read(chroms, starts, width=2114, out=buffer.numpy(), dtype="int32")
     y = buffer.to("cuda", non_blocking=True).float()
 
+The output, not the file, is the large object on the way to a GPU: 8,192
+windows of 2,048 bases over 48 tracks are 3.2 GB as float32, which a copy
+from ordinary memory moves at 5 to 10 GB/s while the read itself takes
+under 0.1 s on 8 threads. A read into pinned memory skips the copy into
+a staging buffer, the transfer then runs at the bus's rate (20 to 25 GB/s
+on PCIe 4 or 5) and overlaps with the next read, and reading as ``uint8``
+or ``uint16`` where the tracks allow it moves a quarter or half the
+bytes, cast to float on the device. A ``DataLoader`` with
+``pin_memory=True`` makes one more copy from the worker's array; passing
+the pinned buffer as ``out`` is the shorter path.
+
+Reading onto a GPU
+^^^^^^^^^^^^^^^^^^
+
+``device="cuda"`` (or ``"cuda:1"``, or a device index) lands a read's
+output in that GPU's memory, as a ``cupy.ndarray``, and needs the
+``cuda`` extra (``pip install "figwig[cuda]"``, which is ``cupy-cuda12x``;
+install ``cupy-cuda13x`` or ``cupy-cuda11x`` for CUDA 13 or 11). Every
+framework takes the array without a copy through DLPack:
+
+.. code-block:: python
+
+    y = fw.read(chroms, starts, 2048, dtype="float32", device="cuda")
+    torch.from_dlpack(y)                                 # PyTorch
+    jax.dlpack.from_dlpack(y)                            # JAX
+    tf.experimental.dlpack.from_dlpack(y.__dlpack__())   # TensorFlow
+    y                                                    # CuPy, as it is
+
+The read itself runs on the CPU. Tracks whose nonzero bases are few by
+the file's statistics (under about 2 percent for float32, half a percent
+for uint8) are listed as entries, moved and scattered into a zeroed
+device array, so the bus carries the entries rather than the dense
+windows; denser tracks are decoded into a pinned host buffer, kept on
+the reader for the next read of the same shape, and copied. Sums per
+label, per bin and over intervals go through the pinned buffer, and
+``sparse=True`` moves the entries themselves. The device's stream is
+synchronized before the array is returned, so it is complete whatever
+stream the framework then uses; ``out`` may be a cupy array of the
+output's shape and dtype. ``read_figwig`` and ``sums`` take ``device``
+too. A reader with pinned buffers pickles without them, so it can go to
+``DataLoader`` workers as before.
+
 A ``FigWigReader`` reads the file's tables and metadata when it is opened,
 and each group's index on the first read that touches it, after which the
 index is kept, 17 bytes per tile of the genome per group. A read uses one
