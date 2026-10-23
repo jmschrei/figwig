@@ -239,9 +239,10 @@ mean over covered bases is one over the other:
 
 ``read`` takes ``nan`` with ``bins`` the same way. ``sums(..., paired=True)``
 takes one track per interval and sums interval ``i`` over track ``i``
-alone, in one read per distinct track, for a reads dimension where each
-read's span is its own track; without it, a sum of every track over every
-interval is quadratic in the reads. An analysis of count
+alone, in reads of a few tracks of one group at a time, for a reads
+dimension where each read's span is its own track; without it, a sum of
+every track over every interval is quadratic in the reads. It costs about
+0.03 ms per interval on 90,543 Fiber-seq reads. An analysis of count
 tracks ported from those tools gives other means for regions with
 uncovered bases unless the file was written so. ``sums`` takes any number
 of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
@@ -494,10 +495,19 @@ dimension: a record per read and channel, ``{"name": "r17.m6a", "read":
 ``select(read="r17")`` picks a slice, which ``read`` returns as (windows,
 tracks, width) to be reshaped by the caller to (windows, reads, channels,
 width) when the tracks are listed read-major. Group the tracks by channel
-over all the reads, not by read: a window over all reads decodes one
-chunk per channel that way, and twenty to fifty times more chunks the
-other way. Position order beats track order for this, and ``sums(...,
-paired=True)`` gives each read's total over its own span. A read may also
+over runs of consecutive reads, not by read: the reads sorted by start
+and cut into groups of about a thousand, so that each group's chunks
+cover one stretch of the genome and a window decodes the few chunks of
+the groups whose reads overlap it; a chunk may hold at most 2**29 values
+(tracks times tile), which rules out one group of every read, and a group
+per read costs a planning step per group on every read. On the m6A calls
+of 90,543 Fiber-seq reads in groups of 1,024 (position order, tile
+16,384, 62 MB), summing every read over 8,192 windows of 2,048 bases took
+0.42 s and listing the calls in 1,024 windows 0.16 s, against 3.3 s and
+3.6 s from a scipy CSR matrix per chromosome held in memory, and 15.7 s
+and 7.2 s from the same file in track order. ``sums(..., paired=True)``
+gives each read's total over its own span, 2.6 s for the 90,543 reads
+against 5.6 s from the matrix. A read may also
 be its own "chromosome", of its length, with one track per channel, which
 gives (reads, channels, length) in one call, with the genome coordinates
 kept in the file's attributes. A built-in channels dimension, returning

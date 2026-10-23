@@ -127,6 +127,7 @@ _SCRATCH_BYTES = 1 << 28
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
+_PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 
 # Whether a tile whose few tracks have values may be stored as a matrix
 # chunk, which a compressed file chooses only when the sparse chunk's
@@ -2985,7 +2986,8 @@ class FigWigReader:
 		paired: bool, optional
 			Whether `tracks` names one track per interval, interval i being
 			summed over track tracks[i] alone, as a read's span over the read
-			that is its track; the result is then (n,). Default is False.
+			that is its track, in reads of a few tracks of one group at a
+			time; the result is then (n,). Default is False.
 
 		Returns
 		-------
@@ -3010,9 +3012,13 @@ class FigWigReader:
 		return out[..., 0]
 
 	def _paired_sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan):
-		"""`sums` with a track per interval: one summed read per distinct
-		track over its intervals, which is linear where a sum of every
-		track over every interval is quadratic."""
+		"""`sums` with a track per interval: the intervals are sorted by
+		track, cut into batches of at most `_PAIRED_TRACKS` distinct tracks
+		of one group, each batch is summed over its own tracks in one read,
+		and each interval keeps its own track's sum. A read over k tracks
+		costs about k times per interval what a read over one does, so the
+		batches are small; they still save most of the per-read overhead of
+		a read per track."""
 
 		if tracks is None:
 			raise ValueError("paired=True needs one track per interval in tracks.")
@@ -3024,13 +3030,24 @@ class FigWigReader:
 		names, codes = _chrom_codes(chroms, len(starts))
 		chroms = numpy.array(names)[codes]
 		out = None
-		for i in numpy.unique(ids).tolist():
-			mine = numpy.flatnonzero(ids == i)
-			found = self.sums(chroms[mine], starts[mine], ends[mine], tracks=i,
-				dtype=dtype, n_jobs=n_jobs, nan=nan)
+		order = numpy.lexsort((ids, self._group_of[ids]))
+		sorted_ids = ids[order]
+		# A batch starts at every _PAIRED_TRACKS-th distinct track, and at
+		# a change of group.
+		first = numpy.flatnonzero(numpy.diff(sorted_ids)) + 1
+		cuts = set(first[_PAIRED_TRACKS - 1::_PAIRED_TRACKS].tolist())
+		cuts.update((numpy.flatnonzero(numpy.diff(self._group_of[sorted_ids]))
+			+ 1).tolist())
+		for batch in numpy.split(order, sorted(cuts)):
+			if len(batch) == 0:
+				continue
+			mine = numpy.unique(ids[batch])
+			found = self.sums(chroms[batch], starts[batch], ends[batch],
+				tracks=mine.tolist(), dtype=dtype, n_jobs=n_jobs, nan=nan)
 			if out is None:
 				out = numpy.zeros(len(starts), dtype=found.dtype)
-			out[mine] = found
+			out[batch] = found[numpy.arange(len(batch)), numpy.searchsorted(mine,
+				ids[batch])]
 		return out if out is not None else numpy.zeros(0, dtype=self._dtype(ids,
 			dtype, True))
 

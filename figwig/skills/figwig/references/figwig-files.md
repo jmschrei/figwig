@@ -143,8 +143,12 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
   one kind: a count track grouped with a float track is stored as float
   values and decoded with it. For a *reads* dimension (Fiber-seq reads or
   cells as tracks, read all at once over a window), the rule is the other
-  way: one group per channel over all the reads is 20-50x faster than a
-  group per read, and position order beats track order. Reads as their own
+  way: cells go in one group of all cells; reads, sorted by start, go in
+  groups of about 1,000 consecutive reads per channel (a chunk holds at
+  most 2**29 values, tracks x tile, so one group of every read is refused,
+  and a group per read is 10-500x slower); position order beats track
+  order (90,543 Fiber-seq reads: 0.42 s to sum them over 8,192 windows
+  against 15.7 s in track order). Reads as their own
   "chromosomes" (each read a chromosome of its length, with 2 tracks) also
   works for per-read access, with genome coordinates in the attributes. The
   defaults (tile 16,384, groups of 8) suit

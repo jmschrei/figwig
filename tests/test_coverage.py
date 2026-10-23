@@ -1534,7 +1534,7 @@ def test_integers_beyond_2_53_are_refused(tmp_path):
 
 
 @pytest.mark.parametrize('order', ['positions', 'tracks'])
-def test_paired_sums(tmp_path, order):
+def test_paired_sums(tmp_path, order, monkeypatch):
 	"""sums(paired=True) sums interval i over track tracks[i] alone."""
 
 	path = str(tmp_path / 'p.fw')
@@ -1543,7 +1543,8 @@ def test_paired_sums(tmp_path, order):
 	values[0, 1, 100:900] = 0
 	tracks = ['r0', 'r1', 'r2']
 	write_figwig(path, {'chr1': 1000}, tracks, 'chr1', [0], values, tile=64,
-		order=order, groups=[tracks] if order == 'positions' else 1)
+		order=order, groups=[tracks[:2], tracks[2:]] if order == 'positions'
+		else 1)
 	reader = FigWigReader(path)
 	starts = rng.integers(0, 900, 40)
 	ends = starts + rng.integers(1, 100, 40)
@@ -1560,6 +1561,12 @@ def test_paired_sums(tmp_path, order):
 	got = reader.sums('chr1', starts, ends, tracks=which, paired=True,
 		dtype='int32')
 	assert got.dtype == numpy.int32 and got.tolist() == want.tolist()
+	# Batches of two tracks, and tracks spread over two groups when the
+	# file has them, give the same sums.
+	monkeypatch.setattr(figwig.figwig, '_PAIRED_TRACKS', 2)
+	numpy.testing.assert_array_equal(reader.sums('chr1', starts, ends,
+		tracks=which, paired=True), want)
+	monkeypatch.setattr(figwig.figwig, '_PAIRED_TRACKS', 16)
 	with pytest.raises(ValueError, match="one track per interval"):
 		reader.sums('chr1', starts, ends, paired=True)
 	with pytest.raises(ValueError, match="one track per interval"):
