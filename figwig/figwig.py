@@ -91,7 +91,7 @@ from .writer import _compress_blocks
 
 
 _FIGWIG_MAGIC = int.from_bytes(b'FIGW', 'little')
-_VERSION = 5
+_VERSION = 1
 _CODEC_NONE, _CODEC_ZLIB = 0, 1
 _FLAG_TRACKS = 1
 _ORDERS = {'positions': 'positions', 'csc': 'positions', 'tracks': 'tracks',
@@ -2314,10 +2314,8 @@ class FigWigReader:
 			if int(header['version']) != _VERSION:
 				raise ValueError(error + ": it is version {} of the format, and "
 					"this figwig reads version {}; {}".format(int(header[
-					'version']), _VERSION, "it was written by an earlier figwig, "
-					"before the format was released, and must be written again."
-					if int(header['version']) < _VERSION else "a newer figwig "
-					"wrote it."))
+					'version']), _VERSION, "a newer figwig wrote it." if int(header[
+					'version']) > _VERSION else "the file is corrupt."))
 
 			if int(header['required']) & ~_KNOWN_REQUIRED:
 				raise ValueError(error + ": it needs a feature this figwig does not "
@@ -2788,9 +2786,8 @@ class FigWigReader:
 			summary = self._tile_sums_of(g)
 			if summary is None:
 				raise ValueError("{} keeps no summary of the group of {!r}; it "
-					"was written with more tracks than the summaries hold, or by "
-					"an earlier figwig.".format(self.path, self.tracks[int(
-					self._groups[g][0])]['name']))
+					"was written with more tracks than the summaries hold.".format(
+					self.path, self.tracks[int(self._groups[g][0])]['name']))
 			tiles, sums = summary
 			channels = numpy.flatnonzero(self._group_of[ids] == g)
 			out[numpy.ix_(channels, tiles)] = sums[:, self._slot_of[ids[

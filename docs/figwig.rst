@@ -507,17 +507,15 @@ next step and would change no bytes of a file without channels.
 Versions
 --------
 
-The header names the format's version, 5, and a reader refuses a file of
-any other version with a message that says whether an earlier or a later
-figwig wrote it. The version changes when the layout changes in a way an
-older reader would misread; an addition an older reader could ignore is
+The header names the format's version, 1 in this first release, and a
+reader refuses a file of a later version with a message that says a newer
+figwig wrote it. The version changes only when the layout changes in a way
+an older reader would misread; an addition an older reader could ignore is
 marked instead in the header's ``optional`` bits, and one it must know in
 its ``required`` bits, which a reader refuses when it does not know them.
-Versions 1 to 4 were written only by development builds of this release,
-and ``figwig reorder`` cannot read them; they have to be converted again
-from their sources. Within a version, a file written by any figwig reads
-in any later figwig, and a rebuild from the same inputs with the same
-options is byte-identical, which is why the file carries no timestamp.
+Within a version, a file written by any figwig reads in any later figwig,
+and a rebuild from the same inputs with the same options is
+byte-identical, which is why the file carries no timestamp.
 
 An undeclared track that turns out to hold a fraction is float32, and its
 values are what float32 makes of them; a chunk written before the fraction

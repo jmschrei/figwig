@@ -321,13 +321,13 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `exists; --append adds tracks to it, and -f writes over it`, `exists; -f writes over it`, `exists; --force writes over it` | `bw2fw`, `fw2bw`, `reorder`, `merge` or `bam2fw` onto an existing output |
 | `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | `nan=` misspelt, or on a dense read |
 | `the table has one column; a table is tab-separated` | a space-separated metadata table |
-| `it is version 1 of the format`, `version 2`, `version 3` | a file written by a figwig before the format's release; write it again |
+| `it is version ... of the format, and this figwig reads version 1` | a file a newer figwig wrote; upgrade figwig |
 | `its tables do not match their checksum`, `The index of ... does not match its checksum` | a damaged table or index record; the file is corrupt |
-| `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB, or written by an earlier figwig |
+| `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB |
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
 | `was written with order|tile|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of files with different layouts or chromosome sets; `reorder` one first, or `bw2fw -s` the same sizes |
 | `does not match its checksum` | `verify=True` found a corrupt chunk |
-| `its header does not match its checksum` | a damaged header (version 5 keeps a CRC-32 of it); the file is corrupt |
+| `its header does not match its checksum` | a damaged header (the header keeps a CRC-32 of itself); the file is corrupt |
 | `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it; upgrade figwig |
 | `is being appended to by another writer` | two `append=True` writers on one file at once; wait for the first to close |
 | `an integer lies beyond 2**53, which a figwig file cannot hold exactly` | a 64-bit integer the file's float64 cannot keep; scale or clip first |

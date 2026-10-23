@@ -847,8 +847,8 @@ def corrupt_cases(fw):
 		return bytes(copy.tobytes()) + bytes(data[128:])
 
 	cases['bad_magic'] = with_header(magic=1)
-	cases['bad_version'] = with_header(version=1)
-	cases['newer_version'] = with_header(version=3)
+	cases['bad_version'] = with_header(version=0)
+	cases['newer_version'] = with_header(version=2)
 	cases['huge_metadata'] = with_header(metadata_length=2 ** 50)
 	cases['huge_tracks'] = with_header(n_tracks=2 ** 32 - 1)
 	cases['huge_groups'] = with_header(n_groups=2 ** 32 - 1)
@@ -2091,11 +2091,11 @@ def test_crafted_counts_raise_value_errors(tmp_path, fw):
 			FigWigReader(path).read('chr1', [0], 100)
 
 	copy = bytearray(data)
-	copy[4:6] = (1).to_bytes(2, 'little')
-	path = str(tmp_path / 'v1.fw')
+	copy[4:6] = (2).to_bytes(2, 'little')
+	path = str(tmp_path / 'v2.fw')
 	with open(path, 'wb') as handle:
 		handle.write(bytes(copy))
-	with pytest.raises(ValueError, match="earlier figwig"):
+	with pytest.raises(ValueError, match="version 2 of the format.*newer figwig"):
 		FigWigReader(path)
 
 
