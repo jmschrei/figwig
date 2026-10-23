@@ -37,8 +37,8 @@ def fw(tmp_path_factory):
 def route(request, monkeypatch):
 	"""Force each of the two dense routes."""
 
-	monkeypatch.setattr(figwig._cuda, '_SCATTER_BYTES_PER_ENTRY', 0 if
-		request.param == 'scatter' else 10 ** 9)
+	monkeypatch.setattr(figwig._cuda, '_SCATTER_DENSITY', 2.0 if request.param
+		== 'scatter' else 0.0)
 	return request.param
 
 

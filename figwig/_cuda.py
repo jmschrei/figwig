@@ -19,10 +19,12 @@ returned, so the array is complete for any framework's stream.
 
 import numpy
 
-# Below this density of nonzero bases, by the file's statistics, a dense
+# Below this fraction of nonzero bases, by the file's statistics, a dense
 # read is scattered from its entries on the device rather than copied
-# dense; an entry costs about 28 bytes against the dense bytes of a base.
-_SCATTER_BYTES_PER_ENTRY = 28
+# dense. Measured on an H200: at 0.002 percent (128 of 10,246 cells) the
+# entries route took 0.05 s against 0.25 s for the pinned copy; at 1.1
+# percent (ATAC and DNase counts) it took 0.18 s against 0.10 s.
+_SCATTER_DENSITY = 0.002
 
 
 def _cupy():
@@ -126,8 +128,7 @@ def read_on_device(reader, device, chroms, starts, width, tracks, out, dtype,
 			_check_out(cupy, out, shape, out_dtype)
 
 		dense = not summing and bins is None and stops is None
-		if dense and _density(reader, ids) * _SCATTER_BYTES_PER_ENTRY < \
-				numpy.dtype(out_dtype).itemsize / 2:
+		if dense and _density(reader, ids) < _SCATTER_DENSITY:
 			# Few nonzero bases: list them, move them and scatter.
 			entries = reader._read(chroms, starts, width, tracks, None, out_dtype,
 				n_jobs, True, None, None, None, nan)

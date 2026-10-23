@@ -124,12 +124,14 @@ framework takes the array without a copy through DLPack:
     tf.experimental.dlpack.from_dlpack(y.__dlpack__())   # TensorFlow
     y                                                    # CuPy, as it is
 
-The read itself runs on the CPU. Tracks whose nonzero bases are few by
-the file's statistics (under about 2 percent for float32, half a percent
-for uint8) are listed as entries, moved and scattered into a zeroed
-device array, so the bus carries the entries rather than the dense
-windows; denser tracks are decoded into a pinned host buffer, kept on
-the reader for the next read of the same shape, and copied. Sums per
+The read itself runs on the CPU. Tracks whose nonzero bases are under
+0.2 percent of the genome by the file's statistics, as single cells are,
+are listed as entries, moved and scattered into a zeroed device array,
+so the bus carries the entries rather than the dense windows (128 of
+10,246 cells over 8,192 windows: 0.05 s against 0.25 s through a pinned
+copy on an H200); denser tracks, such as bulk counts at 1 percent, are
+decoded into a pinned host buffer, kept on the reader for the next read
+of the same shape, and copied, which is the faster route for them. Sums per
 label, per bin and over intervals go through the pinned buffer, and
 ``sparse=True`` moves the entries themselves. The device's stream is
 synchronized before the array is returned, so it is complete whatever
