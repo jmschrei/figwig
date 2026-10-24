@@ -240,10 +240,10 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 512 tracks
      - 1,024 tracks
    * - figwig file, position order
-     - 1.8 / 1.1 / 1.5, 20 MB
-     - 14.7 / 8.0 / 7.9, 148 MB
-     - 172 / 82 / 82, 1.5 GB
-     - 342 / 167 / 169, 3.1 GB
+     - 2.0 / 0.57 / 0.52, 20 MB
+     - 15.0 / 3.9 / 4.2, 148 MB
+     - 170 / 39 / 45, 1.5 GB
+     - 356 / 82 / 79, 3.1 GB
    * - figwig file, track order
      - 3.3 / 2.6 / 3.1, 84 MB
      - 23 / 24 / 25, 676 MB
@@ -286,12 +286,17 @@ pyBigWig, pybigtools and HDF5 get slower with more of them (a lock or the
 GIL) and zarr stops at about 4 times, its reads being one Python call per
 window. Track order is the faster of the two for a few tracks, where its
 raw blocks need no inflating, and position order past about 48. The
-figwig writer is the fastest of the compressed formats up to 128 tracks
-and 1.6 times slower than zarr at 512 and 1,024, where it stops gaining
-past 8 threads because sorting and the float64 buffer copies stay on the
-calling thread; the track-order writer encodes on the calling thread and
-does not gain at all. pyBigWig and pybigtools were not run at 512 tracks
-and above, nor the memmap, whose file would be 255 GB.
+figwig writer is the fastest of the compressed formats on 8 threads and
+more at every track count (512 tracks in 39 s against zarr's 53 s, 1,024
+in 82 s against 129 s), and on one thread up to 128 tracks; past that,
+one thread's conversion of the values to the kernels' type is the cost
+(170 s against zarr's 100 s at 512), and the writer gains little from 8
+threads to 32, since the file writes and the index stay on the calling
+thread. The track-order writer encodes on the calling thread and does
+not gain at all. pyBigWig and pybigtools were not run at 512 tracks and
+above, nor the memmap, whose file would be 255 GB. The write timings
+include producing each piece of input, the same for every format, which
+is about a fifth of a one-thread figwig write of 128 tracks.
 
 Real experiments, 1 to 512 ENCODE tracks, over chr1:0-30 Mb
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -352,9 +357,9 @@ threads:
      - 128 tracks
      - 512 tracks
    * - figwig file, position order
-     - 1.9 / 1.4 / 1.4, 44 MB
-     - 17.9 / 5.0 / 4.1, 1.0 GB
-     - 80 / 16.6 / 17.7, 4.2 GB
+     - 1.9 / 1.3 / 1.3, 44 MB
+     - 18.6 / 4.9 / 4.1, 1.0 GB
+     - 80 / 14.9 / 14.9, 4.2 GB
    * - figwig file, track order
      - 2.0 / 1.8 / 1.8, 113 MB
      - 15.0 / 12.2 / 11.5, 2.5 GB
