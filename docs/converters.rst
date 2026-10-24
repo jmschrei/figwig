@@ -38,9 +38,11 @@ since its values are dropped. ``-g`` records the reference genome, as a
 name or a URL. ``-t`` sets the tile size, ``--groups`` the consecutive
 tracks stored together (8 by default; group tracks of one kind together,
 since a count track grouped with a float track is stored and decoded with
-it), ``--dtype`` one dtype for every track, and ``-l`` the compression
+it), ``--dtype`` one dtype for every track, ``-l`` the compression
 level, with 0 for uncompressed chunks, which costs four bytes per base of
-a dense float track. Each piece of a chromosome is read on one thread of
+a dense float track, and ``-z`` the number of zoom levels to keep beside
+the tile sums (none by default; ``bam2fw`` takes it too, and ``reorder``
+and ``merge`` keep the input's). Each piece of a chromosome is read on one thread of
 its own while the piece before it is encoded and compressed on ``-p``
 threads, and the arrays read are handed to the writer without a copy. The
 output is written beside its path and moved there when it is complete, so

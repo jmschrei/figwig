@@ -21,6 +21,7 @@ import figwig.figwig
 from figwig import FigWigReader
 from figwig import FigWigWriter
 from figwig import write_figwig
+from figwig import read_figwig
 from figwig import read_bigwig
 from figwig import write_bigwig
 
@@ -1632,3 +1633,188 @@ def test_infinite_values_are_refused(tmp_path):
 	y = FigWigReader(path).read('chr1', [0], 100, dtype='float64')[0]
 	assert y[0, 0] == 1 and numpy.isnan(y[0, 1]) and y[1, 0] == 2
 	assert not numpy.isinf(y).any()
+
+
+# Zoom levels: coarser sums kept beside the tile sums, announced by an
+# optional header bit, so a reader without them reads the file as before.
+
+
+def zoom_from_tiles(reader, level, tracks=None, chroms=None):
+	"""Level k's sums built from the tile sums, per chromosome, for the
+	oracle."""
+
+	tiles = reader.tile_sums(tracks, chroms).astype(numpy.float64)
+	names = list(reader.chrom_sizes) if chroms is None else ([chroms] if
+		isinstance(chroms, str) else list(chroms))
+	factor = 4 ** level
+	pieces, at = [], 0
+	for name in names:
+		n = -(-reader.chrom_sizes[name] // reader.tile)
+		piece = tiles[..., at:at + n]
+		at += n
+		pad = (-n) % factor
+		piece = numpy.concatenate([piece, numpy.zeros(piece.shape[:-1] + (pad,))],
+			axis=-1)
+		pieces.append(piece.reshape(piece.shape[:-1] + (-1, factor)).sum(-1))
+	return numpy.concatenate(pieces, axis=-1)
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_zoom_levels(tmp_path, ref, order):
+	path = str(tmp_path / 'z.fw')
+	write_reference(path, ref, order=order)
+	reader = FigWigReader(path)
+	assert reader.zooms == ()
+	with pytest.raises(ValueError, match="keeps no zoom level 1"):
+		reader.tile_sums(level=1)
+
+	path = str(tmp_path / 'z3.fw')
+	with FigWigWriter(path, CHROM_SIZES, TRACKS, tile=TILE, order=order, groups=[[
+			t['name'] for t in TRACKS]] if order == 'positions' else 1, zooms=3,
+			n_jobs=2) as writer:
+		for chrom, length in CHROM_SIZES.items():
+			writer.write(chrom, [0], ref[chrom][None])
+	reader = FigWigReader(path, verify=True)
+	assert reader.zooms == (4, 16, 64)
+	for level in (1, 2, 3):
+		got = reader.tile_sums(level=level)
+		assert got.dtype == numpy.float64
+		numpy.testing.assert_allclose(got, zoom_from_tiles(reader, level), rtol=1e-9)
+		# bins per chromosome: ceil(tiles / factor), and chromosome subsets
+		assert got.shape[1] == sum(-(--(-length // TILE) // 4 ** level) for length
+			in CHROM_SIZES.values())
+		numpy.testing.assert_allclose(reader.tile_sums('signal', ['chr2', 'chr1'],
+			level=level), zoom_from_tiles(reader, level, 'signal', ['chr2', 'chr1']),
+			rtol=1e-9)
+	numpy.testing.assert_array_equal(reader.tile_sums(), FigWigReader(str(
+		tmp_path / 'z.fw')).tile_sums())
+	with pytest.raises(ValueError, match="keeps no zoom level 4"):
+		reader.tile_sums(level=4)
+	with pytest.raises(TypeError, match="level must be an integer"):
+		reader.tile_sums(level=1.5)
+	with pytest.raises(ValueError, match="level must be 0 or a zoom level"):
+		reader.tile_sums(level=-1)
+	# The levels survive an append, which keeps the file's count, and a
+	# pickle, which drops the parsed levels and reads them again.
+	with FigWigWriter(path, None, ['more'], append=True) as writer:
+		writer.write('chr1', [64], numpy.full((1, 1, 100), 3.0))
+	again = pickle.loads(pickle.dumps(FigWigReader(path)))
+	assert again.zooms == (4, 16, 64)
+	numpy.testing.assert_allclose(again.tile_sums(level=2), zoom_from_tiles(again,
+		2), rtol=1e-9)
+	assert again.tile_sums('more', level=1)[0] == 300.0
+	lines = __import__('figwig.info', fromlist=['_describe'])._describe(again,
+		False)
+	assert 'zoom levels\t4, 16, 64' in lines
+	assert 'zoom levels\tnone' in __import__('figwig.info', fromlist=[
+		'_describe'])._describe(FigWigReader(str(tmp_path / 'z.fw')), False)
+
+
+def test_zoom_levels_follow_the_file_through_the_commands(tmp_path, ref):
+	path = str(tmp_path / 'z2.fw')
+	write_figwig(path, CHROM_SIZES, TRACKS, 'chr1', [0], ref['chr1'][None],
+		tile=TILE, zooms=2)
+	out = str(tmp_path / 'r.fw')
+	main(['reorder', path, out, '--order', 'tracks'])
+	assert FigWigReader(out).zooms == (4, 16)
+	numpy.testing.assert_allclose(FigWigReader(out).tile_sums(level=2),
+		FigWigReader(path).tile_sums(level=2), rtol=1e-9)
+	merged = str(tmp_path / 'm.fw')
+	main(['merge', '-o', merged, path])
+	assert FigWigReader(merged).zooms == (4, 16)
+	with pytest.raises(ValueError, match="zooms must be from 0 to 12"):
+		FigWigWriter(str(tmp_path / 'x.fw'), CHROM_SIZES, ['a'], zooms=13)
+	with pytest.raises(TypeError, match="zooms must be an integer"):
+		FigWigWriter(str(tmp_path / 'x.fw'), CHROM_SIZES, ['a'], zooms=True)
+
+
+def test_forged_zoom_level_is_refused(tmp_path, ref):
+	path = str(tmp_path / 'zf.fw')
+	write_figwig(path, CHROM_SIZES, TRACKS, 'chr1', [0], ref['chr1'][None],
+		tile=TILE, zooms=1)
+	reader = FigWigReader(path)
+	reader._group_index(0)
+	at, n_sum, n_bytes = reader._summary_at[0]
+	with open(path, 'rb') as handle:
+		original = handle.read()
+	forged = str(tmp_path / 'forged.fw')
+	# The level's stream starts 4 (count) + 16 (level header) bytes after
+	# the summary stream; a flipped byte in it fails its checksum.
+	data = bytearray(original)
+	data[at + n_bytes + 20 + 3] ^= 0xff
+	with open(forged, 'wb') as handle:
+		handle.write(bytes(data))
+	with pytest.raises(ValueError, match="zoom level does not match its checksum"):
+		FigWigReader(forged).tile_sums(level=1)
+	# A level count beyond the format's.
+	data = bytearray(original)
+	data[at + n_bytes:at + n_bytes + 4] = (99).to_bytes(4, 'little')
+	with open(forged, 'wb') as handle:
+		handle.write(bytes(data))
+	with pytest.raises(ValueError, match="more zoom levels than a figwig file"):
+		FigWigReader(forged).tile_sums(level=1)
+
+
+# Channels: a dimension named by track attributes, read as (n, items,
+# channels, width) by arranging the tracks, with no change to the file.
+
+
+def test_channels_arrange_tracks_by_item_and_channel(tmp_path):
+	path = str(tmp_path / 'ch.fw')
+	reads = ['r1', 'r2', 'r3']
+	tracks = [{'name': '{}.{}'.format(r, c), 'read': r, 'channel': c, 'dtype':
+		'uint8'} for r in reads for c in ('m6a', 'cpg')]
+	# r3's two tracks in the other order, and an extra track with no read
+	tracks[4], tracks[5] = tracks[5], tracks[4]
+	tracks.append({'name': 'coverage', 'dtype': 'uint8'})
+	rng = numpy.random.default_rng(0)
+	values = rng.integers(0, 3, (2, 7, 300)).astype(numpy.float64)
+	write_figwig(path, {'chr1': 1000}, tracks, 'chr1', [0, 500], values, tile=64)
+	reader = FigWigReader(path)
+	ids = [i for i, t in enumerate(tracks) if 'read' in t]
+	y = reader.read('chr1', [0, 500], 300, tracks=ids, channels='channel',
+		items='read')
+	assert y.shape == (2, 3, 2, 300) and y.dtype == numpy.uint8
+	dense = reader.read('chr1', [0, 500], 300)
+	for a, r in enumerate(reads):
+		for b, c in enumerate(('m6a', 'cpg')):
+			i = [t['name'] for t in tracks].index('{}.{}'.format(r, c))
+			numpy.testing.assert_array_equal(y[:, a, b], dense[:, i])
+	# bins and sums arrange the same way; read_figwig forwards
+	binned = reader.read('chr1', [0, 500], 300, tracks=ids, bins=100,
+		channels='channel', items='read')
+	assert binned.shape == (2, 3, 2, 3)
+	sums = reader.sums('chr1', [0, 500], [300, 800], tracks=ids,
+		channels='channel', items='read')
+	assert sums.shape == (2, 3, 2)
+	numpy.testing.assert_array_equal(sums[:, 0, 0], y[:, 0, 0].sum(-1))
+	numpy.testing.assert_array_equal(read_figwig(path, 'chr1', [0], 300,
+		tracks=ids, channels='channel', items='read'), y[:1])
+	# channel order follows the first appearance among the tracks read
+	y2 = reader.read('chr1', [0], 300, tracks=[5, 4, 0, 1], channels='channel',
+		items='read')
+	assert y2.shape == (1, 2, 2, 300)
+	numpy.testing.assert_array_equal(y2[0, 0, 0], dense[0, 5])
+	numpy.testing.assert_array_equal(y2[0, 1, 1], dense[0, 1])
+	# errors: a track without the attribute, a missing combination, a
+	# duplicate, one key without the other, and the modes that do not fit
+	with pytest.raises(ValueError, match="'coverage' has no attribute 'read'"):
+		reader.read('chr1', [0], 300, channels='channel', items='read')
+	with pytest.raises(ValueError, match="read='r2' has no track with channel='cpg'"):
+		reader.read('chr1', [0], 300, tracks=[0, 1, 2], channels='channel',
+			items='read')
+	with pytest.raises(ValueError, match="are both channel='m6a' of read='r1'"):
+		reader.read('chr1', [0], 300, tracks=[0, 0, 1], channels='channel',
+			items='read')
+	with pytest.raises(ValueError, match="given together"):
+		reader.read('chr1', [0], 300, channels='channel')
+	with pytest.raises(TypeError, match="attribute names"):
+		reader.read('chr1', [0], 300, channels=3, items='read')
+	for kwargs in ({'sparse': True}, {'labels': numpy.zeros(6, dtype=int)}, {
+			'out': numpy.zeros((1, 6, 300), dtype=numpy.uint8)}):
+		with pytest.raises(ValueError, match="channels cannot be given with"):
+			reader.read('chr1', [0], 300, tracks=ids, channels='channel',
+				items='read', **kwargs)
+	with pytest.raises(ValueError, match="channels cannot be given with paired"):
+		reader.sums('chr1', [0], [300], tracks=ids, channels='channel',
+			items='read', paired=True)

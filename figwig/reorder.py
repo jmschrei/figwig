@@ -77,7 +77,7 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 	total = 0
 	with FigWigWriter(output, reader.chrom_sizes, tracks, genome=reader.genome,
 			attributes=reader.attributes, tile=tile, groups=groups, level=level,
-			n_jobs=n_jobs, order=order) as writer:
+			n_jobs=n_jobs, order=order, zooms=len(reader.zooms)) as writer:
 		for chrom in reader.chrom_sizes:
 			entries = reader.read_entries(chroms=[chrom], n_jobs=n_jobs)
 			if len(entries.values) > 0:

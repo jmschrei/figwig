@@ -76,6 +76,9 @@ def _parser(prog):
 	parser.add_argument('--dtype', default=None, help="The dtype of every "
 		"track, such as uint16. Default is the narrowest type that holds each "
 		"track's values.")
+	parser.add_argument('-z', '--zooms', default=0, type=int, help="The number "
+		"of zoom levels to keep beside the tile sums, each 4 times coarser than "
+		"the last, for FigWigReader.tile_sums(level=k). Default is 0.")
 	parser.add_argument('-l', '--level', default=6, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"6.")
@@ -160,7 +163,7 @@ def _shared_chrom_sizes(readers, sizes=None):
 
 def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
 	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False, missing=0.0,
-	append=False):
+	append=False, zooms=0):
 	"""Write the bigWigs `filenames` as the tracks of `output`, or add them
 	to it with `append`."""
 
@@ -202,7 +205,8 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 		missing))}
 	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
 			groups=groups, level=level, n_jobs=n_jobs, append=append,
-			attributes=attributes) as writer, ThreadPoolExecutor(1) as reader:
+			attributes=attributes, zooms=zooms) as writer, ThreadPoolExecutor(1) as \
+			reader:
 		writer._copies = False
 		ahead = None
 		for piece in pieces(writer):
@@ -252,6 +256,6 @@ def main(argv=None, prog='figwig bw2fw'):
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
-			append=args.append)
+			append=args.append, zooms=args.zooms)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)

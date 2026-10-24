@@ -55,6 +55,9 @@ def _parser(prog):
 	parser.add_argument('--dtype', default=None, help="The dtype of every "
 		"track, such as uint16. Default is the narrowest type that holds each "
 		"track's values.")
+	parser.add_argument('-z', '--zooms', default=0, type=int, help="The number "
+		"of zoom levels to keep beside the tile sums, each 4 times coarser than "
+		"the last, for FigWigReader.tile_sums(level=k). Default is 0.")
 	parser.add_argument('-l', '--level', default=1, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"1.")
@@ -212,7 +215,7 @@ def main(argv=None, prog='figwig bam2fw'):
 	try:
 		with FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 				genome=args.genome, tile=args.tile, groups=groups, level=args.level,
-				n_jobs=cores) as writer:
+				n_jobs=cores, zooms=args.zooms) as writer:
 			# The arrays `_write_counts` makes are the writer's to keep.
 			writer._copies = False
 			for strands, group in zip(files, groups):

@@ -323,6 +323,18 @@ kept while every track's take at most 256 MB together, which is 350 tracks
 on hg38 at the default tile; a file of thousands of cells keeps none, and
 ``tile_sums`` says so.
 
+A file written with ``zooms=k`` also keeps ``k`` zoom levels, level ``j``
+the sum of each track over bins of ``4**j`` tiles, in float64, which
+``tile_sums(level=j)`` returns the same way (``fw.zooms`` lists the levels,
+``(4, 16, 64)`` for three) and ``figwig info`` prints; ``bw2fw -z`` and
+``bam2fw -z`` write them, and ``reorder``, ``merge`` and ``append=True``
+keep the file's count. A bin never crosses a chromosome: a chromosome of
+``n`` tiles has ``ceil(n / 4**j)`` bins at level ``j``. The levels are
+computed from the tile sums at close, so they are kept only while the
+tile sums are, and the default is none; they cost a few hundred kilobytes
+per level for six tracks and are announced by a header bit that a reader
+without them ignores.
+
 Writing
 -------
 
@@ -540,9 +552,14 @@ base, or the cells of a single-cell experiment with a count and a
 fragment-end flag, is stored as tracks with attributes that name the
 dimension: a record per read and channel, ``{"name": "r17.m6a", "read":
 "r17", "channel": "m6a", "strand": "+"}``, and ``select(channel="m6a")`` or
-``select(read="r17")`` picks a slice, which ``read`` returns as (windows,
-tracks, width) to be reshaped by the caller to (windows, reads, channels,
-width) when the tracks are listed read-major. Group the tracks by channel
+``select(read="r17")`` picks a slice, and ``read(..., channels="channel",
+items="read")`` arranges the tracks read by item and channel into
+(windows, reads, channels, width), items and channels in the order of
+their first appearance among the tracks read, each item needing every
+channel once; ``bins`` and ``sums`` arrange the same way, into (windows,
+reads, channels, bins) and (intervals, reads, channels). The arrangement
+is a reshape of the ordinary read and changes no bytes of a file: a
+channel is an attribute like any other. Group the tracks by channel
 over runs of consecutive reads, not by read: the reads sorted by start
 and cut into groups of about a thousand, so that each group's chunks
 cover one stretch of the genome and a window decodes the few chunks of
@@ -558,9 +575,7 @@ gives each read's total over its own span, 2.6 s for the 90,543 reads
 against 5.6 s from the matrix. A read may also
 be its own "chromosome", of its length, with one track per channel, which
 gives (reads, channels, length) in one call, with the genome coordinates
-kept in the file's attributes. A built-in channels dimension, returning
-(windows, tracks, channels, width) without the reshape, is the planned
-next step and would change no bytes of a file without channels.
+kept in the file's attributes.
 
 Versions
 --------

@@ -20,17 +20,23 @@ reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8, nan='propag
 	# bases out, nan='count' gives the bases that are not NaN (covered-base means);
 	# paired=True sums interval i over track tracks[i] alone, (n,)
 reader.read_entries(tracks=None, chroms=None, n_jobs=8)   # -> SparseEntries
-reader.tile_sums(tracks=None, chroms=None)  # -> float32 (tracks, tiles): sums per tile, no decoding
+reader.tile_sums(tracks=None, chroms=None, level=0)  # -> float32 (tracks, tiles): sums per tile, no
+	# decoding; level=k -> float64 (tracks, bins of 4**k tiles) when the file has zoom levels
+reader.zooms                         # the zoom levels' tiles per bin, (4, 16, 64) for three, () for none
 reader.select(**attributes)          # -> int64 indices, for `tracks`
 reader.tracks                        # list of dicts: name, dtype, group, attributes
 reader.stats                         # structured array: sum, nonzero, min, max per track
 reader.chrom_sizes, reader.genome, reader.attributes, reader.tile, reader.order
 read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=None,
-	n_jobs=8, sparse=False, labels=None, bins=None)
+	n_jobs=8, sparse=False, labels=None, bins=None, nan='propagate', device=None,
+	channels=None, items=None)
+	# channels="channel", items="read": (n, items, channels, width), the tracks
+	# arranged by two attributes; also for bins= and sums()
 
 FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None,
-	groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False)
-	# tile None is 16384, order None is 'positions', level None is 6 (0 in track order)
+	groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None)
+	# tile None is 16384, order None is 'positions', level None is 6 (0 in track order);
+	# zooms None is the file's with append=True and 0 otherwise (bw2fw -z, bam2fw -z)
 writer.write(chroms, starts, values, ends=None, tracks=None)
 writer.write_sparse(chroms, positions, tracks, values)   # nonzero bases as entries
 writer.add_file(path)                # copy another file's tracks in (same chroms, tile, level, order)
@@ -62,8 +68,9 @@ order (track order is level 0 unless `-l` is given, 3 to 4x larger);
 `FigWigWriter(path, None, new_tracks, append=True)` adds tracks to a file in
 place (the new chunks are written after its end; its old index stays behind
 as dead bytes, which `merge` into a new path drops);
-`tile_sums()` is the file's coarse profile, in place of zoom levels, kept
-while tracks x tiles x 4 bytes is at most 256 MB.
+`tile_sums()` is the file's coarse profile, kept while tracks x tiles x 4
+bytes is at most 256 MB; `tile_sums(level=k)` gives zoom level k (bins of
+4**k tiles, float64) when the file was written with `zooms=k` or more.
 
 | `tracks` given to `read` | output shape | dtype |
 |---|---|---|
@@ -323,8 +330,8 @@ figwig info k562.fw [-b]                                     # what the file hol
   the `bam2bw` extra.
 - Binned tracks (5 kb bins, 250 kb compartments) are stored as runs and read
   back exactly; a bigWig is still faster for reads of a few bases inside wide
-  bins and for summaries over megabases, which the format has no zoom levels
-  for.
+  bins; summaries over megabases come from `tile_sums`, or from a zoom level
+  when the file was written with `zooms=`.
 
 ## Errors
 
@@ -352,6 +359,8 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `it is version ... of the format, and this figwig reads version 1` | a file a newer figwig wrote; upgrade figwig |
 | `its tables do not match their checksum`, `The index of ... does not match its checksum` | a damaged table or index record; the file is corrupt |
 | `keeps no summary of the group of` | `tile_sums` on a file whose sums passed 256 MB |
+| `keeps no zoom level k of the group of` | `tile_sums(level=k)` on a file written without `zooms=k` or more (`reader.zooms` lists them) |
+| `has no attribute 'read'`, `has no track with channel=...`, `are both channel=... of read=...` | `channels=`/`items=`: a track without the attribute, a missing item x channel combination, or two tracks for one |
 | `came from another file, whose tracks cannot be written to` | `write` to a track that `append` or `add_file` copied in |
 | `was written with order|tile|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of files with different layouts or chromosome sets; `reorder` one first, or `bw2fw -s` the same sizes |
 | `does not match its checksum` | `verify=True` found a corrupt chunk |

@@ -343,7 +343,10 @@ say what a file holds, as `figwig info` does from the shell; the first
 read in a fresh environment compiles its kernels for about 27 s, and later
 processes load them in a tenth of a second. A base no track wrote is 0,
 as is a bigWig's no-data unless `bw2fw --missing nan` keeps them apart;
-there are no zoom levels, and `tile_sums` stands in for them; and `figwig
+`tile_sums` gives each track's sum per tile without decoding a chunk, and
+per bin of a zoom level when the file was written with `zooms=`; `read(...,
+channels="channel", items="read")` arranges tracks such as Fiber-seq reads'
+calls into `(windows, reads, channels, width)`; and `figwig
 reorder` rewrites a file in the other order. Each chunk of a group's tiles is stored densely,
 as nonzero bases, as runs of one value or as a matrix of the tracks present,
 whichever is smallest, in the narrowest type that holds it exactly. Six

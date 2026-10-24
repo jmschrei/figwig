@@ -52,7 +52,7 @@ def _merge(paths, output, genome=None, verbose=False):
 		genome = genomes.pop() if genomes else None
 	with FigWigWriter(output, first.chrom_sizes, None, genome=genome,
 			attributes=first.attributes, tile=first.tile, level=first._level,
-			order=first.order) as writer:
+			order=first.order, zooms=len(first.zooms)) as writer:
 		for path in paths:
 			writer.add_file(path)
 			if verbose:

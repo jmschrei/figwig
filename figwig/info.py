@@ -38,6 +38,8 @@ def _describe(reader, count_bytes=False):
 		"{}".format(reader.path),
 		"version\t{}".format(_VERSION),
 		"written by\tfigwig {}".format(reader.written_by or ''),
+		"zoom levels\t{}".format(', '.join(str(f) for f in reader.zooms) if
+			reader.zooms else 'none'),
 		"genome\t{}".format(reader.genome if reader.genome is not None else ''),
 		"order\t{}".format(reader.order),
 		"tile\t{}".format(reader.tile),
