@@ -371,7 +371,11 @@ disk. The values a track keeps are those its dtype holds: a float32 track
 keeps float32's rounding of what it is given, as does a track left
 undeclared that turns out to hold fractions, so a value too small for
 float32 is 0 and not counted as nonzero, and a value beyond float32's range
-is an error unless the track is declared ``float64``; -0.0 is 0. ``genome``
+is an error unless the track is declared ``float64``; -0.0 is 0. No figwig
+file holds an infinite value: a base is a finite value or NaN, and
+``write``, ``write_sparse`` and ``bw2fw`` refuse ``inf`` before writing
+anything, as ``BigWigWriter`` does (ENCODE's signal p-value bigWigs can
+hold it; clip them first). ``genome``
 is a name or a URL, and ``attributes`` a dict for the file as a whole.
 
 ``groups`` says which tracks' tiles are stored together: a number of
@@ -747,7 +751,7 @@ nonzero bases per track-order      65,536 per block, any number of blocks
 block
 dense read                         8 GiB unless ``out`` is given
 scratch tile for sums              256 MB per thread, channels times tile times 8 bytes; a read of more channels bins each window from its chunks without one
-values                             integers to 2**53 exactly; a 64-bit integer beyond it is refused; float32 or float64 otherwise
+values                             integers to 2**53 exactly; a 64-bit integer beyond it is refused; float32 or float64 otherwise; NaN allowed, infinity refused
 =================================  ===================================================================
 
 The position-order index on disk holds the tiles with values, so a group

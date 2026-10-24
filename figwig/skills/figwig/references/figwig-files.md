@@ -358,6 +358,7 @@ figwig info k562.fw [-b]                                     # what the file hol
 | `its header does not match its checksum` | a damaged header (the header keeps a CRC-32 of itself); the file is corrupt |
 | `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it; upgrade figwig |
 | `is being appended to by another writer` | two `append=True` writers on one file at once; wait for the first to close |
+| `values must be finite or NaN, but one is infinite` | an infinite value in `write`, `write_sparse` or a bigWig given to `bw2fw` (ENCODE signal p-value tracks can hold inf); no figwig or bigWig figwig writes holds one; clip first |
 | `an integer lies beyond 2**53, which a figwig file cannot hold exactly` | a 64-bit integer the file's float64 cannot keep; scale or clip first |
 | `is not a regular file` | the path is a directory, FIFO or device |
 | `paired=True needs one track per interval` | `sums(paired=True)` without `tracks`, or with another count than the intervals |

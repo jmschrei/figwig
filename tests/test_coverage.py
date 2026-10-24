@@ -1612,3 +1612,23 @@ def test_oversized_chunk_sizes_are_refused(tmp_path, small):
 	f[3][0] = 2 ** 31
 	refuses(save(tmp_path, 'raw.fw', rebuild(data, header, offset, runs, f,
 		summary)), "larger than any chunk of 5 tracks")
+
+
+def test_infinite_values_are_refused(tmp_path):
+	"""No figwig file holds an infinite value: `write` and `write_sparse`
+	refuse one before writing anything, NaN stays allowed."""
+
+	path = str(tmp_path / 'inf.fw')
+	with FigWigWriter(path, {'chr1': 100}, [{'name': 'a', 'dtype': 'float32'}, {
+			'name': 'b', 'dtype': 'float64'}], tile=64) as writer:
+		writer.write('chr1', [0], numpy.array([[[1.0, numpy.nan], [2.0, 0.0]]]))
+		for bad in (numpy.inf, -numpy.inf):
+			with pytest.raises(ValueError, match="finite or NaN"):
+				writer.write('chr1', [10], numpy.array([[[bad], [1.0]]]))
+			with pytest.raises(ValueError, match="finite or NaN"):
+				writer.write_sparse('chr1', [10], [1], numpy.array([bad]))
+			with pytest.raises(ValueError, match="finite or NaN"):
+				writer.write('chr1', [10], numpy.array([[[1.0], [bad]]], dtype=numpy.float32))
+	y = FigWigReader(path).read('chr1', [0], 100, dtype='float64')[0]
+	assert y[0, 0] == 1 and numpy.isnan(y[0, 1]) and y[1, 0] == 2
+	assert not numpy.isinf(y).any()

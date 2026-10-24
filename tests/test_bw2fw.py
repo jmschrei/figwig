@@ -268,6 +268,25 @@ def test_nan_intervals_are_kept(tmp_path):
 	assert numpy.isnan(y[:100]).all() and y[200] == 0 and y[100] == 2
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason="pyBigWig does not build")
+def test_a_bigwig_with_infinite_values_is_refused(tmp_path):
+	"""ENCODE's signal p-value bigWigs can hold inf; bw2fw refuses them with a
+	message, since no figwig file holds an infinite value."""
+
+	import pyBigWig
+	bw = str(tmp_path / 'inf.bw')
+	handle = pyBigWig.open(bw, 'w')
+	handle.addHeader([('chr1', 1000)])
+	handle.addEntries(['chr1', 'chr1', 'chr1'], [10, 20, 30], ends=[11, 21, 31],
+		values=[1.0, float('inf'), 2.0])
+	handle.close()
+	assert numpy.isinf(read_bigwig(bw, ['chr1'], [0], 40)[0]).any()
+	out = str(tmp_path / 'inf.fw')
+	with pytest.raises(SystemExit, match="finite or NaN"):
+		main(['bw2fw', '-o', out, bw])
+	assert not os.path.exists(out)
+
+
 def test_missing_is_recorded_for_fw2bw(tmp_path, bigwigs):
 	"""The file's `missing` attribute says what bw2fw wrote for uncovered
 	bases, which fw2bw follows by default."""

@@ -418,13 +418,17 @@ def _track_indices(tracks, track_ids, n_tracks, whose):
 
 def _check_exact(values):
 	"""Raise for a 64-bit integer array with a value beyond 2**53, which
-	float64, and so the file, cannot hold exactly."""
+	float64, and so the file, cannot hold exactly, and for an infinite
+	value, which no figwig file holds: a base is a finite value or NaN."""
 
 	values = numpy.asarray(values)
 	if values.dtype.kind in 'iu' and values.dtype.itemsize == 8 and values.size:
 		if int(values.max()) > 2 ** 53 or int(values.min()) < -2 ** 53:
 			raise ValueError("an integer lies beyond 2**53, which a figwig file "
 				"cannot hold exactly; scale or clip the values first.")
+	if values.dtype.kind == 'f' and values.size and numpy.isinf(values).any():
+		raise ValueError("values must be finite or NaN, but one is infinite; "
+			"clip the values first.")
 
 
 def _check_values_fit(name, dtype, values):

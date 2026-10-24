@@ -84,7 +84,9 @@ file little (0.4% on nine chr22 annotation tracks, nothing measurable on
 a genome-wide fold-change track) and doubles an uncompressed one. The
 convention is recorded as the file's ``missing`` attribute (``'0.0'``,
 ``'nan'`` or the value given), which ``fw2bw`` follows by default. A value
-is equal as a number: -0.0 reads as 0. An empty cell of the table is no
+is equal as a number: -0.0 reads as 0. A bigWig holding an infinite value,
+as some ENCODE signal p-value tracks do, is refused with a message, since
+no figwig file holds one; clip it first. An empty cell of the table is no
 attribute.
 
 figwig fw2bw
