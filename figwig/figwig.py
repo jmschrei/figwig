@@ -1819,25 +1819,28 @@ class FigWigWriter:
 	def _dense_task(self, g, tid, values, items, columns, tiles, dtype):
 		"""Encode and compress one batch of whole tiles. Returns (compressed
 		bytes, sizes, raw sizes, kind bytes, file tiles, stats) of the live
-		tiles. The batch's own tiles are converted to the kernels' type
-		here, on the pool."""
+		tiles. A block that is not of the kernels' type has the batch's own
+		tiles converted here, on the pool; one that is, as the converters'
+		float32 windows are, is read in place."""
 
 		n_tracks = len(self._groups[g])
 		tile = self.tile
 		n = len(tiles)
-		rows, items = numpy.unique(items, return_inverse=True)
-		c0, c1 = int(columns.min()), int(columns.max()) + tile
-		if len(rows) == 1:
-			# One window's tiles: a view, converted in one pass.
-			values = numpy.ascontiguousarray(values[int(rows[0]), :, c0:c1],
-				dtype=dtype)[None]
-		else:
-			converted = numpy.empty((len(rows), n_tracks, c1 - c0), dtype=dtype)
-			for k, r in enumerate(rows.tolist()):
-				converted[k] = values[r, :, c0:c1]
-			values = converted
+		if values.dtype != dtype:
+			rows, items = numpy.unique(items, return_inverse=True)
+			c0, c1 = int(columns.min()), int(columns.max()) + tile
+			if len(rows) == 1:
+				# One window's tiles: a view, converted in one pass.
+				values = numpy.ascontiguousarray(values[int(rows[0]), :, c0:c1],
+					dtype=dtype)[None]
+			else:
+				converted = numpy.empty((len(rows), n_tracks, c1 - c0),
+					dtype=dtype)
+				for k, r in enumerate(rows.tolist()):
+					converted[k] = values[r, :, c0:c1]
+				values = converted
+			columns = columns - c0
 		items = numpy.ascontiguousarray(items, dtype=numpy.int64)
-		columns = columns - c0
 		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
 		tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
