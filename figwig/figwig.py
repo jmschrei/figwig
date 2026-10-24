@@ -1822,9 +1822,16 @@ class FigWigWriter:
 		tile = self.tile
 		n = len(tiles)
 		rows, items = numpy.unique(items, return_inverse=True)
-		c0 = int(columns.min())
-		values = numpy.ascontiguousarray(values[rows, :, c0:int(columns.max()) +
-			tile], dtype=dtype)
+		c0, c1 = int(columns.min()), int(columns.max()) + tile
+		if len(rows) == 1:
+			# One window's tiles: a view, converted in one pass.
+			values = numpy.ascontiguousarray(values[int(rows[0]), :, c0:c1],
+				dtype=dtype)[None]
+		else:
+			converted = numpy.empty((len(rows), n_tracks, c1 - c0), dtype=dtype)
+			for k, r in enumerate(rows.tolist()):
+				converted[k] = values[r, :, c0:c1]
+			values = converted
 		items = numpy.ascontiguousarray(items, dtype=numpy.int64)
 		columns = columns - c0
 		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
