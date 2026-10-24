@@ -240,10 +240,10 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 512 tracks
      - 1,024 tracks
    * - figwig file, position order
-     - 2.0 / 0.57 / 0.52, 20 MB
-     - 15.0 / 3.9 / 4.2, 148 MB
-     - 170 / 39 / 45, 1.5 GB
-     - 356 / 82 / 79, 3.1 GB
+     - 1.9 / 0.56 / 0.46, 20 MB
+     - 15.0 / 3.7 / 3.8, 148 MB
+     - 172 / 38 / 39, 1.5 GB
+     - 350 / 75 / 72, 3.1 GB
    * - figwig file, track order
      - 3.3 / 2.6 / 3.1, 84 MB
      - 23 / 24 / 25, 676 MB
@@ -287,10 +287,10 @@ GIL) and zarr stops at about 4 times, its reads being one Python call per
 window. Track order is the faster of the two for a few tracks, where its
 raw blocks need no inflating, and position order past about 48. The
 figwig writer is the fastest of the compressed formats on 8 threads and
-more at every track count (512 tracks in 39 s against zarr's 53 s, 1,024
-in 82 s against 129 s), and on one thread up to 128 tracks; past that,
-one thread's conversion of the values to the kernels' type is the cost
-(170 s against zarr's 100 s at 512), and the writer gains little from 8
+more at every track count (512 tracks in 38 s against zarr's 53 s, 1,024
+in 75 s against 129 s), and on one thread up to 128 tracks; past that,
+one thread's encoding of the values is the cost (172 s against zarr's
+100 s at 512), and the writer gains little from 8
 threads to 32, since the file writes and the index stay on the calling
 thread. The track-order writer encodes on the calling thread and does
 not gain at all. pyBigWig and pybigtools were not run at 512 tracks and
@@ -357,9 +357,9 @@ threads:
      - 128 tracks
      - 512 tracks
    * - figwig file, position order
-     - 1.9 / 1.3 / 1.3, 44 MB
-     - 18.6 / 4.9 / 4.1, 1.0 GB
-     - 80 / 14.9 / 14.9, 4.2 GB
+     - 1.8 / 1.3 / 1.3, 44 MB
+     - 18.3 / 4.7 / 4.0, 1.0 GB
+     - 77 / 14.3 / 14.2, 4.2 GB
    * - figwig file, track order
      - 2.0 / 1.8 / 1.8, 113 MB
      - 15.0 / 12.2 / 11.5, 2.5 GB
@@ -400,16 +400,16 @@ Conversions, genome-wide
 genome-wide this time, and the rolled copies past six, written as bigWigs
 by figwig: ``figwig bw2fw`` wrote the figwig file of each set in groups of
 8 tracks at a tile of 16,384 bases and level 6, and ``figwig fw2bw`` wrote
-it back, one run each, on tmpfs, at a load of 48 to 112:
+it back, one run each, on tmpfs, at a load of 72 to 81:
 
 ======  ==========  ===========  =============================  =============================
 tracks  bigWigs     figwig file  ``bw2fw``, 1 / 8 / 32 threads  ``fw2bw``, 1 / 8 / 32 threads
 ======  ==========  ===========  =============================  =============================
-1       36.9 MB     25.2 MB      3.0 s / 1.7 s / 2.2 s          5.7 s / 4.2 s / 4.5 s        
-2       73.9 MB     46.9 MB      5.0 s / 2.9 s / 3.1 s          11.2 s / 5.4 s / 6.0 s       
-6       971.4 MB    224.8 MB     13.3 s / 7.1 s / 7.2 s         38.9 s / 21.8 s / 12.9 s     
-24      2,195.1 MB  888.7 MB     55.4 s / 20.3 s / 20.8 s       162.1 s / 82.7 s / 47.3 s    
-96      7,089.9 MB  3,555.3 MB   216.8 s / 68.6 s / 71.8 s      604.5 s / 302.2 s / 174.8 s  
+1       36.9 MB     26.4 MB      4.0 s / 2.0 s / 2.1 s          5.6 s / 4.9 s / 4.8 s        
+2       73.9 MB     48.3 MB      6.3 s / 2.8 s / 2.8 s          11.8 s / 5.8 s / 6.0 s       
+6       971.4 MB    227.3 MB     18.2 s / 7.2 s / 7.3 s         38.5 s / 20.4 s / 11.0 s     
+24      2,195.1 MB  898.0 MB     70.6 s / 19.8 s / 21.9 s       153.4 s / 71.4 s / 38.0 s    
+96      7,089.9 MB  3,593.1 MB   277.2 s / 70.5 s / 72.7 s      614.9 s / 287.7 s / 145.8 s  
 ======  ==========  ===========  =============================  =============================
 
 The six real tracks are 4.3 times smaller as a figwig file than as
@@ -419,8 +419,10 @@ as bigWigs figwig writes (408 MB); the rolled copies past six are bigWigs
 figwig wrote as varStep, and the figwig file is half their size.
 ``bw2fw`` reads each piece of a chromosome on a thread of its own while
 the writer encodes and compresses the piece before it on ``-p`` threads,
-and gained nothing past 8; ``fw2bw`` is bound by laying each track's
-windows out as bigWig sections, on one thread per track.
+and gained nothing past 8; on one thread, about a tenth of its time is
+the pass that refuses an infinite value before any of a piece is written.
+``fw2bw`` is bound by laying each track's windows out as bigWig sections,
+on one thread per track.
 
 ``figwig bam2fw`` and ``figwig bam2bw`` converted the 2.4 GB ATAC-seq BAM
 ENCFF877LRY, on tmpfs, to one figwig file of two tracks and to two bigWigs:
@@ -445,13 +447,18 @@ The six tracks were written at each libdeflate level, and read as the
 =====  ========  ===================  ========  =========
 level  file      ``bw2fw -p 8``       1 thread  8 threads
 =====  ========  ===================  ========  =========
-0      412.3 MB  7.6 s                0.062 s   0.047 s  
-1      230.1 MB  7.3 s                0.121 s   0.055 s  
-3      232.9 MB  7.5 s                0.119 s   0.056 s  
-6      227.3 MB  7.3 s                0.123 s   0.048 s  
-9      225.2 MB  7.3 s                0.124 s   0.053 s  
-12     217.6 MB  9.0 s                0.122 s   0.050 s  
+0      412.3 MB  6.9 s                0.062 s   0.047 s  
+1      230.1 MB  6.9 s                0.121 s   0.055 s  
+3      232.9 MB  6.8 s                0.119 s   0.056 s  
+6      227.3 MB  7.0 s                0.123 s   0.048 s  
+9      225.2 MB  7.1 s                0.124 s   0.053 s  
+12     217.6 MB  9.5 s                0.122 s   0.050 s  
 =====  ========  ===================  ========  =========
+
+Zoom levels cost little: ``bw2fw -p 8 -z 4`` of the six tracks took
+7.2 s against 7.1 s without them (the median of three runs each), and the
+file was 228.1 MB against 227.3 MB, 0.8 MB for the four levels of bins of
+4, 16, 64 and 256 tiles.
 
 Every other chunk of the uncompressed file, 205 MB of payload, was then
 compressed through each codec's Python binding on one thread, and

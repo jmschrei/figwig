@@ -133,7 +133,7 @@ tracks and the time to a CUDA tensor.
 
 The 48 tracks are 148 MB as a figwig file, 1.3 GB as bigWigs figwig writes,
 267 MB as zarr and 309 MB as HDF5; genome-wide, the six real tracks are
-971 MB as ENCODE's bigWigs and 225 MB as a figwig file.
+971 MB as ENCODE's bigWigs and 227 MB as a figwig file.
 
 #### Threads
 
