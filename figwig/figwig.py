@@ -1367,9 +1367,11 @@ class FigWigWriter:
 					# Intervals: one value per track, converted here, since
 					# the block is small.
 					block = numpy.ascontiguousarray(block[:, :, None], dtype=dtype)
-				elif self._copies:
+				elif self._copies and self._pool is not None:
 					block = self._copy(block)
 				else:
+					# Without a pool every task runs inside this call, so the
+					# caller's array is not read after it returns.
 					block = numpy.ascontiguousarray(block)
 				self._write_group(g, int(tids[a]), starts[a:b], ends[a:b], block,
 					values.ndim == 3, dtype)
