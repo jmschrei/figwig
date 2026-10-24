@@ -656,7 +656,7 @@ The header, 128 bytes:
 field              type  meaning
 =================  ====  ==================================================
 magic              u4    ``FIGW`` as little-endian bytes, 0x57474946
-version            u2    5; a reader refuses any other
+version            u2    1; a reader refuses a later version
 flags              u2    bit 0 set for track order
 tile               u4    bases per tile, a power of two from 16 to 65,536
 codec              u2    0 for uncompressed chunks, 1 for zlib streams
@@ -671,10 +671,10 @@ index              u8    offset of the index
 data               u8    offset of the first chunk, 128
 metadata           u8    offset of the metadata
 metadata_length    u8    bytes of the metadata
-zooms              u8    0, a place held for zoom levels
+zooms              u8    0; the zoom levels lie in the index, after each group's summary
 length             u8    bytes of the file
 required           u4    feature bits a reader must know; none defined, so a reader refuses any set bit
-optional           u4    feature bits a reader may ignore; none defined
+optional           u4    feature bits a reader may ignore; bit 0 says each index record ends with a zoom section, and is set in every file this release writes
 header_crc         u4    CRC-32 of these 128 bytes with this field as 0
 padding            20    0
 =================  ====  ==================================================
@@ -718,7 +718,17 @@ and the block's CRC-32 (u4). Either record ends with the group's summary:
 that inflates to ``n_sum * (4 + 4 * tracks)`` bytes, the numbers of the
 tiles with a nonzero sum (u4 each, ascending) then each of those tiles'
 sums per track of the group (f4 each, tile by tile); a group whose
-summary was not kept has ``n_sum_bytes`` of 0.
+summary was not kept has ``n_sum_bytes`` of 0. When the header's
+``optional`` bit 0 is set, the summary is followed by the group's zoom
+section: ``n_zooms`` (u4, at most 12), then for level ``k`` from 1 its
+``factor`` (u4, ``4 ** k``), ``n`` bins (u4), ``n_bytes`` (u4), the CRC-32
+(u4) of the stream that follows, and a zlib stream of ``n_bytes`` that
+inflates to ``n * (4 + 8 * tracks)`` bytes: the numbers of the bins with a
+nonzero sum (u4 each, ascending) then each of those bins' sums per track
+(f8 each, bin by bin). Bins are numbered over the genome as tiles are,
+each chromosome of ``n`` tiles taking ``ceil(n / factor)`` bins, so a bin
+never crosses a chromosome. A file written without zoom levels has
+``n_zooms`` of 0, and a group whose summary was not kept keeps no levels.
 
 A chunk's kind byte holds its kind in bits 0-2: 0 for a tile that holds
 only zeros and has no chunk, 1 dense, 2 sparse, 3 matrix, 4 runs; its

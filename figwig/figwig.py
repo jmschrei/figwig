@@ -148,10 +148,12 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 	('length', '<u8'), ('required', '<u4'), ('optional', '<u4'),
 	('header_crc', '<u4'), ('padding', 'V20')])
 # Feature bits a reader must know to read the file (`required`) or may
-# ignore (`optional`); none are defined yet, so a reader refuses any
-# required bit and ignores every optional one.
+# ignore (`optional`). No required bit is defined, so a reader refuses any
+# set; the one optional bit says each group's index record ends with a zoom
+# section (written by every file since the first release), and any other
+# optional bit is ignored.
 _KNOWN_REQUIRED = 0
-_OPTIONAL_ZOOMS = 1  # the header bit for a zoom section after each group's summary
+_OPTIONAL_ZOOMS = 1
 _MAX_ZOOMS = 12  # levels, each 4 times coarser than the last
 # The metadata keys the format itself writes; any other key of a file's
 # metadata is kept as it is through an append.
