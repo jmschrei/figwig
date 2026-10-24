@@ -151,74 +151,251 @@ time, it is now 2.9 GB, and 4.9 GB with ``-u -f``, in the same time.
 figwig files
 ------------
 
-``benchmarks/compare_formats.py`` times a figwig file against the bigWigs
-of the same tracks. The tracks were six genome-wide count tracks on hg38:
-the two strands of the 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, written
-by ``figwig bam2bw``; the two strands of PRO-cap, ENCFF994CSC and
-ENCFF253HUA; and the unstranded cut counts of ATAC-seq ENCFF830RWF and
-DNase-seq ENCFF989SAK. Past six, track i is track i mod 6 with every
-chromosome rolled by a random offset, written as a bigWig by figwig, so
-that it has the statistics of a real track and shares no position with it.
-``figwig bw2fw`` wrote the figwig file of each set, in groups of 8 tracks
-at a tile of 16,384 bases and compression level 6, and that conversion and
-``figwig fw2bw`` back are the write timings, one run each; every file was
-on tmpfs.
+The figwig file was measured against the other ways of holding many
+tracks on 2026-10-23 (``claude_comments/2026-10-23-format-benchmarks/``,
+``bench.py``): the same tracks as one bigWig per track read by figwig, by
+pybigtools 0.2.5 and by pyBigWig 0.3.26 (those two on a thread pool of
+window chunks, one ``values()`` per window, since neither reads on
+threads itself), as a zarr 3 array (zstd, chunks of tracks x 65,536,
+zarr's own pool set to the thread count), as an HDF5 dataset (h5py, gzip
+4, the same chunks) and as a raw numpy memmap, and the figwig file in
+both orders. Every configuration ran in its own process under ``nice``,
+files on tmpfs, OMP, MKL and OpenBLAS pinned to one thread, while other
+jobs kept the machine's load at 55 to 70. Reads are the median of up to
+five repeats after a warm-up that compiles the kernels and opens the
+files; writes the best of two. In every configuration each reader's
+output was checked against the others' (one SHA-256 per read), and they
+agreed.
 
-The read was 8,192 windows of 2,114 bp centred on the summits of the K562
-ATAC-seq IDR peaks ENCFF855PCP, drawn at random, in one call:
-``read_bigwig`` over the N bigWigs into float32, and ``FigWigReader.read``
-into the tracks' own dtype (uint8 or uint16) and into float32. Each
-configuration ran in its own process, which warmed up on 1,000 windows,
-then opened the files again and timed one read, opening included; the
-table gives the median of three. Every configuration of one N gave the same
-values. Other jobs loaded the machine during these runs: its load average
-was between 44 and 66 while the windows were read, and between 48 and 112
-during the conversions, which were run once each with the kernels
-compiled.
+Count tracks, 1 to 1,024, over chr1
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-======  =======  ============  =======  ===========
-tracks  threads  bigWigs, f32  figwig   figwig, f32
-======  =======  ============  =======  ===========
-1       1        0.197 s       0.041 s  0.044 s    
-1       8        0.040 s       0.032 s  0.042 s    
-1       32       0.029 s       0.039 s  0.040 s    
-2       1        0.380 s       0.060 s  0.061 s    
-2       8        0.072 s       0.042 s  0.042 s    
-2       32       0.039 s       0.046 s  0.045 s    
-6       1        0.907 s       0.130 s  0.141 s    
-6       8        0.170 s       0.051 s  0.054 s    
-6       32       0.124 s       0.059 s  0.061 s    
-24      1        3.419 s       0.367 s  0.406 s    
-24      8        0.521 s       0.116 s  0.132 s    
-24      32       0.312 s       0.184 s  0.145 s    
-96      1        13.223 s      1.369 s  1.543 s    
-96      8        1.970 s       0.443 s  0.496 s    
-96      32       1.233 s       0.497 s  0.517 s    
-======  =======  ============  =======  ===========
+The tracks are chr1 of the six count tracks the examples use (the two
+strands of the 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, the two
+strands of PRO-cap ENCFF994CSC and ENCFF253HUA, and the unstranded cut
+counts of ATAC-seq ENCFF830RWF and DNase-seq ENCFF989SAK), uint16, 1.1
+percent of bases nonzero; past six, track i is track i mod 6 rolled by a
+seeded offset, so it has the statistics of a real track and shares no
+position with it. The figwig file is one group of all tracks at a tile of
+16,384 and libdeflate level 6; zarr, HDF5 and npy store uint16 as figwig
+does. The read is 8,192 random windows of 2,048 bases into float32, or
+2,048 and 1,024 windows at 512 and 1,024 tracks, so that the dense output
+stays under 8 GB. Seconds at 1 / 8 / 32 threads:
 
-On one thread the figwig file read 4.8 to 9.7 times faster than the
-bigWigs, and on 8 threads 1.3 to 4.5 times. A read of 8,192 windows from a
-figwig file is done in tens of milliseconds, and gained nothing past 8
-threads, so at 32 threads one or two bigWigs read as fast as the figwig
-file; at 6 to 96 tracks the figwig file stayed 1.7 to 2.5 times faster at
-32 threads. Reading into float32 costs up to a tenth over the tracks' own
-types, which are half or a quarter of the bytes.
+.. list-table::
+   :header-rows: 1
 
-The pattern of a PyTorch DataLoader worker, 32 batches of 64 windows read
-one after another on one thread, is where the figwig file gains most, since
-a batch of windows on a sparse track shares few bigWig blocks:
+   * - format, read
+     - 6 tracks
+     - 48 tracks
+     - 512 tracks
+     - 1,024 tracks
+   * - figwig file, position order
+     - 0.065 / 0.017 / 0.021
+     - 0.43 / 0.085 / 0.044
+     - 1.16 / 0.22 / 0.11
+     - 1.31 / 0.21 / 0.13
+   * - figwig file, track order
+     - 0.046 / 0.029 / 0.030
+     - 0.36 / 0.17 / 0.18
+     - 2.77 / 0.66 / 0.56
+     - 3.75 / 1.15 / 0.86
+   * - bigWigs, figwig
+     - 0.24 / 0.048 / 0.036
+     - 1.85 / 0.27 / 0.11
+     - 13.1 / 1.76 / 0.70
+     - 19.1 / 2.62 / 1.28
+   * - bigWigs, pybigtools
+     - 0.77 / 1.41 / 1.74
+     - 5.9 / 11.0 / 13.6
+     - 21 / 36 / 42
+     - 25 / 39 / 49
+   * - bigWigs, pyBigWig
+     - 2.23 / 2.56 / 2.75
+     - 17.5 / 20.0 / 21.7
+     - not run
+     - not run
+   * - zarr, zstd
+     - 1.95 / 2.25 / 2.61
+     - 8.1 / 4.0 / 3.7
+     - 46 / 15 / 12
+     - 55 / 18 / 15
+   * - HDF5, gzip 4
+     - 3.8 / 9.5 / 9.5
+     - 31 / 78 / 75
+     - 229 / 230 / 230
+     - 232 / 233 / 233
+   * - npy memmap, raw
+     - 0.26 / 0.15 / 0.20
+     - 0.90 / 0.43 / 0.48
+     - not run
+     - not run
 
-======  ============  =======
-tracks  bigWigs, f32  figwig 
-======  ============  =======
-1       0.128 s       0.019 s
-2       0.260 s       0.025 s
-6       0.544 s       0.043 s
-24      2.600 s       0.113 s
-96      10.814 s      0.415 s
-======  ============  =======
+.. list-table::
+   :header-rows: 1
 
-Sizes, and the conversions each way:
+   * - format, write, and size
+     - 6 tracks
+     - 48 tracks
+     - 512 tracks
+     - 1,024 tracks
+   * - figwig file, position order
+     - 1.8 / 1.1 / 1.5, 20 MB
+     - 14.7 / 8.0 / 7.9, 148 MB
+     - 172 / 82 / 82, 1.5 GB
+     - 342 / 167 / 169, 3.1 GB
+   * - figwig file, track order
+     - 3.3 / 2.6 / 3.1, 84 MB
+     - 23 / 24 / 25, 676 MB
+     - 248 / 255 / 235, 7.2 GB
+     - 551 / 575 / 520, 14.4 GB
+   * - bigWigs, figwig (with zoom levels)
+     - 5.9 / 2.6 / 2.6, 156 MB
+     - 47 / 21 / 20, 1.3 GB
+     - 504 / 221 / 211, 13.3 GB
+     - 1,020 / 454 / 421, 26.6 GB
+   * - bigWigs, pyBigWig (1 thread)
+     - 18.3, 193 MB
+     - 143, 1.5 GB
+     - not run
+     - not run
+   * - zarr, zstd
+     - 1.6 / 1.7 / 1.4, 33 MB
+     - 9.2 / 4.6 / 5.3, 267 MB
+     - 100 / 53 / 52, 2.8 GB
+     - 185 / 129 / 140, 5.7 GB
+   * - HDF5, gzip 4
+     - 6.2 / 6.4 / 6.5, 39 MB
+     - 52 / 52 / 53, 309 MB
+     - 604 / 603 / 617, 3.3 GB
+     - 1,320 / 1,210 / 1,250, 6.6 GB
+   * - npy memmap, raw
+     - 1.1 / 1.0 / 1.1, 3.0 GB
+     - 7.2 / 7.0 / 5.9, 23.9 GB
+     - not run
+     - not run
+
+.. image:: figures/format-scaling.png
+   :alt: Write and read time against threads for 1 to 1,024 count tracks in each format, log scales
+   :width: 100%
+
+The figwig file reads 10 times faster than the same tracks as bigWigs on
+one thread and 2 to 6 times on 32, and is 8 times smaller than bigWigs
+figwig writes; both of figwig's readers gain from threads, where
+pyBigWig, pybigtools and HDF5 get slower with more of them (a lock or the
+GIL) and zarr stops at about 4 times, its reads being one Python call per
+window. Track order is the faster of the two for a few tracks, where its
+raw blocks need no inflating, and position order past about 48. The
+figwig writer is the fastest of the compressed formats up to 128 tracks
+and 1.6 times slower than zarr at 512 and 1,024, where it stops gaining
+past 8 threads because sorting and the float64 buffer copies stay on the
+calling thread; the track-order writer encodes on the calling thread and
+does not gain at all. pyBigWig and pybigtools were not run at 512 tracks
+and above, nor the memmap, whose file would be 255 GB.
+
+Real experiments, 1 to 512 ENCODE tracks, over chr1:0-30 Mb
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+512 hg38 bigWigs sampled from the ChromBPNet collection on this machine,
+mostly float signal with 6 to 8 percent of bases nonzero (three sampled
+files held infinite values, which no figwig writer accepts, and the next
+candidates stood in), over the first 30 Mb of chr1 so that the dense
+forms fit the budget; the figwig file is one group at the defaults, zarr
+and HDF5 store float32. The same reads as above. Seconds at 1 / 8 / 32
+threads:
+
+.. list-table::
+   :header-rows: 1
+
+   * - format, read
+     - 8 tracks
+     - 128 tracks
+     - 512 tracks
+   * - figwig file, position order
+     - 0.18 / 0.034 / 0.022
+     - 3.07 / 0.46 / 0.33
+     - 8.7 / 1.15 / 0.56
+   * - figwig file, track order
+     - 0.066 / 0.032 / 0.030
+     - 0.94 / 0.48 / 0.39
+     - 2.59 / 1.14 / 0.79
+   * - bigWigs, figwig
+     - 0.21 / 0.048 / 0.048
+     - 3.81 / 0.72 / 0.80
+     - 7.1 / 1.50 / 1.62
+   * - bigWigs, pybigtools
+     - 0.68 / 1.01 / 1.43
+     - 10.9 / 14.3 / 19.9
+     - 24 / 19.5 / 25
+   * - bigWigs, pyBigWig
+     - 1.57 / 1.97 / 2.21
+     - not run
+     - not run
+   * - zarr, zstd
+     - 3.3 / 3.1 / 3.2
+     - 90 / 32 / 25
+     - 97 / 24 / 19
+   * - HDF5, gzip 4
+     - 1.8 / 17.8 / 32
+     - 533 / 538 / 539
+     - 534 / 536 / 539
+   * - npy memmap, raw
+     - 0.11 / 0.11 / 0.095
+     - not run
+     - not run
+
+.. list-table::
+   :header-rows: 1
+
+   * - format, write, and size
+     - 8 tracks
+     - 128 tracks
+     - 512 tracks
+   * - figwig file, position order
+     - 1.9 / 1.4 / 1.4, 44 MB
+     - 17.9 / 5.0 / 4.1, 1.0 GB
+     - 80 / 16.6 / 17.7, 4.2 GB
+   * - figwig file, track order
+     - 2.0 / 1.8 / 1.8, 113 MB
+     - 15.0 / 12.2 / 11.5, 2.5 GB
+     - 70 / 50 / 50, 11.1 GB
+   * - bigWigs, figwig (with zoom levels)
+     - 11.4 / 9.7 / 10.2, 79 MB
+     - 182 / 159 / 168, 1.7 GB
+     - 791 / 703 / 707, 7.1 GB
+   * - bigWigs, pyBigWig (1 thread)
+     - 21.1, 115 MB
+     - not run
+     - not run
+   * - zarr, zstd
+     - 1.8 / 1.5 / 1.6, 47 MB
+     - 9.9 / 4.8 / 4.5, 1.0 GB
+     - 40 / 21 / 30, 4.3 GB
+   * - HDF5, gzip 4
+     - 4.2 / 3.3 / 3.4, 50 MB
+     - 59 / 55 / 55, 1.1 GB
+     - 244 / 240 / 240, 4.5 GB
+   * - npy memmap, raw
+     - 1.6 / 0.33 / 0.37, 960 MB
+     - not run
+     - not run
+
+Dense float signal is the generic formats' best case and figwig's
+hardest: the figwig file is the size of zarr's and HDF5's here, and still
+reads 15 to 30 times faster than zarr and 500 times faster than HDF5 at
+128 tracks and above. Track order reads these dense tracks faster on one
+thread, since its blocks are raw, and the two orders meet at 32 threads.
+figwig's bigWig writer, with zoom levels, is 5 to 10 times slower than
+the figwig writer on dense signal.
+
+Conversions, genome-wide
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``benchmarks/compare_formats.py`` converted the six count tracks above,
+genome-wide this time, and the rolled copies past six, written as bigWigs
+by figwig: ``figwig bw2fw`` wrote the figwig file of each set in groups of
+8 tracks at a tile of 16,384 bases and level 6, and ``figwig fw2bw`` wrote
+it back, one run each, on tmpfs, at a load of 48 to 112:
 
 ======  ==========  ===========  =============================  =============================
 tracks  bigWigs     figwig file  ``bw2fw``, 1 / 8 / 32 threads  ``fw2bw``, 1 / 8 / 32 threads
@@ -230,15 +407,15 @@ tracks  bigWigs     figwig file  ``bw2fw``, 1 / 8 / 32 threads  ``fw2bw``, 1 / 8
 96      7,089.9 MB  3,555.3 MB   216.8 s / 68.6 s / 71.8 s      604.5 s / 302.2 s / 174.8 s  
 ======  ==========  ===========  =============================  =============================
 
-The six real tracks are 4.3 times smaller as a figwig file, most of the
-gain on the two ENCODE tracks written as bedGraph, 883 MB of the 971, and
-1.8 times smaller than the same tracks as bigWigs figwig writes; the
-rolled copies past six are bigWigs figwig wrote as varStep, and the figwig
-file is half their size. ``bw2fw`` reads each piece of a chromosome on a
-thread of its own while the writer encodes and compresses the piece before
-it on ``-p`` threads, and gained nothing past 8; ``fw2bw`` is bound by
-laying each track's windows out as bigWig sections, on one thread per
-track. ``figwig fw2bw`` wrote the six tracks back as 408 MB of bigWigs.
+The six real tracks are 4.3 times smaller as a figwig file than as
+ENCODE's bigWigs, most of the gain on the two ENCODE tracks written as
+bedGraph, 883 MB of the 971, and 1.8 times smaller than the same tracks
+as bigWigs figwig writes (408 MB); the rolled copies past six are bigWigs
+figwig wrote as varStep, and the figwig file is half their size.
+``bw2fw`` reads each piece of a chromosome on a thread of its own while
+the writer encodes and compresses the piece before it on ``-p`` threads,
+and gained nothing past 8; ``fw2bw`` is bound by laying each track's
+windows out as bigWig sections, on one thread per track.
 
 ``figwig bam2fw`` and ``figwig bam2bw`` converted the 2.4 GB ATAC-seq BAM
 ENCFF877LRY, on tmpfs, to one figwig file of two tracks and to two bigWigs:
@@ -359,102 +536,175 @@ file 3% smaller. The same tracks read in 100 bp bins over the whole of
 chr22 took 0.09 s from the small-tile file against 9.8 s for pyBigWig's
 ``stats``.
 
-Many tracks, sparse reads and the two orders
---------------------------------------------
-
-``benchmarks/compare_sparse.py`` times the ways of holding many tracks
-against each other: the N bigWigs with ``read_bigwig``; the figwig file in
-groups of 8 tracks that figwig 0.1 wrote ("groups of 8" below); and figwig
-files with every track in one group, compressed and uncompressed, and in
-track order, read densely, with ``sparse=True`` and with ``labels``. The
-tracks were the six count tracks above and the 96 of the previous section,
-on tmpfs, read as 8,192 windows of 2,114 bp on peak summits in one call on
-1 and 8 threads, and as 32 batches of 64 windows on one thread. Each
-configuration ran in its own process after a warm-up on 1,000 windows,
-opening included. Other jobs loaded the machine to between 34 and 126
-during these runs, and the tables give the lowest of three repetitions;
-every configuration of one set gave the same nonzero bases.
-
-======  =======================  ========  =========  =======================
-tracks  file and read            1 thread  8 threads  batches of 64, 1 thread
-======  =======================  ========  =========  =======================
-6       bigWigs                  0.907 s   0.170 s    0.544 s                
-6       groups of 8, dense       0.131 s   0.053 s    0.041 s                
-6       one group, dense         0.128 s   0.052 s    0.042 s                
-6       one group raw, dense     0.070 s   0.039 s    0.024 s                
-6       track order, dense       0.227 s   0.076 s    0.779 s                
-6       one group, sparse        0.259 s   0.144 s                           
-6       one group raw, sparse    0.216 s   0.173 s                           
-6       groups of 8, 2 labels    0.135 s   0.051 s    0.041 s                
-6       one group raw, 2 labels  0.077 s   0.051 s    0.024 s                
-96      bigWigs                  13.223 s  1.970 s    10.814 s               
-96      groups of 8, dense       1.351 s   0.429 s    0.404 s                
-96      one group, dense         1.052 s   0.242 s    0.260 s                
-96      one group raw, dense     0.585 s   0.177 s    0.137 s                
-96      track order, dense       3.339 s   0.886 s    10.573 s               
-96      groups of 8, sparse      2.161 s   1.082 s                           
-96      one group raw, sparse    1.156 s   0.594 s                           
-96      groups of 8, 6 labels    1.349 s   0.586 s    0.401 s                
-96      one group raw, 6 labels  0.482 s   0.130 s    0.126 s                
-======  =======================  ========  =========  =======================
-
-An uncompressed file in one group reads dense windows 1.9 to 2.3 times
-faster than the compressed groups of 8 on one thread, and sums 96 tracks
-into 6 labels 2.8 times faster, at 1.8 times the size (410 MB against 225
-for the six tracks, 6.5 GB against 3.6 for the 96); compressed, one group
-of 96 is 6% smaller than groups of 8 and 22% faster. Sums per label run a
-group's batches at a time, each into its own cells of the output, so they
-gain from threads as dense reads do. The sparse return is slower than the
-dense one on count tracks this dense, since it lists and sorts millions of
-entries (4.6 million for the six tracks), and is meant for tracks that are
-mostly zero. Track order reads windows across many tracks slowest, 10.6 s
-for the 96-track batches where one group takes 0.26 s, since every window
-searches a block of every track; it is the order for the single-cell reads
-below. The files: six tracks 225 MB in groups of 8 or one group
-compressed, 410 MB uncompressed, 961 MB in track order; 96 tracks 3,555,
-3,334, 6,538 and 15,369 MB. The bigWig rows are those of the previous
-section.
-
 Single cells
 ~~~~~~~~~~~~
 
-The same script on the 10,246 called cells of the 10x PBMC ATAC-seq
-experiment (``10k_pbmc_ATACv2_nextgem_Chromium_Controller``), 488 million
-Tn5 cut sites written with ``write_sparse`` as one uint8 track per cell,
-at a tile of 16,384 bases: in groups of 64 cells as figwig 0.1 would have
-laid them out, in one group compressed and uncompressed, and in track
-order. The reads were 512 windows of 2,114 bp: the cells summed into 10
-labels (pseudobulks), in one call and as 32 batches of 64 windows; every
-cell's nonzero bases with ``sparse=True``; 100 cells densely and sparsely;
-and the genome-wide cuts of 20 cells with ``read_entries``. No bigWigs:
-10,246 of them is not a layout anyone keeps. The lowest of three
-repetitions, and one build of each file on 8 threads; every configuration
-gave the same cuts.
+The 10,246 called cells of the 10x PBMC ATAC-seq experiment
+(``10k_pbmc_ATACv2_nextgem_Chromium_Controller``), 488 million Tn5 cut
+sites genome-wide, written with ``write_sparse`` as one uint8 track per
+cell in one group (the layout for cells), in track order, as one bigWig
+per cell with figwig's writer, and as a scipy CSR matrix of positions x
+cells per chromosome saved with ``save_npz`` and held in memory for the
+reads. 8,192 windows of 2,048 bases centred on K562 ATAC-seq peaks.
+Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
 
-=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
-file                   MB     build  10 labels, 1 / 8 thr  10 labels, 32 batches  sparse, all, 1 / 8  dense, 100 cells, 1 / 8  sparse, 100 cells  20 cells, genome
-=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
-groups of 64           1,928  88 s   0.92 / 0.67 s         1.03 s                 1.05 / 0.71 s       0.42 / 0.28 s            0.40 s             3.90 s          
-one group, compressed  1,255  56 s   0.13 / 0.05 s         0.17 s                 0.20 / 0.10 s       0.06 / 0.03 s            0.06 s             5.93 s          
-one group, raw         2,490  34 s   0.08 / 0.04 s         0.12 s                 0.14 / 0.09 s       0.03 / 0.03 s            0.03 s             0.85 s          
-track order            2,452  79 s   5.66 / 5.01 s         33.85 s                6.33 / 4.99 s       0.07 / 0.07 s            0.07 s             0.12 s          
-=====================  =====  =====  ====================  =====================  ==================  =======================  =================  ================
+.. list-table::
+   :header-rows: 1
 
-Every cell in one uncompressed group reads pseudobulks of 512 windows in
-0.08 s and its 32 batches in 0.12 s, 9 to 12 times faster than the groups
-of 64, whose chunks carry a count for every cell of the group in every
-tile and whose 161 groups each cost about 5 ms to open; the compressed
-one-group file is the smallest, 1.26 GB for 488 million cuts, at about
-twice the read time. A tile of cut sites whose nonzero values are all 1
-stores no values, which is why the uncompressed file is 2.5 GB for 488
-million cuts, about 5 bytes each with the index. Track order is 70 times
-slower for pseudobulks, since every window searches a block of each of
-10,246 cells, and 7 times faster than the uncompressed position order for
-20 cells' cuts over the genome, which position order answers by decoding
-every chunk; compressed position order takes 5.9 s for that. These reads
-gain little from threads, since a read of 512 windows is a few tens of
-milliseconds of decoding.
+   * - workload
+     - figwig, position order (1.0 GB)
+     - figwig, track order (2.4 GB)
+     - scipy CSR (16.3 GB, in memory)
+     - one bigWig per cell (1.4 GB)
+   * - write
+     - 68 / 37 / 36
+     - 71 / 72 / 91
+     - 10.6 / 11.4
+     - 116 / 78 / 82
+   * - 10 pseudobulks over the windows (``labels=``)
+     - 1.69 / 0.30 / 0.17
+     - 21.7 / 10.0 / refused
+     - 5.1 / 4.9
+     - 136 / 95 / 96
+   * - 128 cells dense over the windows
+     - 0.96 / 0.16 / 0.082
+     - 0.58 / 0.24 / 0.18
+     - 6.6 / 4.9
+     - 0.79 / 0.28 / 0.26
+   * - every cell's cut sites in 1,024 windows (``sparse=True``)
+     - 0.39 / 0.16 / 0.14
+     - 7.1 / 5.4 / 5.0
+     - 4.3 / 4.7
+     - not run
 
+Pseudobulks in the read are 30 times faster than from the sparse matrix
+and 500 times faster than from one bigWig per cell, and the file is a
+sixteenth of the matrix's size; a tile of cut sites whose nonzero values
+are all 1 stores no values. Track order sums 10,246 tracks one block task
+at a time, and at 16 and 32 threads its per-thread output copies pass the
+8 GiB guard, so it is refused there. The scipy writer only sorts and
+saves, and its 16 GB are loaded before any read.
+
+Reads as tracks
+~~~~~~~~~~~~~~~
+
+The m6A calls (probability at least 0.5) of the 90,543 reads of a K562
+Fiber-seq BAM, 49.6 million calls, one uint8 track per read with the
+read's name, span and strand as attributes, in position order in groups of
+1,024 consecutive reads (62 MB), in track order (226 MB), and as a scipy
+CSR matrix per chromosome (12.7 GB). Windows of 2,048 bases on reads.
+Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
+
+.. list-table::
+   :header-rows: 1
+
+   * - workload
+     - figwig, position order
+     - figwig, track order
+     - scipy CSR
+   * - write
+     - 4.0 / 2.6 / 2.7
+     - 6.5 / 9.1 / 10.6
+     - 6.8
+   * - sum over all reads, 8,192 windows (``labels=``)
+     - 0.42 / 0.43 / 0.42
+     - 15.7 / 15.8 / 16.0
+     - 3.8 / 4.0
+   * - calls of every read in 1,024 windows (``sparse=True``)
+     - 0.17 / 0.16 / 0.17
+     - 7.1 / 7.2 / 7.2
+     - 27 / 3.5
+   * - each read over its own span (``sums(paired=True)``)
+     - 2.7 / 2.7 / 2.7
+     - 9.6 / 9.7 / 9.6
+     - 5.8 / 6.8
+
+One group of every read is refused, since a chunk holds at most 2**29
+values, and a group per read made the sum over 8,192 windows take 230 s,
+each read paying a planning step per group; groups of consecutive reads
+are the layout. These reads do not gain from threads, since each touches
+few chunks and the work is the planning.
+
+To a GPU
+~~~~~~~~
+
+``gpu_bench.py`` timed six paths from a file to a CUDA tensor on an
+H200 NVL (PCIe), with ``torch.cuda.synchronize()`` before the clock
+stopped: the bigWigs read by pybigtools, by pyBigWig and by figwig, each
+followed by ``torch.from_numpy`` and ``.cuda()``; the figwig file read
+into a numpy array then ``.cuda()``; into a pinned torch buffer through
+``out=`` then ``.to("cuda", non_blocking=True)``; and with
+``device="cuda"`` then ``torch.from_dlpack``. A DataLoader batch of 64
+windows and the full reads above; the single-cell and Fiber-seq files on
+the figwig paths. Seconds at 1 / 8 / 32 threads (pybigtools and pyBigWig
+at 1 / 8, where they only get slower):
+
+.. list-table::
+   :header-rows: 1
+
+   * - path
+     - 6 tracks, batch of 64
+     - 48 tracks, batch of 64
+     - 48 tracks, 8,192 windows
+     - 512 tracks, 2,048 windows
+     - 128 of 10,246 cells, 8,192 windows
+     - 10 pseudobulks of 10,246 cells
+   * - bigWigs, pybigtools, ``.cuda()``
+     - 0.015 / 0.021
+     - 0.12 / 0.16
+     - 15.1 / 11.3
+     - 43 / 39
+     - not run
+     - not run
+   * - bigWigs, pyBigWig, ``.cuda()``
+     - 0.023 / 0.027
+     - 0.18 / 0.21
+     - 17.7 / 21.1
+     - not run
+     - not run
+     - not run
+   * - bigWigs, figwig, ``.cuda()``
+     - 0.016 / 0.0093 / 0.0099
+     - 0.13 / 0.030 / 0.035
+     - 2.0 / 0.37 / 0.21
+     - 13.1 / 2.1 / 1.14
+     - not run
+     - not run
+   * - figwig file, numpy, ``.cuda()``
+     - 0.00079 / 0.00079 / 0.00078
+     - 0.0048 / 0.0047 / 0.0049
+     - 0.65 / 0.21 / 0.14
+     - 1.67 / 1.56 / 0.36
+     - 1.21 / 0.41 / 0.33
+     - 1.70 / 0.31 / 0.20
+   * - figwig file, pinned ``out=``, ``non_blocking``
+     - 0.00075 / 0.00074 / 0.00074
+     - 0.0043 / 0.0043 / 0.0043
+     - 0.51 / 0.13 / 0.10
+     - 1.47 / 0.35 / 0.26
+     - 0.88 / 0.30 / 0.25
+     - 1.67 / 0.30 / 0.19
+   * - figwig file, ``device="cuda"``, ``from_dlpack``
+     - 0.00081 / 0.00078 / 0.00077
+     - 0.0045 / 0.0043 / 0.0043
+     - 0.50 / 0.14 / 0.10
+     - 1.34 / 0.36 / 0.30
+     - 0.68 / 0.099 / 0.048
+     - 1.69 / 0.30 / 0.19
+
+.. image:: figures/gpu-loading.png
+   :alt: Time to a CUDA tensor against threads for each path and dataset, log scales
+   :width: 100%
+
+For a DataLoader batch the figwig file reaches the GPU in a millisecond
+for 6 tracks and 4 ms for 48, 15 to 40 times ahead of the bigWig readers,
+and the three figwig paths are the same there since a batch's transfer is
+small. For full reads the transfer is the large part: 3.2 GB of 48 tracks
+reaches the GPU in 0.10 s through the pinned buffer against 0.14 s
+through a pageable numpy array. ``device="cuda"`` matches the pinned path
+where it copies, and wins by 5 times where it scatters: 128 of 10,246
+cells over 8,192 windows arrive in 0.048 s against 0.25 s, since the bus
+carries 0.002 percent of the bases as entries instead of 8.6 GB of zeros.
 
 Thread scaling
 --------------

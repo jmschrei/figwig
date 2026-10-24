@@ -34,7 +34,9 @@ integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
 | Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
 | Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
 | Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
-| Read 8,192 windows of 2,114 bp from 6 count tracks | **0.051 s** on 8 threads, from one figwig file | 0.170 s from 6 bigWigs, figwig |
+| Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
+| A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
+| 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
@@ -111,18 +113,27 @@ counted while still reading a BAM. On the 10 GB BAM at `-p 1` its peak is now
 
 #### figwig files
 
-8,192 windows of 2,114 bp centred on K562 ATAC-seq IDR peak summits, read
-from N genome-wide count tracks on tmpfs as N bigWigs with `read_bigwig` and
-as one figwig file with `FigWigReader.read`, in one call and in 32 batches of
-64 windows on one thread; median of three, opening included. The six real
-tracks are 971 MB as bigWigs and 225 MB as a figwig file.
+8,192 random windows of 2,048 bp over chr1 (2,048 windows at 512 tracks),
+read from N count tracks on tmpfs into float32, seconds at 1 / 8 / 32
+threads; the tracks are the six count tracks of the examples and copies of
+them rolled by a seeded offset. Every reader returned the same bytes. The
+[benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html)
+has writes, sizes, real ENCODE signal tracks, single cells, reads as
+tracks and the time to a CUDA tensor.
 
-| tracks | bigWigs, 1 thread | figwig, 1 thread | bigWigs, 8 threads | figwig, 8 threads | bigWigs, batches | figwig, batches |
-|---|---|---|---|---|---|---|
-| 1 | 0.197 s | **0.041 s** | 0.040 s | **0.032 s** | 0.128 s | **0.019 s** |
-| 6 | 0.907 s | **0.130 s** | 0.170 s | **0.051 s** | 0.544 s | **0.043 s** |
-| 24 | 3.419 s | **0.367 s** | 0.521 s | **0.116 s** | 2.600 s | **0.113 s** |
-| 96 | 13.223 s | **1.369 s** | 1.970 s | **0.443 s** | 10.814 s | **0.415 s** |
+| format | 6 tracks | 48 tracks | 512 tracks |
+|---|---|---|---|
+| figwig file, position order | **0.065 / 0.017 / 0.021 s** | **0.43 / 0.085 / 0.044 s** | **1.16 / 0.22 / 0.11 s** |
+| figwig file, track order | 0.046 / 0.029 / 0.030 s | 0.36 / 0.17 / 0.18 s | 2.77 / 0.66 / 0.56 s |
+| bigWigs, figwig | 0.24 / 0.048 / 0.036 s | 1.85 / 0.27 / 0.11 s | 13.1 / 1.76 / 0.70 s |
+| bigWigs, pybigtools | 0.77 / 1.41 / 1.74 s | 5.9 / 11.0 / 13.6 s | 21 / 36 / 42 s |
+| bigWigs, pyBigWig | 2.23 / 2.56 / 2.75 s | 17.5 / 20.0 / 21.7 s | not run |
+| zarr, zstd | 1.95 / 2.25 / 2.61 s | 8.1 / 4.0 / 3.7 s | 46 / 15 / 12 s |
+| HDF5, gzip 4 | 3.8 / 9.5 / 9.5 s | 31 / 78 / 75 s | 229 / 230 / 230 s |
+
+The 48 tracks are 148 MB as a figwig file, 1.3 GB as bigWigs figwig writes,
+267 MB as zarr and 309 MB as HDF5; genome-wide, the six real tracks are
+971 MB as ENCODE's bigWigs and 225 MB as a figwig file.
 
 #### Threads
 
