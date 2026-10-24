@@ -3,7 +3,7 @@
 
 """Reads of a figwig file onto a GPU, through CuPy.
 
-`read_on_device` runs a read on the CPU and lands its output in device
+`_read_on_device` runs a read on the CPU and lands its output in device
 memory as a `cupy.ndarray`, which PyTorch, JAX, TensorFlow and CuPy take
 without a copy through DLPack (`torch.from_dlpack(y)`,
 `jax.dlpack.from_dlpack(y)`, `tf.experimental.dlpack.from_dlpack(
@@ -95,7 +95,7 @@ def _copy_in(cupy, host, out, stream):
 	return out
 
 
-def read_on_device(reader, device, chroms, starts, width, tracks, out, dtype,
+def _read_on_device(reader, device, chroms, starts, width, tracks, out, dtype,
 	n_jobs, sparse, labels, bins, stops, nan):
 	"""`FigWigReader.read` or `sums` with its output on `device`."""
 

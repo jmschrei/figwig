@@ -2955,8 +2955,8 @@ class FigWigReader:
 		"""
 
 		if device is not None:
-			from ._cuda import read_on_device
-			return read_on_device(self, device, chroms, starts, width, tracks, out,
+			from ._cuda import _read_on_device
+			return _read_on_device(self, device, chroms, starts, width, tracks, out,
 				dtype, n_jobs, sparse, labels, bins, None, nan)
 		return self._read(chroms, starts, width, tracks, out, dtype, n_jobs,
 			sparse, labels, bins, None, nan)
@@ -3036,8 +3036,8 @@ class FigWigReader:
 			return sums
 		width = int((ends - starts).max()) if len(starts) else 1
 		if device is not None:
-			from ._cuda import read_on_device
-			return read_on_device(self, device, chroms, starts, max(width, 1),
+			from ._cuda import _read_on_device
+			return _read_on_device(self, device, chroms, starts, max(width, 1),
 				tracks, None, dtype, n_jobs, False, None, max(width, 1), ends,
 				nan)[..., 0]
 		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
