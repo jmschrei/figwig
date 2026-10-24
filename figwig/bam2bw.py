@@ -56,12 +56,9 @@ from .writer import BigWigWriter
 _REQUIRED = 'pysam', 'isal', 'deflate'
 
 
-def _parser(prog):
-	"""bam2bw's command line, as `prog`."""
-
-	parser = argparse.ArgumentParser(
-		prog=prog,
-		description='This tool will convert BAM files to bigwig files without an intermediate.')
+def _input_arguments(parser):
+	"""Add the arguments that say what to count, which `figwig bam2bw` and
+	`figwig bam2fw` share, to `parser`."""
 
 	# Python 3.14's argparse takes any argument that starts with '-' and a
 	# digit to be a negative number, so it counts -3p as an option that looks
@@ -114,6 +111,15 @@ def _parser(prog):
 		help="""A scaling factor to multiply each position by.""")
 	parser.add_argument('-r', '--read_depth', default=False, action='store_true',
 		help="""Whether to divide through by total (pre-scaled) read depth.""")
+
+
+def _parser(prog):
+	"""bam2bw's command line, as `prog`."""
+
+	parser = argparse.ArgumentParser(
+		prog=prog,
+		description='This tool will convert BAM files to bigwig files without an intermediate.')
+	_input_arguments(parser)
 
 	# Misc arguments
 

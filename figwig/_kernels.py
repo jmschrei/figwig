@@ -23,8 +23,10 @@ _ZLIB_UNCOMPRESS = []
 _ZLIB_COMPRESS = []
 
 # libdeflate's compressor functions through ctypes, from the `deflate`
-# package, loaded on the first write that uses them.
+# package, loaded on the first write that uses them, and its decompressor
+# functions, loaded on the first figwig read.
 _LIBDEFLATE = []
+_LIBDEFLATE_INFLATE = []
 
 # The names zlib's shared library goes by on Linux, macOS and Windows, tried
 # in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
@@ -165,6 +167,48 @@ def _load_libdeflate():
 	free.argtypes = [ctypes.c_size_t]
 	free.restype = None
 	return alloc, compress, free
+
+
+def _libdeflate_inflate():
+	"""libdeflate's (alloc_decompressor, zlib_decompress, free_decompressor)
+	as ctypes functions, or None if the `deflate` package is not installed
+	or its library does not export them.
+
+	`_inflate_chunks_libdeflate` calls `zlib_decompress` without the GIL;
+	it inflates a stream about twice as fast as zlib's uncompress(). A
+	decompressor is passed to it as an integer, as a compressor is to
+	`zlib_compress`.
+	"""
+
+	if len(_LIBDEFLATE_INFLATE) == 0:
+		_LIBDEFLATE_INFLATE.append(_load_libdeflate_inflate())
+
+	return _LIBDEFLATE_INFLATE[0]
+
+
+def _load_libdeflate_inflate():
+	try:
+		import ctypes
+		import deflate._deflate
+	except ImportError:
+		return None
+
+	try:
+		library = ctypes.CDLL(deflate._deflate.__file__)
+		alloc = library.libdeflate_alloc_decompressor
+		decompress = library.libdeflate_zlib_decompress
+		free = library.libdeflate_free_decompressor
+	except (OSError, AttributeError):
+		return None
+
+	alloc.argtypes = []
+	alloc.restype = ctypes.c_size_t
+	decompress.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_size_t,
+		ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+	decompress.restype = ctypes.c_int
+	free.argtypes = [ctypes.c_size_t]
+	free.restype = None
+	return alloc, decompress, free
 
 
 @numba.njit(nogil=True, cache=True)
@@ -678,7 +722,8 @@ def _check_block(words, begin, end, chrom, base_start, base_end):
 
 
 @numba.njit(nogil=True, cache=True)
-def _read_windows(words, blocks, windows, out, signal, failed, missing):
+def _read_windows(words, blocks, windows, out, signal, failed, missing,
+	keep_nan):
 	"""Write the per-base values of bigWig windows into rows of `out`.
 
 	`words` holds decompressed data blocks, one after another, as 32-bit
@@ -692,7 +737,7 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing):
 	Each base of a window is given the value of the item that covers it,
 	`missing`, a float32, when no item does, and NaN past the end of the
 	chromosome. Items with a NaN value are skipped, so their bases are
-	`missing`. A window is not written, and is marked in `failed`, when one
+	`missing`, or NaN with `keep_nan`. A window is not written, and is marked in `failed`, when one
 	of its blocks fails `_check_block` or has an item that overlaps an item
 	of an earlier block. A window's blocks are consecutive in the index, so
 	comparing each block's first item with the furthest end of the blocks
@@ -788,7 +833,7 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing):
 					if item_start >= end:
 						break
 
-					if not numpy.isnan(value):
+					if keep_nan or not numpy.isnan(value):
 						for p in range(max(item_start, start) - start,
 								min(item_end, end) - start):
 							out[row, signal, p] = value
@@ -796,3 +841,23 @@ def _read_windows(words, blocks, windows, out, signal, failed, missing):
 					i += 1
 
 				offset = item + count * size
+
+
+_LIBC_PREAD = []
+
+
+def _libc_pread():
+	"""libc's pread() as a ctypes function, for `_pread_runs` to call
+	without the GIL, or None where there is none (Windows)."""
+
+	if not _LIBC_PREAD:
+		import ctypes
+		try:
+			function = ctypes.CDLL(None).pread
+			function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t,
+				ctypes.c_int64]
+			function.restype = ctypes.c_ssize_t
+			_LIBC_PREAD.append(function)
+		except (OSError, AttributeError, TypeError):
+			_LIBC_PREAD.append(None)
+	return _LIBC_PREAD[0]

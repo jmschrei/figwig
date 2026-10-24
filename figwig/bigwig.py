@@ -281,8 +281,17 @@ class BigWigReader:
 
 		if (leaves['end_chrom'] != leaves['start_chrom']).any():
 			raise ValueError(error + ": a data block spans two chromosomes.")
-		if (ends < starts).any() or (starts[1:] < starts[:-1]).any() or \
-				(ends[1:] < ends[:-1]).any():
+		if (ends < starts).any():
+			raise ValueError(error + ": a data block ends before it starts.")
+
+		# Some writers lay the blocks of chr1, chr2, ... chr10 out in that order
+		# while the chromosome ids run chr1, chr10, chr2, so the leaves are put
+		# in id order here; the blocks of one chromosome must still be sorted.
+		if (starts[1:] < starts[:-1]).any():
+			order = numpy.argsort(starts, kind='stable')
+			leaves, chroms, starts, ends = leaves[order], chroms[order], \
+				starts[order], ends[order]
+		if (ends[1:] < ends[:-1]).any():
 			raise ValueError(error + ": its data blocks are unsorted.")
 
 		return {'starts': starts, 'ends': ends, 'chroms': chroms,
@@ -300,7 +309,8 @@ class BigWigReader:
 
 	def read(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, width: int, out: numpy.ndarray | None = None,
-		n_jobs: int = 8, missing: float = 0.0) -> numpy.ndarray:
+		n_jobs: int = 8, missing: float = 0.0, keep_nan: bool = False
+		) -> numpy.ndarray:
 		"""Read the per-base values of many windows of one width.
 
 		Window j covers [starts[j], starts[j] + width) on chroms[j], and its
@@ -344,6 +354,10 @@ class BigWigReader:
 			numpy.nan to tell these bases apart from a measured 0, as
 			pyBigWig's `values()` does. Default is 0.0.
 
+		keep_nan: bool, optional
+			Whether a base that an interval whose value is NaN covers is NaN,
+			as pyBigWig gives it, rather than `missing`. Default is False.
+
 
 		Returns
 		-------
@@ -353,7 +367,8 @@ class BigWigReader:
 			end of the chromosome.
 		"""
 
-		return _read([self], True, chroms, starts, width, out, n_jobs, missing)
+		return _read([self], True, chroms, starts, width, out, n_jobs, missing,
+			keep_nan)
 
 	def _warn_absent(self, windows, missing, stacklevel):
 		"""Warn about windows on chromosomes the file does not have.
@@ -522,7 +537,8 @@ class _Windows:
 
 		starts = numpy.asarray(starts)
 		if starts.ndim != 1:
-			raise ValueError("starts must be one-dimensional.")
+			raise ValueError("starts must be one-dimensional: give one per window, "
+				"as a list or array.")
 		if starts.dtype.kind not in 'iu' and len(starts) > 0:
 			raise TypeError("starts must be integers, not {}.".format(starts.dtype))
 
@@ -567,9 +583,10 @@ class _Read:
 	is no end past which their bases would be NaN.
 	"""
 
-	def __init__(self, bigwig, windows, out, signal, missing):
+	def __init__(self, bigwig, windows, out, signal, missing, keep_nan=False):
 		self.bigwig, self.windows = bigwig, windows
 		self.out, self.signal, self.missing = out, signal, missing
+		self.keep_nan = keep_nan
 
 		index = bigwig._get_index()
 		names, codes, starts = windows.names, windows.codes, windows.starts
@@ -632,7 +649,7 @@ class _Read:
 		local = self.rows[w0:w1].copy()
 		local[:, :2] -= b0
 		_read_windows(words, blocks, local, self.out, self.signal,
-			self.failed[w0:w1], self.missing)
+			self.failed[w0:w1], self.missing, self.keep_nan)
 
 	def finish(self):
 		if self.failed.any():
@@ -645,7 +662,8 @@ class _Read:
 				self.windows.describe(j)))
 
 
-def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
+def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing,
+	keep_nan=False):
 	"""Read windows from one or more open bigWigs into one array.
 
 	With `single`, `bigwigs` holds one BigWigReader and the output has shape
@@ -679,7 +697,7 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing):
 		bigwig._warn_absent(windows, missing, stacklevel=3)
 
 	out3 = out.reshape(n, 1, width) if single else out
-	_run([_Read(bigwig, windows, out3, i, missing) for i, bigwig in
+	_run([_Read(bigwig, windows, out3, i, missing, keep_nan) for i, bigwig in
 		enumerate(bigwigs)], n_jobs)
 	return out
 
@@ -729,7 +747,7 @@ def _run(reads, n_jobs):
 def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
 	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
-	missing: float = 0.0) -> numpy.ndarray:
+	missing: float = 0.0, keep_nan: bool = False) -> numpy.ndarray:
 	"""Read the per-base values of many windows of one width from bigWigs.
 
 	Given one bigWig, this reads the windows as `BigWigReader.read` does, into
@@ -779,6 +797,10 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 		The value of a base that no interval covers, and of every base of a
 		window on a chromosome a file does not have. Default is 0.0.
 
+	keep_nan: bool, optional
+		Whether a base that an interval whose value is NaN covers is NaN
+		rather than `missing`; see `BigWigReader.read`. Default is False.
+
 
 	Returns
 	-------
@@ -799,4 +821,5 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 
 	files = [bigwig if isinstance(bigwig, BigWigReader) else BigWigReader(
 		bigwig) for bigwig in files]
-	return _read(files, single, chroms, starts, width, out, n_jobs, missing)
+	return _read(files, single, chroms, starts, width, out, n_jobs, missing,
+		keep_nan)

@@ -22,12 +22,21 @@ of fragments, into bigWigs of per-base counts. It is
 [bam2bw](https://github.com/jmschrei/bam2bw) with the same arguments, outputs
 and messages, with faster readers. figwig depends only on numpy and numba.
 
+figwig also defines its own file format, the figwig file, which holds any
+number of per-base tracks over one genome with a JSON record of attributes
+for each, and reads windows from any subset of them in one call, as
+integers, into `(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and
+`bam2fw` convert bigWigs and reads to and from it.
+
 | | figwig | fastest other tool |
 |---|---|---|
 | Read 167,750 windows of 1,000 bp from an ATAC-seq bigWig | **0.135 s** on 8 threads | 1.25 s, pybigtools |
 | Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
 | Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
 | Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
+| Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
+| A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
+| 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
@@ -102,6 +111,30 @@ The memory runs were made before figwig bam2bw dropped the keys it had
 counted while still reading a BAM. On the 10 GB BAM at `-p 1` its peak is now
 2.9 GB, against bam2bw's 11.6 GB, and 4.9 GB with `-u -f`, against 20.2 GB.
 
+#### figwig files
+
+8,192 random windows of 2,048 bp over chr1 (2,048 windows at 512 tracks),
+read from N count tracks on tmpfs into float32, seconds at 1 / 8 / 32
+threads; the tracks are the six count tracks of the examples and copies of
+them rolled by a seeded offset. Every reader returned the same bytes. The
+[benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html)
+has writes, sizes, real ENCODE signal tracks, single cells, reads as
+tracks and the time to a CUDA tensor.
+
+| format | 6 tracks | 48 tracks | 512 tracks |
+|---|---|---|---|
+| figwig file, position order | **0.065 / 0.017 / 0.021 s** | **0.43 / 0.085 / 0.044 s** | **1.16 / 0.22 / 0.11 s** |
+| figwig file, track order | 0.046 / 0.029 / 0.030 s | 0.36 / 0.17 / 0.18 s | 2.77 / 0.66 / 0.56 s |
+| bigWigs, figwig | 0.24 / 0.048 / 0.036 s | 1.85 / 0.27 / 0.11 s | 13.1 / 1.76 / 0.70 s |
+| bigWigs, pybigtools | 0.77 / 1.41 / 1.74 s | 5.9 / 11.0 / 13.6 s | 21 / 36 / 42 s |
+| bigWigs, pyBigWig | 2.23 / 2.56 / 2.75 s | 17.5 / 20.0 / 21.7 s | not run |
+| zarr, zstd | 1.95 / 2.25 / 2.61 s | 8.1 / 4.0 / 3.7 s | 46 / 15 / 12 s |
+| HDF5, gzip 4 | 3.8 / 9.5 / 9.5 s | 31 / 78 / 75 s | 229 / 230 / 230 s |
+
+The 48 tracks are 148 MB as a figwig file, 1.3 GB as bigWigs figwig writes,
+267 MB as zarr and 309 MB as HDF5; genome-wide, the six real tracks are
+971 MB as ENCODE's bigWigs and 225 MB as a figwig file.
+
 #### Threads
 
 The same reads, writes and conversions at 1 to 32 threads, one run at a time,
@@ -132,10 +165,15 @@ Optional extras:
 - `figwig[bam2bw]` adds pysam, pyfaidx, biopython, tqdm, isal and deflate,
   which `figwig bam2bw` needs. `figwig bam2bw` runs on Linux and macOS, since
   pysam does not support Windows.
+- `figwig[cuda]` adds cupy (for CUDA 12; install `cupy-cuda13x` or
+  `cupy-cuda11x` otherwise), with which `FigWigReader.read(..., device="cuda")`
+  lands windows in GPU memory, for `torch.from_dlpack` and its JAX and
+  TensorFlow equivalents.
 
 ```bash
 pip install "figwig[fast]"
 pip install "figwig[bam2bw]"
+pip install "figwig[cuda]"
 ```
 
 ### Development install
@@ -262,6 +300,61 @@ batch at a time. Each call's items come after the last call's, in the order
 of `chrom_sizes`. The header, index and zoom levels are written when the
 writer is closed.
 
+#### Reading and writing figwig files
+
+```python
+import numpy
+from figwig import FigWigReader
+from figwig import FigWigWriter
+
+chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
+tracks = [
+    {"name": "atac.+", "assay": "ATAC-seq", "strand": "+"},
+    {"name": "atac.-", "assay": "ATAC-seq", "strand": "-"},
+]
+counts = numpy.random.default_rng(0).poisson(0.1, (3, 2, 2114))
+chroms = numpy.array(["chr2", "chr1", "chr1"])
+starts = numpy.array([300_000, 2_500_000, 1_000_000])
+
+with FigWigWriter("example.fw", chrom_sizes, tracks, genome="hg38") as fw:
+    fw.write(chroms, starts, counts)
+
+fw = FigWigReader("example.fw")
+y = fw.read(chroms, starts, width=2114, tracks=fw.select(strand="+"))
+print(y.shape, y.dtype, numpy.array_equal(y[:, 0], counts[:, 0]))
+# (3, 1, 2114) uint8 True
+```
+
+A figwig file holds many tracks over one genome, each with attributes that
+`select` matches, and is read like a bigWig: many windows of one width in one
+call, from any subset of the tracks, into `(windows, tracks, width)` in the
+tracks' own dtype, or as a sparse list of nonzero bases with `sparse=True`,
+summed per label with `labels=`, or summed per bin of each window with
+`bins=`, and `sums` gives each track's total over intervals of any
+lengths, such as peaks or genes, or over thousands of cells at once, with
+`nan=` for means over the bases a track covers; `device="cuda"` lands any
+of these in GPU memory, where `torch.from_dlpack` takes them without a
+copy. It is written in position order, tiles
+across tracks, for reading
+windows across many tracks, or in track order for reading a few tracks over
+the genome, and `write_sparse` takes nonzero bases as entries, such as the
+cut sites of single cells. `fw.tracks`, `fw.stats` and `fw.chrom_sizes`
+say what a file holds, as `figwig info` does from the shell; the first
+read in a fresh environment compiles its kernels for about 27 s, and later
+processes load them in a tenth of a second. A base no track wrote is 0,
+as is a bigWig's no-data unless `bw2fw --missing nan` keeps them apart;
+`tile_sums` gives each track's sum per tile without decoding a chunk, and
+per bin of a zoom level when the file was written with `zooms=`; `read(...,
+channels="channel", items="read")` arranges tracks such as Fiber-seq reads'
+calls into `(windows, reads, channels, width)`; and `figwig
+reorder` rewrites a file in the other order. Each chunk of a group's tiles is stored densely,
+as nonzero bases, as runs of one value or as a matrix of the tracks present,
+whichever is smallest, in the narrowest type that holds it exactly. Six
+genome-wide count tracks that take 971 MB as bigWigs take 225 MB as one
+figwig file. The
+[figwig files](https://figwig.readthedocs.io/en/latest/figwig.html) guide
+covers the format, its layout, the API and the converters.
+
 The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
 and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides
 cover the rest: values and coordinates, chromosomes a file does not have,
@@ -346,6 +439,27 @@ options:
 ```
 
 </details>
+
+#### figwig bw2fw, fw2bw and bam2fw
+
+```bash
+figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> k562.fw
+figwig fw2bw k562.fw -o bigwigs -p 8 --select assay=ATAC-seq                      # tracks -> bigwigs/<name>.bw
+figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8          # reads -> k562.fw
+figwig info k562.fw                                                              # what the file holds
+```
+
+`figwig bw2fw` writes bigWigs as the tracks of one figwig file, named after
+their files or by a metadata table (tab-separated, its first column the
+file) whose other columns become the tracks'
+attributes, or adds them to a file with `--append`; `figwig fw2bw` writes a
+figwig file's tracks back as bigWigs with such a table; `figwig merge`
+copies several files' tracks into one; `figwig info` prints a file's
+tracks, attributes and statistics; and `figwig bam2fw` takes `figwig
+bam2bw`'s arguments and
+writes each input file as its own pair of stranded tracks. The
+[converters](https://figwig.readthedocs.io/en/latest/converters.html) page
+has the options.
 
 #### figwig install-skill
 

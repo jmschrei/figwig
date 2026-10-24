@@ -9,7 +9,9 @@ in one call, straight into a float32 numpy array, from one bigWig or from
 several at once, and writes bigWigs from the same windows, from intervals, or
 from per-base counts. Its command, :doc:`figwig bam2bw <bam2bw>`, turns
 SAM/BAM files of reads, or BED/tsv files of fragments, into bigWigs of
-per-base counts. The work runs on threads that run in parallel, because
+per-base counts, and its own :doc:`figwig file <figwig>` holds many tracks
+in one file, read across tracks in one call. The work runs on threads
+that run in parallel, because
 zlib's ``uncompress()`` and ``compress2()``, libdeflate and figwig's numba
 kernels all run without the GIL. It depends only on numpy and numba. A file
 it cannot read with certainty raises a ``ValueError`` that says what it found,
@@ -78,12 +80,15 @@ It needs Python 3.10 or later, numpy 1.23 or later, and numba 0.58 or later.
 To write faster with libdeflate, install the ``fast`` extra, which adds the
 ``deflate`` package, and for ``figwig bam2bw``, the ``bam2bw`` extra, which
 adds pysam, pyfaidx, biopython, tqdm, isal and deflate. ``figwig bam2bw`` runs
-on Linux and macOS, since pysam does not support Windows:
+on Linux and macOS, since pysam does not support Windows. To read figwig
+files onto a GPU (``device="cuda"``), the ``cuda`` extra adds cupy for CUDA
+12 (``cupy-cuda13x`` or ``cupy-cuda11x`` for CUDA 13 or 11):
 
 .. code-block:: bash
 
     pip install "figwig[fast]"
     pip install "figwig[bam2bw]"
+    pip install "figwig[cuda]"
 
 Development install
 -------------------
@@ -130,6 +135,7 @@ uninstalled.
 
    reading
    writing
+   figwig
    threads
    benchmarks
 
@@ -138,6 +144,7 @@ uninstalled.
    :caption: Command line
 
    bam2bw
+   converters
 
 .. toctree::
    :maxdepth: 1
@@ -145,3 +152,4 @@ uninstalled.
 
    api/bigwig
    api/writer
+   api/figwig

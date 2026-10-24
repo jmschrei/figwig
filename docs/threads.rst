@@ -40,10 +40,30 @@ once, 8 to 32 threads are where the gains were; on the full set of 167,750
 windows, 8 threads were 6.1 times faster than one, and 32 were 11 times
 faster.
 
+A figwig file is read the same way, in batches of chunks on up to
+``n_jobs`` threads, each batch read with one ``pread`` per run of adjacent
+chunks and inflated by libdeflate, or by zlib where the ``deflate`` package
+is not installed. A read uses one thread per 64 chunks it touches, up to
+``n_jobs``, since a read of a few dozen windows is done in under a
+millisecond and gains nothing from waking threads, and keeps its threads
+between reads; windows packed into a few tiles are cut over the threads by
+window rather than by chunk. On the six-track file of :doc:`benchmarks`,
+8,192 windows took 0.13 s on one thread and 0.051 s on 8, and nothing more
+was gained past 8. Sums per label and per bin run a group's batches at a
+time, each writing its own cells of the output, so they take no copy of
+the output per thread in position order; in track order they do, one per
+thread, which the 8 GiB guard counts.
+
 Writing
 -------
 
-A writer lays out values on the calling thread in batches of about a million
+A ``FigWigWriter`` encodes whole tiles that a ``write`` call's windows cover
+on its pool and partial tiles on the calling thread, compresses on the
+pool, and holds about 0.5 GB plus two to three times the call's values, so
+a call of a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
+each piece of a chromosome on one thread while the writer takes the last,
+and ``-p 8`` is where it stops gaining. A bigWig writer lays out values on
+the calling thread in batches of about a million
 items, and compresses each batch's data blocks on up to ``n_jobs`` other
 threads while it lays out the next one. With libdeflate, the calling thread
 becomes the limit: writing 15.9 million per-base counts took 1.07 s on one
@@ -103,12 +123,23 @@ The first call
 --------------
 
 The first read in a new environment compiles figwig's numba kernels, which
-took 0.7 s on the machine above, and 1.1 s for ``figwig bam2bw``. numba
-caches them on disk, next to the installed package, or in the user's cache
-directory when the package directory cannot be written, and later processes
-load them in well under a second. Warm up with a small read before timing
-figwig. One ``BigWigReader`` can be read from several threads at once, and
-holds no open file between reads.
+took 0.7 s for the bigWig reader on the machine above, and 1.1 s for
+``figwig bam2bw``. A figwig file's kernels are larger, and compiled once per
+element type of a chunk: the first dense read compiled for 27 s, the first
+sparse read for 21 s more, the first read into another output dtype for
+12 s (14 s for a uint8 track alone, 15 s for an int32 output), the first
+sum per label or per bin for 11 s, the first ``read_entries`` for 9 s,
+the first track-order read for 12 s and the first write for 8 s, about
+120 s in all for a process that reads and writes every way, each with no
+output while it compiles. numba caches them on
+disk, next to the installed package,
+or in the user's cache directory when the package directory cannot be
+written, and later processes load them in a tenth of a second. Warm up with
+a small read before timing figwig, and before starting DataLoader workers
+under ``spawn``, each of which loads the cache. One ``BigWigReader`` or
+``FigWigReader`` can be read from several threads at once, and holds no
+open file between reads; a ``FigWigReader`` keeps each group's index, 17
+bytes per tile of the genome, from the first read that touches it.
 
 Platforms
 ---------

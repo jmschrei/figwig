@@ -123,9 +123,14 @@ def test_special_values(tmp_path):
 	X = BigWigReader(path).read('chr1', starts, 25)
 	assert_identical(X, reference(str(path), 'chr1', starts, 25))
 
-	# An interval whose value is NaN covers nothing, so its bases are 0.
+	# An interval whose value is NaN covers nothing, so its bases are 0,
+	# unless keep_nan asks for the NaN.
 	numpy.testing.assert_array_equal(BigWigReader(path).read('chr1', [0], 5)[0],
 		0)
+	assert numpy.isnan(BigWigReader(path).read('chr1', [0], 5, keep_nan=True)[
+		0]).all()
+	assert numpy.isnan(read_bigwig([path, path], 'chr1', [0], 5,
+		keep_nan=True)).all()
 	assert numpy.signbit(BigWigReader(path).read('chr1', [30], 1)[0, 0])
 
 
@@ -921,12 +926,35 @@ def test_corrupt_files_raise_only_value_errors(tmp_path):
 
 
 def test_unsorted_index_raises(tmp_path):
+	"""Blocks out of order are put in order by their starts; blocks whose
+	ends are then out of order, one block inside another, are refused."""
+
 	path = str(tmp_path / 'index.bw')
 	write_raw_bigwig(path, {'chr1': 10_000}, [_bedgraph('chr1', 5000, [(0, 5, 1.0)]),
 		_bedgraph('chr1', 100, [(0, 5, 2.0)])])
+	y = BigWigReader(path).read('chr1', [100, 5000], 10)
+	assert y[0, 0] == 2 and y[1, 0] == 1
 
+	write_raw_bigwig(path, {'chr1': 10_000}, [_bedgraph('chr1', 0, [(0, 500, 1.0)]),
+		_bedgraph('chr1', 100, [(0, 5, 2.0)])])
 	with pytest.raises(ValueError, match='its data blocks are unsorted'):
 		BigWigReader(path).read('chr1', [0], 10)
+
+
+def test_blocks_in_natural_chromosome_order_are_read(tmp_path):
+	"""Some writers lay blocks out as chr1, chr2, chr10 while the ids run
+	chr1, chr10, chr2; the reader puts the leaves in id order."""
+
+	path = str(tmp_path / 'natural.bw')
+	chroms = {'chr1': 1000, 'chr10': 1000, 'chr2': 1000}
+	write_raw_bigwig(path, chroms, [_bedgraph('chr1', 0, [(0, 5, 1.0)]),
+		_bedgraph('chr2', 0, [(10, 15, 2.0)]), _bedgraph('chr2', 500, [(0, 5,
+		3.0)]), _bedgraph('chr10', 0, [(20, 25, 4.0)])])
+	y = BigWigReader(path).read(['chr1', 'chr2', 'chr2', 'chr10'], [0, 0, 500,
+		0], 30)
+	assert_identical(y, reference(path, ['chr1', 'chr2', 'chr2', 'chr10'], [0,
+		0, 500, 0], 30))
+	assert y[0, 0] == 1 and y[1, 10] == 2 and y[2, 0] == 3 and y[3, 20] == 4
 
 
 def _fixedstep_block(chrom_id, start, values, end):
