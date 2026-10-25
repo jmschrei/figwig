@@ -27,11 +27,13 @@ integer that must be kept, or no values at all where every nonzero value
 is 1, as in a tile of single-cell cut sites; and the chunks are compressed
 with libdeflate or zlib, as bigWig blocks are, or stored as they are when
 compression would grow them. That is the order for reading windows across
-many tracks. In *track order*, each track's nonzero bases lie in blocks per
+many tracks.
+
+In *track order*, each track's nonzero bases lie in blocks per
 chromosome, so one track over the genome is a few slices and a window read
 searches each requested track's blocks. That is the order for reading a
 few of many tracks. Six genome-wide count tracks that take 971 MB as
-bigWigs take 225 MB as one figwig file (:doc:`benchmarks`).
+bigWigs take 227 MB as one figwig file (:doc:`benchmarks`).
 
 The examples on this page read ``k562.fw``, six genome-wide count tracks
 converted from bigWigs with ``figwig bw2fw`` and a metadata table: the two
@@ -107,6 +109,22 @@ bytes, cast to float on the device. A ``DataLoader`` with
 ``pin_memory=True`` makes one more copy from the worker's array; passing
 the pinned buffer as ``out`` is the shorter path.
 
+A ``FigWigReader`` reads the file's tables and metadata when it is opened,
+and each group's index on the first read that touches it, after which the
+index is kept, 17 bytes per tile of the genome per group. A read uses one
+thread per 64 chunks it touches, up to ``n_jobs``, and keeps its threads
+between reads, so a read of 64 windows runs on the calling thread and a
+read of 8,192 on 8. A reader checks on every read that the file at its
+path is the one it opened, by its inode and header, and raises if a
+conversion has replaced it; it can be read from several threads at once
+and pickled, so it can go to DataLoader workers under any start method,
+as :doc:`reading` shows for bigWigs, and a pickled reader carries no
+index, which each worker reads again. ``read_figwig`` reads from a path
+or a reader in one call, as ``read_bigwig`` does. The first read in a new
+environment compiles the kernels for that kind of read, about 27 s for a
+dense read; numba caches them on disk, and later processes load them in a
+tenth of a second (:doc:`threads` lists every kind of first call).
+
 Reading onto a GPU
 ^^^^^^^^^^^^^^^^^^
 
@@ -139,25 +157,6 @@ stream the framework then uses; ``out`` may be a cupy array of the
 output's shape and dtype. ``read_figwig`` and ``sums`` take ``device``
 too. A reader with pinned buffers pickles without them, so it can go to
 ``DataLoader`` workers as before.
-
-A ``FigWigReader`` reads the file's tables and metadata when it is opened,
-and each group's index on the first read that touches it, after which the
-index is kept, 17 bytes per tile of the genome per group. A read uses one
-thread per 64 chunks it touches, up to ``n_jobs``, and keeps its threads
-between reads, so a read of 64 windows runs on the calling thread and a
-read of 8,192 on 8. A reader checks on every read that the file at its
-path is the one it opened, by size, modification time and inode, and
-raises if a conversion has replaced it; it can be read from several threads
-at once and pickled, so it can go to DataLoader workers under any start
-method, as :doc:`reading` shows for bigWigs, and a pickled reader carries
-no index, which each worker reads again. ``read_figwig`` reads from a path
-or a reader in one call, as ``read_bigwig`` does. The first read in a new
-environment compiles the kernels for that kind of read: about 27 s for the
-first dense read (sums per label and per bin share its kernels), 21 s more
-for the first sparse read, 12 s for the first read into another output
-dtype, 12 s for the first track-order read and 8 s for the first write;
-numba caches them on disk, and later processes load them in a tenth of a
-second (:doc:`threads`).
 
 Selecting tracks by their attributes
 ------------------------------------
@@ -371,24 +370,27 @@ call that raises writes nothing.
 
 ``tracks`` are names, or dicts with a ``name``, an optional ``dtype`` and
 any JSON-serializable attributes; NaN is not JSON and is refused, and
-``group`` is set by the writer. The file is created with the mode the
-umask gives a new file. A track's ``dtype`` is what ``read`` returns it
-as: given, it is checked against every value written; left out, it is set
-when the writer closes to the
-narrowest type that holds the track's values, uint8 here, float32 where a
-value is not an integer, and float64 where an integer lies beyond int32 and
-uint32, which float32 would round. Either way each chunk is stored as
-narrowly as its own values allow, so declaring ``uint32`` costs nothing on
-disk. The values a track keeps are those its dtype holds: a float32 track
-keeps float32's rounding of what it is given, as does a track left
-undeclared that turns out to hold fractions, so a value too small for
-float32 is 0 and not counted as nonzero, and a value beyond float32's range
-is an error unless the track is declared ``float64``; -0.0 is 0. No figwig
-file holds an infinite value: a base is a finite value or NaN, and
-``write``, ``write_sparse`` and ``bw2fw`` refuse ``inf`` before writing
-anything, as ``BigWigWriter`` does (ENCODE's signal p-value bigWigs can
-hold it; clip them first). ``genome``
-is a name or a URL, and ``attributes`` a dict for the file as a whole.
+``group`` is set by the writer. ``genome`` is a name or a URL, and
+``attributes`` a dict for the file as a whole. A track's ``dtype`` is what
+``read`` returns it as: given, it is checked against every value written;
+left out, it is set when the writer closes to the narrowest type that
+holds the track's values, uint8 here, float32 where a value is not an
+integer, and float64 where an integer lies beyond int32 and uint32, which
+float32 would round. Either way each chunk is stored as narrowly as its
+own values allow, so declaring ``uint32`` costs nothing on disk. The
+values a track keeps are those its dtype holds: a float32 track keeps
+float32's rounding of what it is given, as does a track left undeclared
+that turns out to hold fractions, so a value too small for float32 is 0
+and not counted as nonzero, and a value beyond float32's range is an error
+unless the track is declared ``float64``; -0.0 is 0. A chunk of an
+undeclared track written before its first fraction was seen may hold an
+integer exactly where float32 would round it, so a read with
+``dtype='float64'`` can differ between a position-order and a track-order
+file of the same writes above 2**24: read such a track in its own dtype,
+or declare it ``float64``. No figwig file holds an infinite value: a base
+is a finite value or NaN, and ``write``, ``write_sparse`` and ``bw2fw``
+refuse ``inf`` before writing anything, as ``BigWigWriter`` does (ENCODE's
+signal p-value bigWigs can hold it; clip them first).
 
 ``groups`` says which tracks' tiles are stored together: a number of
 consecutive tracks, 8 by default, or a list of groups of names, each of
@@ -419,10 +421,10 @@ part of waits for the next call, so predictions can be written a batch at a
 time. Chunks are compressed on ``n_jobs`` threads, with libdeflate when the
 ``deflate`` package is installed, as :doc:`writing` describes for bigWigs,
 and a chunk that compression would grow is stored as it is. ``level=0``
-stores every chunk uncompressed, which decodes fastest and costs four bytes
-per base of a dense float track, so a genome-wide conservation track that
-is 75 MB compressed is 150 MB at level 0, and a track of 5 kb bins, 21 MB
-compressed, is 11 GB. Reads inflate chunks with libdeflate as well where it
+stores every chunk uncompressed, which decodes fastest: the six count
+tracks of :doc:`benchmarks` are 412 MB at level 0 against 227 MB at level
+6, and a dense float track costs four bytes per base. Reads inflate chunks
+with libdeflate as well where it
 is installed, about twice as fast as zlib, and with zlib otherwise; the
 level barely changes the file's size or its reads, and :doc:`benchmarks`
 measures the levels and other codecs. The
@@ -431,8 +433,8 @@ the number of threads or on how the values were split between calls; the
 sum in the statistics table is a compensated float64, which splits may move
 in its last bits.
 
-The writer writes beside the path it was given and moves the file there
-when it closes, so a reader of that path never sees part of a file, a
+The writer writes beside the path it was given, with the mode the umask
+gives a new file, and moves the file there when it closes, so a reader of that path never sees part of a file, a
 writer that raises or is never closed leaves the path as it was, and a
 converter may write over its own input. A writer that is garbage collected
 with values written and no ``close`` warns. Every chunk's CRC-32 goes into
@@ -461,23 +463,24 @@ Adding tracks to a file
         fw.add_file("hepg2.fw")
 
 ``append=True`` adds the tracks given to the file at the path, in place,
-holding the file's lock while it does (a second writer appending to the
-same file at the same time is refused, since its chunks would land on the
-first's),
-in new groups after its own: the file's chunks stay where they are, the
+in new groups after its own. The file's chunks stay where they are, the
 new chunks are written after its end, and the tables, the index and last
-the header are written when the writer closes, so that until then the
-file reads as it did, a reader already open on it keeps reading and is
-told to open it again once the append has closed, a writer that fails
-cuts the file back to what it was, and a process killed part way leaves a
-file whose header still describes the old one. The file's chromosomes,
-tile, level and order are taken, ``attributes`` adds to the file's, and
-``chrom_sizes``, ``tile``, ``level`` and ``order`` must agree with them or
-be left at None. Appending costs the new chunks alone, and leaves the
-old tables and index behind as dead bytes between the chunks, about the
-size of the index, which ``figwig merge`` of the file into a new path
-drops. ``add_file`` adds every track of another file written with the
-same chromosomes, tile, level and order, by copying its chunks, with its
+the header are written when the writer closes. Until then the file reads
+as it did: a reader already open on it keeps reading and is told to open
+it again once the append has closed, a writer that fails cuts the file
+back to what it was, and a process killed part way leaves a file whose
+header still describes the old one. The writer holds the file's lock
+while it appends, so a second writer appending to the same file at the
+same time is refused, since its chunks would land on the first's. The
+file's chromosomes, tile, level and order are taken, ``attributes`` adds
+to the file's, and ``chrom_sizes``, ``tile``, ``level`` and ``order`` must
+agree with them or be left at None. Appending costs the new chunks alone,
+and leaves the old tables and index behind as dead bytes between the
+chunks, about the size of the index, which ``figwig merge`` of the file
+into a new path drops.
+
+``add_file`` adds every track of another file written with the same
+chromosomes, tile, level and order, by copying its chunks, with its
 attributes, dtypes, statistics and summaries; ``figwig merge`` does that
 from the command line. Tracks that came from a file cannot be written to,
 and ``write`` with ``tracks=None`` means every track given to the writer
@@ -529,19 +532,18 @@ chunk's count per track, mostly zero, would not deflate to less, as with
 Converting
 ----------
 
-:doc:`converters` describes the commands: ``figwig bw2fw`` writes bigWigs as
-the tracks of one figwig file, with a metadata table for their names and
-attributes; ``figwig fw2bw`` writes a figwig file's tracks back as bigWigs,
-with that table; ``figwig bam2fw`` counts reads or fragments as ``figwig
-bam2bw`` does, one pair of tracks per input file; ``figwig reorder``
-writes a figwig file in the other order; ``figwig merge`` writes the
-tracks of several files into one, copying their chunks, as ``figwig bw2fw
---append`` adds bigWigs to a file; and ``figwig info`` prints what a file
-holds. A bigWig's values read from the
-figwig file as ``read_bigwig`` gives them with ``missing=0.0`` and
-``keep_nan=True``: a base no interval covers is 0, and an interval whose
-value is NaN is NaN; ``bw2fw --missing nan`` keeps the uncovered bases
-apart from 0 instead, for tracks where the two differ.
+:doc:`converters` describes the commands: ``figwig bw2fw`` writes bigWigs
+as the tracks of one figwig file, with a metadata table for their names
+and attributes, or adds them to a file with ``--append``; ``figwig fw2bw``
+writes a figwig file's tracks back as bigWigs, with that table; ``figwig
+bam2fw`` counts reads or fragments as ``figwig bam2bw`` does, one pair of
+tracks per input file; ``figwig reorder`` writes a figwig file in the
+other order; ``figwig merge`` writes the tracks of several files into one,
+copying their chunks; and ``figwig info`` prints what a file holds. A
+bigWig's values read from the figwig file as ``read_bigwig`` gives them
+with ``missing=0.0`` and ``keep_nan=True``, and ``bw2fw --missing nan``
+keeps the bases no interval covers apart from 0, for tracks where the two
+differ.
 
 Reads, cells and channels as tracks
 -----------------------------------
@@ -551,31 +553,32 @@ a Fiber-seq experiment with a methylation call and a base quality per
 base, or the cells of a single-cell experiment with a count and a
 fragment-end flag, is stored as tracks with attributes that name the
 dimension: a record per read and channel, ``{"name": "r17.m6a", "read":
-"r17", "channel": "m6a", "strand": "+"}``, and ``select(channel="m6a")`` or
-``select(read="r17")`` picks a slice, and ``read(..., channels="channel",
+"r17", "channel": "m6a", "strand": "+"}``, so that ``select(channel="m6a")``
+or ``select(read="r17")`` picks a slice. ``read(..., channels="channel",
 items="read")`` arranges the tracks read by item and channel into
 (windows, reads, channels, width), items and channels in the order of
 their first appearance among the tracks read, each item needing every
 channel once; ``bins`` and ``sums`` arrange the same way, into (windows,
 reads, channels, bins) and (intervals, reads, channels). The arrangement
 is a reshape of the ordinary read and changes no bytes of a file: a
-channel is an attribute like any other. Group the tracks by channel
-over runs of consecutive reads, not by read: the reads sorted by start
-and cut into groups of about a thousand, so that each group's chunks
-cover one stretch of the genome and a window decodes the few chunks of
-the groups whose reads overlap it; a chunk may hold at most 2**29 values
-(tracks times tile), which rules out one group of every read, and a group
-per read costs a planning step per group on every read. On the m6A calls
-of 90,543 Fiber-seq reads in groups of 1,024 (position order, tile
-16,384, 62 MB), summing every read over 8,192 windows of 2,048 bases took
-0.42 s and listing the calls in 1,024 windows 0.16 s, against 3.3 s and
-3.6 s from a scipy CSR matrix per chromosome held in memory, and 15.7 s
-and 7.2 s from the same file in track order. ``sums(..., paired=True)``
-gives each read's total over its own span, 2.6 s for the 90,543 reads
-against 5.6 s from the matrix. A read may also
-be its own "chromosome", of its length, with one track per channel, which
-gives (reads, channels, length) in one call, with the genome coordinates
-kept in the file's attributes.
+channel is an attribute like any other.
+
+Group the tracks by channel over runs of consecutive reads, not by read:
+the reads sorted by start and cut into groups of about a thousand, so that
+each group's chunks cover one stretch of the genome and a window decodes
+the few chunks of the groups whose reads overlap it. A chunk may hold at
+most 2**29 values (tracks times tile), which rules out one group of every
+read, and a group per read costs a planning step per group on every read.
+On the m6A calls of 90,543 Fiber-seq reads in groups of 1,024 (position
+order, tile 16,384, 62 MB), summing every read over 8,192 windows of
+2,048 bases took 0.42 s and listing the calls in 1,024 windows 0.16 s,
+against 3.8 s and 3.5 s at best from a scipy CSR matrix per chromosome
+held in memory, and 15.7 s and 7.1 s from the same file in track order;
+``sums(..., paired=True)`` gives each read's total over its own span,
+2.7 s for the 90,543 reads against 5.8 s from the matrix
+(:doc:`benchmarks`). A read may also be its own "chromosome", of its
+length, with one track per channel, which gives (reads, channels, length)
+in one call, with the genome coordinates kept in the file's attributes.
 
 Versions
 --------
@@ -590,13 +593,6 @@ Within a version, a file written by any figwig reads in any later figwig,
 and a rebuild from the same inputs with the same options is
 byte-identical, which is why the file carries no timestamp.
 
-An undeclared track that turns out to hold a fraction is float32, and its
-values are what float32 makes of them; a chunk written before the fraction
-was seen may hold an integer exactly where float32 would round it, so a
-read with ``dtype='float64'`` can differ between a position-order and a
-track-order file of the same writes above 2**24. Read such a track in its
-own dtype, or declare it ``float64``.
-
 What the format is for, and what it is not
 ------------------------------------------
 
@@ -610,7 +606,7 @@ of a few runs of one value, and larger for sparse low-depth counts, where a
 chunk of a few bases has a fixed cost that a bigWig's varStep item does
 not. The gain in size over a directory of bigWigs comes mostly from the
 tracks being in one file and in the narrowest type: six count tracks that
-are 971 MB as ENCODE's bigWigs are 408 MB as bigWigs figwig writes and 225
+are 971 MB as ENCODE's bigWigs are 408 MB as bigWigs figwig writes and 227
 MB as one figwig file. The gain in reading comes from the tile grid: a
 window's chunks are found by division, each is decoded once for every track
 in it, and the values arrive as uint8 or uint16, half or a quarter of the
@@ -622,11 +618,13 @@ a bigWig whose zeros mean something other than its gaps, as a methylation
 track's 0% sites do against its unsequenced sites, or a conservation
 track's unaligned bases, loses that distinction through ``bw2fw`` unless
 ``--missing nan`` is given, which writes the uncovered bases as NaN and the
-track as float32. The tile sums stand in for zoom levels at one
-resolution, the tile: a summary at 1 Mb bins is a reshape of them, and a
-summary finer than a tile decodes the chunks under it, through ``bins``,
-which is 60 times faster than a bigWig's zooms at 1 kb bins; a genome
-browser needs the tracks written back with ``fw2bw -z``. Every value is at
+track as float32. The tile sums, and the zoom levels a file is written
+with, stand in for a bigWig's zoom levels down to the tile's resolution:
+a summary at 1 Mb bins is a reshape of them, and a summary finer than a
+tile decodes the chunks under it, through ``bins``, which took 0.09 s for
+100 bp bins over chr22 where pyBigWig's ``stats`` took 9.8 s
+(:doc:`benchmarks`); a genome browser needs the tracks written back with
+``fw2bw -z``. Every value is at
 most float64, and there are no string or categorical tracks. A read from a
 remote file would need the group's index, a few tens of KB for a
 genome-wide track, before its first chunk; the reader does not read over
@@ -783,5 +781,4 @@ The position-order index on disk holds the tiles with values, so a group
 with little data costs a few bytes; in memory a group's index is 17 bytes
 per tile of the genome, 3.2 MB for hg38 at the default tile, kept from a
 group's first read on, so a file of thousands of groups read all at once
-holds thousands of those, and wants larger groups or track order. Reserved
-fields hold a place for zoom levels, which the format does not write.
+holds thousands of those, and wants larger groups or track order.

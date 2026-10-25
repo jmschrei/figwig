@@ -152,8 +152,9 @@ figwig files
 ------------
 
 The figwig file was measured against the other ways of holding many
-tracks on 2026-10-23 (``claude_comments/2026-10-23-format-benchmarks/``,
-``bench.py``): the same tracks as one bigWig per track read by figwig, by
+tracks (``benchmarks/compare_formats.py`` and ``compare_sparse.py`` run
+the bigWig and figwig-file parts on any inputs): the same tracks as one
+bigWig per track read by figwig, by
 pybigtools 0.2.5 and by pyBigWig 0.3.26 (those two on a thread pool of
 window chunks, one ``values()`` per window, since neither reads on
 threads itself), as a zarr 3 array (zstd, chunks of tracks x 65,536,
@@ -510,9 +511,7 @@ pyBigWig ``stats(type="sum", exact=True)``, one process    46 s      201 MB
 Over 3,000 single cells as tracks (chr1 to chr5 of the PBMC fragments,
 46 million cut sites, one group), the 58,705 peaks on those chromosomes
 summed in 0.96 s on 8 threads and 1.5 s on one, the same sums as a sparse
-read of the windows gives in 1.2 s; before the entries were binned
-without a scratch tile this read was refused above 2,048 tracks and took
-73 s in two halves.
+read of the windows gives in 1.2 s.
 
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -640,8 +639,8 @@ few chunks and the work is the planning.
 To a GPU
 ~~~~~~~~
 
-``gpu_bench.py`` timed six paths from a file to a CUDA tensor on an
-H200 NVL (PCIe), with ``torch.cuda.synchronize()`` before the clock
+Six paths from a file to a CUDA tensor were timed on an H200 NVL
+(PCIe), with ``torch.cuda.synchronize()`` before the clock
 stopped: the bigWigs read by pybigtools, by pyBigWig and by figwig, each
 followed by ``torch.from_numpy`` and ``.cuda()``; the figwig file read
 into a numpy array then ``.cuda()``; into a pinned torch buffer through

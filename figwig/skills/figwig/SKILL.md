@@ -19,8 +19,9 @@ description: >-
 
 # figwig
 
-figwig reads and writes bigWig files into and out of numpy. Its threads run
-in parallel, because zlib, libdeflate and its numba kernels run without the
+figwig reads and writes bigWig files into and out of numpy, and its own
+figwig file (`.fw`) holds many tracks in one file. Its threads run in
+parallel, because zlib, libdeflate and its numba kernels run without the
 GIL. It depends only on numpy and numba.
 
 ```python
@@ -40,7 +41,7 @@ from figwig import write_figwig
 |---|---|
 | a bigBed or a big-endian bigWig | pybigtools or pyBigWig; figwig raises `ValueError` |
 | a bigWig at a URL | download it first, or use pyBigWig; figwig takes a URL for a path and raises `FileNotFoundError` |
-| summaries from zoom levels, such as a whole-chromosome mean or `stats()` | pyBigWig or pybigtools; figwig reads every base and ignores zoom levels |
+| summaries from a bigWig's zoom levels, such as a whole-chromosome mean or `stats()` | pyBigWig or pybigtools; figwig reads every base of a bigWig and ignores its zoom levels (a figwig file's `tile_sums` serves this) |
 | a bigWig whose intervals overlap | pybigtools, which sums them; figwig raises |
 
 ## Conventions that hold everywhere
@@ -48,12 +49,14 @@ from figwig import write_figwig
 - Coordinates are 0-based and half-open, as in BED. Window `j` is
   `[starts[j], starts[j] + width)` on `chroms[j]`, and its values go to row `j`
   whatever order the windows are given in.
-- Reads return float32 arrays. One file gives `(n, width)`. A list of files
-  gives `(n, len(files), width)`, which is `(batch, channels, length)`.
-- `missing=0.0` by default: a base no interval covers reads as 0, where
-  pyBigWig gives NaN. A base past the end of its chromosome is always NaN.
-- A write leaves out every base whose value is `missing` or NaN, so reading
-  with the same `missing` gives the values back.
+- A bigWig read returns float32: one file gives `(n, width)`, and a list of
+  files `(n, len(files), width)`, which is `(batch, channels, length)`. A
+  figwig file's read gives `(n, tracks, width)` in the tracks' own dtype.
+- `missing=0.0` by default on bigWigs: a base no interval covers reads as 0,
+  where pyBigWig gives NaN, and a bigWig write leaves out every base whose
+  value is `missing` or NaN, so reading with the same `missing` gives the
+  values back. A figwig file has no `missing`: a base never written is 0.
+- A base past the end of its chromosome is NaN in a float output.
 - `n_jobs=8` by default on every reader and writer call. `-1` uses every CPU
   this process may run on. `figwig bam2bw -p` defaults to 1 core.
 - A file figwig cannot read exactly raises `ValueError`. Catch it to fall
@@ -62,11 +65,13 @@ from figwig import write_figwig
 ## Install
 
 `pip install "figwig[fast]"`, or `uv add "figwig[fast]"`. The `fast` extra
-adds libdeflate, which compresses several times faster than zlib.
-`figwig bam2bw` needs the `bam2bw` extra (`pip install "figwig[bam2bw]"`),
-which adds pysam, pyfaidx, biopython, tqdm, isal and deflate, and runs on
-Linux and macOS only, since pysam does not support Windows. Python 3.10 or
-later.
+adds libdeflate, which compresses several times faster than zlib and
+inflates figwig chunks about twice as fast. `figwig bam2bw` needs the
+`bam2bw` extra (`pip install "figwig[bam2bw]"`), which adds pysam, pyfaidx,
+biopython, tqdm, isal and deflate, and runs on Linux and macOS only, since
+pysam does not support Windows. `device="cuda"` reads of figwig files need
+the `cuda` extra, cupy for CUDA 12 (`cupy-cuda13x` or `cupy-cuda11x`
+otherwise). Python 3.10 or later.
 
 ## Task → reference
 
@@ -78,11 +83,9 @@ later.
 | writing a genome-wide track a batch at a time | `references/writing.md` |
 | choosing `n_jobs` or `-p`, the expected gain from threads, memory, the first call's compile time | `references/threads-and-memory.md` |
 | converting BAM, SAM, BED or fragment files to bigWig | `references/bam2bw.md` |
-| a figwig file (`.fw`): many tracks in one file, read in windows by attribute; `FigWigReader`, `FigWigWriter`, `read_figwig`, `write_figwig` | `references/figwig-files.md` |
-| single-cell cut sites or any thousands of sparse tracks: `write_sparse`, `sparse=True`, `labels=` pseudobulks, `order='tracks'` vs `'positions'`, `figwig reorder` | `references/figwig-files.md` |
-| adding tracks to a figwig file (`append=True`, `add_file`, `figwig merge`, `bw2fw --append`), tile sums in place of zoom levels (`tile_sums`), checking a file (`verify=True`) | `references/figwig-files.md` |
-| converting bigWigs to and from a figwig file, or reads to one (`figwig bw2fw`, `fw2bw`, `bam2fw`) | `references/figwig-files.md` |
-| reading a figwig file straight onto a GPU, for PyTorch, JAX or TensorFlow (`device="cuda"`, DLPack, pinned `out=`) | `references/figwig-files.md` |
+| a figwig file (`.fw`): many tracks in one file, read in windows by attribute, summed per label, per bin or over intervals, or straight onto a GPU (`device="cuda"`) | `references/figwig-files.md` |
+| single cells, reads or any thousands of sparse tracks as a figwig file: `write_sparse`, `sparse=True`, `labels=`, the two orders, tile and groups | `references/figwig-files.md` |
+| adding tracks to a figwig file, tile sums and zoom levels, `verify=True`, or converting bigWigs or reads to and from one (`figwig bw2fw`, `fw2bw`, `bam2fw`, `reorder`, `merge`, `info`) | `references/figwig-files.md` |
 
 ## Symptom → reference
 

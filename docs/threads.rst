@@ -47,9 +47,9 @@ is not installed. A read uses one thread per 64 chunks it touches, up to
 ``n_jobs``, since a read of a few dozen windows is done in under a
 millisecond and gains nothing from waking threads, and keeps its threads
 between reads; windows packed into a few tiles are cut over the threads by
-window rather than by chunk. On the six-track file of :doc:`benchmarks`,
-8,192 windows took 0.13 s on one thread and 0.051 s on 8, and nothing more
-was gained past 8. Sums per label and per bin run a group's batches at a
+window rather than by chunk. On the six genome-wide count tracks of
+:doc:`benchmarks`, 8,192 windows took 0.12 s on one thread and 0.05 s on
+8, and nothing more was gained past 8. Sums per label and per bin run a group's batches at a
 time, each writing its own cells of the output, so they take no copy of
 the output per thread in position order; in track order they do, one per
 thread, which the 8 GiB guard counts.

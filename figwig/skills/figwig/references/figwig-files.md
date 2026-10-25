@@ -11,11 +11,14 @@ directory of bigWigs is read in windows again and again.
 ## Signatures
 
 ```python
-FigWigReader(path)
+FigWigReader(path, verify=False)     # verify=True checks every chunk's CRC-32 as it is read
 reader.read(chroms, starts, width, tracks=None, out=None, dtype=None, n_jobs=8,
-	sparse=False, labels=None, bins=None, nan='propagate')
+	sparse=False, labels=None, bins=None, nan='propagate', device=None,
+	channels=None, items=None)
+	# channels="channel", items="read": (n, items, channels, width), the tracks
+	# arranged by two attributes; bins= and sums() arrange the same way
 reader.sums(chroms, starts, ends, tracks=None, dtype=None, n_jobs=8, nan='propagate',
-	paired=False)
+	paired=False, device=None, channels=None, items=None)
 	# -> (n, tracks): totals over intervals of any lengths; nan='skip' leaves NaN
 	# bases out, nan='count' gives the bases that are not NaN (covered-base means);
 	# paired=True sums interval i over track tracks[i] alone, (n,)
@@ -27,11 +30,7 @@ reader.select(**attributes)          # -> int64 indices, for `tracks`
 reader.tracks                        # list of dicts: name, dtype, group, attributes
 reader.stats                         # structured array: sum, nonzero, min, max per track
 reader.chrom_sizes, reader.genome, reader.attributes, reader.tile, reader.order
-read_figwig(path_or_reader, chroms, starts, width, tracks=None, out=None, dtype=None,
-	n_jobs=8, sparse=False, labels=None, bins=None, nan='propagate', device=None,
-	channels=None, items=None)
-	# channels="channel", items="read": (n, items, channels, width), the tracks
-	# arranged by two attributes; also for bins= and sums()
+read_figwig(path_or_reader, chroms, starts, width, ...)   # the arguments of reader.read
 
 FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None,
 	groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None)
@@ -41,10 +40,9 @@ writer.write(chroms, starts, values, ends=None, tracks=None)
 writer.write_sparse(chroms, positions, tracks, values)   # nonzero bases as entries
 writer.add_file(path)                # copy another file's tracks in (same chroms, tile, level, order)
 writer.close()                       # writes the tables and index; `with` calls it
-FigWigReader(path, verify=True)      # check every chunk's CRC-32; for uncompressed files
 write_figwig(path, chrom_sizes, tracks, chroms, starts, values, ends=None, genome=None,
 	attributes=None, tile=16384, groups=8, level=None, engine='auto', n_jobs=8,
-	order='positions')
+	order='positions', zooms=0)
 ```
 
 | `read(...)` returns | when |
@@ -168,32 +166,36 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
   epoch of 8,192 windows from 0.15 s to 0.08 s, two spawn workers gained
   nothing, and under `spawn` each worker pays 2-3 s on its first epoch to
   load the compiled kernels.
-- Tracks of one *group* are stored together and decoded together, so reading
-  one track of a group of 8 decodes all 8. Files meant to be read a track at a
-  time should be written with small groups, and groups should hold tracks of
-  one kind: a count track grouped with a float track is stored as float
-  values and decoded with it. For a *reads* dimension (Fiber-seq reads or
-  cells as tracks, read all at once over a window), the rule is the other
-  way: cells go in one group of all cells; reads, sorted by start, go in
-  groups of about 1,000 consecutive reads per channel (a chunk holds at
-  most 2**29 values, tracks x tile, so one group of every read is refused,
-  and a group per read is 10-500x slower); position order beats track
-  order (90,543 Fiber-seq reads: 0.42 s to sum them over 8,192 windows
-  against 15.7 s in track order). Reads as their own
-  "chromosomes" (each read a chromosome of its length, with 2 tracks) also
-  works for per-read access, with genome coordinates in the attributes. The
-  defaults (tile 16,384, groups of 8) suit
-  count tracks, for which one group of many tracks reads 8 of 48 tracks
-  2-4x faster than 48 groups of one, since a sparse chunk's other tracks
-  are stepped over cheaply; dense float tracks read in short windows
-  (conservation, fold change, p-value) want `tile=1024, groups=1` (`bw2fw
-  -t 1024 --groups 1`; `-l 1` gains nothing): 7x faster random 1 kb windows
-  for a file 35-50% larger, and a dense track in a group of its own reads
-  12x faster than beside two others.
-- The first dense read of a fresh install compiles for about 27 s, the first
-  sparse read for 21 s more, a second output dtype for 12 s and track order
-  for 12 s; later processes load the cache in a tenth of a second. Warm up
-  before timing or spawning workers.
+
+## Tile, groups and order
+
+- Tracks of one *group* are stored together and decoded together, so
+  reading one track of a group of 8 decodes all 8. Group the tracks that
+  are read together, and tracks of one kind: a count track grouped with a
+  float track is stored as float values and decoded with it, and a dense
+  track in a group of its own reads 12x faster than beside two others.
+- The defaults (tile 16,384, groups of 8) suit count tracks, for which one
+  group of many tracks reads 8 of 48 tracks 2-4x faster than 48 groups of
+  one, since a sparse chunk's other tracks are stepped over cheaply.
+- Dense float tracks read in short windows (conservation, fold change,
+  p-value) want `tile=1024, groups=1` (`bw2fw -t 1024 --groups 1`; `-l 1`
+  gains nothing): 7x faster random 1 kb windows for a file half again as
+  large.
+- Cells go in one group of all cells. Reads (Fiber-seq), sorted by start,
+  go in groups of about 1,000 consecutive reads per channel: a chunk holds
+  at most 2**29 values (tracks x tile), so one group of every read is
+  refused, and a group per read is 10-500x slower. Position order beats
+  track order for them (90,543 reads: 0.42 s to sum them over 8,192
+  windows against 15.7 s). A read may also be its own "chromosome" of its
+  length, with one track per channel and the genome coordinates in the
+  attributes.
+- Thousands of single-track groups cost a group's index each, 17 bytes per
+  tile of the genome in memory once read; use one group, or track order.
+- The first dense read of a fresh install compiles for about 27 s, and each
+  other kind of read (sparse, another dtype, sums, track order) and the
+  first write compile for 8 to 21 s more; later processes load the cache in
+  a tenth of a second. Warm up before timing or spawning workers
+  (`references/threads-and-memory.md`).
 
 ## Single cells and other sparse track sets
 
@@ -223,8 +225,6 @@ found = fw.read(chroms, starts, 2114, tracks=fw.select(cell_type="B"), sparse=Tr
   items on that chromosome. One call takes about 90 bytes per entry, so
   write a chromosome at a time. Fragment files give two cut sites per
   fragment; merge duplicates before writing.
-- Thousands of single-track groups cost a group's index each, 17 bytes per
-  tile of the genome in memory once read; use one group, or track order.
 
 ## Writing
 

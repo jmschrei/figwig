@@ -11,10 +11,10 @@ of tracks and a summary of the output on stderr; ``-t`` is the tile in
 ``-m`` takes a tab-separated table, or a comma-separated one when its name
 ends in ``.csv``. Every converter refuses to write over an output that
 exists unless ``-f`` is given (``--force`` for ``bam2fw``, whose ``-f``
-means fragments), ``bw2fw`` and ``fw2bw`` write their outputs beside
-their names and move them into place when complete, so a conversion that
-fails or is killed leaves no half-written output, a missing input is a
-message rather than a traceback, and Ctrl-C exits with 130.
+means fragments), every converter writes its output beside its path and
+moves it into place when complete, so a conversion that fails or is
+killed leaves no half-written output, a missing input is a message rather
+than a traceback, and Ctrl-C exits with 130.
 
 figwig bw2fw
 ------------
@@ -44,18 +44,16 @@ a dense float track, and ``-z`` the number of zoom levels to keep beside
 the tile sums (none by default; ``bam2fw`` takes it too, and ``reorder``
 and ``merge`` keep the input's). Each piece of a chromosome is read on one thread of
 its own while the piece before it is encoded and compressed on ``-p``
-threads, and the arrays read are handed to the writer without a copy. The
-output is written beside its path and moved there when it is complete, so
-a failed conversion leaves what the path held, and an output that exists
-is refused unless ``-f`` says to write over it. ``--append`` adds the
+threads, and the arrays read are handed to the writer without a copy.
+``--append`` adds the
 bigWigs as tracks to the figwig file at the output, in place, in new
 groups after its tracks; its chromosomes, tile and level are kept, and
 ``-s``, ``-t`` and ``-l`` are refused with it; a chromosome of a bigWig
 that the file does not have is left out with a warning. The defaults
 suit count tracks, which read fastest in one group of many; for dense
 float tracks read in short windows, such as conservation or fold-change
-signal, ``-t 1024 --groups 1`` reads seven times faster for a file a
-third to a half larger (:doc:`benchmarks`).
+signal, ``-t 1024 --groups 1`` reads seven times faster for a file half
+again as large (:doc:`benchmarks`).
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -108,12 +106,9 @@ reads that table, so the two commands round-trip a file's tracks, names and
 attributes. ``-t`` names the tracks to write and ``--select`` takes
 ``KEY=VALUE`` pairs that their attributes must have. ``-z N`` writes N
 zoom levels into the bigWigs, for a genome browser, each level adding to
-the file (none by default), and ``-l`` sets their compression level; a
-bigWig that exists in the directory is refused unless ``-f`` is given, and
-each is written beside its name and moved there when complete. A track's
-bases that
-are 0, and a float track's NaN,
-are left out of its bigWig, as ``BigWigWriter.write`` leaves them out with
+the file (none by default), and ``-l`` sets their compression level. A
+track's bases that are 0, and a float track's NaN, are left out of its
+bigWig, as ``BigWigWriter.write`` leaves them out with
 ``missing=0.0``, so reading the bigWig with ``read_bigwig`` gives the same
 numbers as reading the track, with NaN as 0; ``--missing nan`` leaves the
 NaN bases out and writes the zeros, for a file ``bw2fw --missing nan``
@@ -154,7 +149,7 @@ needs the ``bam2bw`` extra and runs on Linux and macOS.
                          [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
                          [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
                          -n NAME [-m METADATA] [-g GENOME] [-t TILE]
-                         [--dtype DTYPE] [-l LEVEL] [--force] [-v]
+                         [--dtype DTYPE] [-z ZOOMS] [-l LEVEL] [--force] [-v]
                          filename [filename ...]
 
 figwig reorder
