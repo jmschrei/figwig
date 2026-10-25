@@ -191,7 +191,8 @@ figwig ships a [Claude Code](https://claude.com/claude-code) skill that
 teaches a coding agent to use figwig in any project: reading windows,
 writing predictions, intervals and counts, converting reads with
 `figwig bam2bw`, figwig files and their converters, the rules a write
-follows, what each error means, and how much threads gain. Install it into `~/.claude/skills/figwig` with:
+follows, what each error means, and how much threads gain. Install it into
+`~/.claude/skills/figwig` with:
 
 ```bash
 figwig install-skill
