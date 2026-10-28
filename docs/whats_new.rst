@@ -9,6 +9,11 @@ Release History
 Unreleased
 ==========
 
+Converters and commands
+-----------------------
+
+	- ``figwig reorder`` reads and writes each chromosome in spans of about 16 million entries rather than whole, so a file with dense tracks no longer needs memory for every entry of its largest chromosome at once.
+
 Documentation
 -------------
 

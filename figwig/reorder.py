@@ -22,6 +22,9 @@ from .figwig import FigWigReader
 from .figwig import FigWigWriter
 
 
+_SPAN_ENTRIES = 2 ** 24
+
+
 def _parser(prog):
 	parser = argparse.ArgumentParser(prog=prog, description="Write a figwig "
 		"file again in position order or in track order.")
@@ -74,16 +77,26 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 		tile = _DEFAULT_TILE
 	if groups is None:
 		groups = _DEFAULT_GROUPS
+	# A chromosome is read and written a span at a time, so that a dense
+	# file's entries, over 100 bytes each between the read and the write,
+	# are not all held at once: a span holds about _SPAN_ENTRIES entries at
+	# the file's mean density, in whole tiles, since a write seals the tile
+	# it ends in. A sparse file is still read a chromosome at a time.
+	density = reader.stats['nonzero'].sum() / max(sum(
+		reader.chrom_sizes.values()), 1)
+	span = tile * max(1, int(_SPAN_ENTRIES / max(density, 1e-9) // tile))
 	total = 0
 	with FigWigWriter(output, reader.chrom_sizes, tracks, genome=reader.genome,
 			attributes=reader.attributes, tile=tile, groups=groups, level=level,
 			n_jobs=n_jobs, order=order, zooms=len(reader.zooms)) as writer:
-		for chrom in reader.chrom_sizes:
-			entries = reader.read_entries(chroms=[chrom], n_jobs=n_jobs)
-			if len(entries.values) > 0:
-				writer.write_sparse(chrom, entries.positions, entries.tracks,
-					entries.values)
-			total += len(entries.values)
+		for chrom, length in reader.chrom_sizes.items():
+			for start in range(0, length, span):
+				found = reader.read(chrom, [start], min(span, length - start),
+					n_jobs=n_jobs, sparse=True)
+				if len(found.values) > 0:
+					writer.write_sparse(chrom, start + found.offsets,
+						found.channels, found.values)
+				total += len(found.values)
 	if verbose:
 		print("{}: {} tracks in {} order, {:,} nonzero bases, {:.1f} MB.".format(
 			output, len(tracks), order, total, os.path.getsize(output) / 1e6),

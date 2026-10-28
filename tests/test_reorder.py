@@ -7,7 +7,9 @@ order."""
 import numpy
 import pytest
 
+import figwig.reorder
 from figwig import FigWigReader
+from figwig import FigWigWriter
 
 from figwig.__main__ import main
 
@@ -52,6 +54,36 @@ def test_round_trip_through_both_orders(tmp_path, fw):
 	assert_same_values(original, again)
 	numpy.testing.assert_array_equal(original.stats['nonzero'], again.stats[
 		'nonzero'])
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_chromosomes_are_written_a_span_at_a_time(tmp_path, fw, monkeypatch,
+	order):
+	"""A chromosome is read and written in spans of whole tiles, so that a
+	dense file's entries are not all held at once; the values and the
+	statistics are those of a chromosome written in one call."""
+
+	calls = []
+	write_sparse = FigWigWriter.write_sparse
+	monkeypatch.setattr(FigWigWriter, 'write_sparse', lambda self, *args:
+		calls.append(args[0]) or write_sparse(self, *args))
+	whole = str(tmp_path / 'whole.fw')
+	main(['reorder', fw, whole, '--order', order, '-t', '64'])
+	n_whole = len(calls)
+
+	monkeypatch.setattr(figwig.reorder, '_SPAN_ENTRIES', 1)
+	spans = str(tmp_path / 'spans.fw')
+	main(['reorder', fw, spans, '--order', order, '-t', '64'])
+	assert len(calls) - n_whole > 2 * n_whole
+
+	original, a, b = FigWigReader(fw), FigWigReader(whole), FigWigReader(spans)
+	assert_same_values(original, b)
+	assert_same_values(a, b)
+	for chrom, length in CHROM_SIZES.items():
+		x = a.read(chrom, [0], length, dtype='float64')
+		y = b.read(chrom, [0], length, dtype='float64')
+		numpy.testing.assert_array_equal(x, y)
+	numpy.testing.assert_array_equal(a.stats, b.stats)
 
 
 def test_errors(tmp_path, fw):
