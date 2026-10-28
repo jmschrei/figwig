@@ -103,6 +103,7 @@ _DEFLATED_COUNTS = 64
 _SCRATCH_PAIRS = 4
 
 _EXACT = 16777216.0
+_EXACT_SUM = 9007199254740992.0
 
 
 @numba.njit(nogil=True, cache=True, inline='always')
@@ -1734,6 +1735,30 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 	return k_out
 
 
+@numba.njit(nogil=True, cache=True, inline='always')
+def _add_run_binned(dst, value, lo, hi, bins, nan_mode, integral):
+	"""Bases lo to hi - 1 of a window, all of `value`, added into the bins
+	of `bins` bases of the window's binned row `dst`. An integer value is
+	added once per bin as value x bases, which is the sum base by base
+	gives while the bin stays below 2**53; otherwise base by base."""
+
+	if nan_mode != 0:
+		value = _pick(value, nan_mode)
+	k = lo // bins
+	edge = (k + 1) * bins
+	while lo < hi:
+		stop = min(hi, edge)
+		n = stop - lo
+		if integral and abs(dst[k]) + abs(value) * n < _EXACT_SUM:
+			dst[k] += value * n
+		else:
+			for q in range(n):
+				dst[k] += value
+		lo = stop
+		k += 1
+		edge += bins
+
+
 # The decoders below take a chunk's values as a typed view, so that numba
 # compiles one copy of each for every element type and the type is chosen
 # once per chunk rather than once per value; `ones` marks a chunk whose
@@ -1742,7 +1767,8 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 @numba.njit(nogil=True, cache=True)
 def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	selected, values, ones, base, a, b, start, channels, accumulate, fill, row,
-	k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode):
+	k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode,
+	integral):
 	"""One window's bases of one sparse, runs or matrix chunk: set or added
 	into the window's `channels`, (channels, width) of the output, when
 	`channels` has a row, or listed as entries from k_out on when `fill`,
@@ -1753,9 +1779,9 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	uint16 `offsets` are as its header gives them, and each present track's
 	first base in the window is found by binary search. `selected` lists
 	the group's tracks with a slot, ascending. `values` is the typed view of
-	the chunk's values. With `bins` above 1, which comes with `accumulate`,
-	`channels` is the window's binned row and each base is added into its
-	bin.
+	the chunk's values, `integral` true when they are integers. With `bins`
+	above 1, which comes with `accumulate`, `channels` is the window's binned
+	row and each base is added into its bin.
 	"""
 
 	listing = channels.shape[0] == 0
@@ -1816,6 +1842,28 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					else:
 						for q in range(lo, hi):
 							dst[q] = current
+			elif kind == _RUNS and not listing and bins > 1:
+				# Binned, as sums are: changes before the window are only
+				# decoded, and each run inside it is added per bin it covers.
+				dst = channels[slot]
+				current = 0.0
+				since = base
+				while at < end:
+					delta, at = _get_varint(data, at)
+					p += delta
+					here = base + p
+					if here >= b:
+						d += 1
+						break
+					if here > a and here > since:
+						_add_run_binned(dst, current, max(since, a) - start, here - start,
+							bins, nan_mode, integral)
+					current = _value(values, d, ones)
+					since = here
+					d += 1
+				if since < b:
+					_add_run_binned(dst, current, max(since, a) - start, b - start, bins,
+						nan_mode, integral)
 			elif kind == _RUNS:
 				# The value from each change up to the next, clipped to the
 				# window; 0 before the first change.
@@ -1992,46 +2040,53 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total], bool(False), base, a, b, start,
 			channels, accumulate, fill, row, k_out, out_rows, out_channels,
-			out_offsets, out_values, bins, nan_mode)
+			out_offsets, out_values, bins, nan_mode, bool(True))
 	elif code == _U16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _U32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total].view(numpy.int8), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _F32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(False))
 	elif code == _F64:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 8 * total].view(numpy.float64), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(False))
 	return _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 		selected, data[v0:v0], bool(True), base, a, b, start, channels,
 		accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
-		out_values, bins, nan_mode)
+		out_values, bins, nan_mode, bool(True))
 
 
 @numba.njit(nogil=True, cache=True)

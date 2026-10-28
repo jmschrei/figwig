@@ -1905,6 +1905,63 @@ def test_sums_over_intervals_of_any_length(fw, track_fw, ref, read_batching,
 			reader.sums('chr9', [0], [10])
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_sums_of_integer_tracks_over_whole_tiles(tmp_path, order, n_jobs):
+	"""Sums of integer tracks over intervals that cover whole tiles take
+	those tiles from the tile sums: equal to the dense sums whatever the
+	output type, with a tile whose sum is 2**24 or more (rounded in its
+	float32 tile sum) decoded instead, intervals past a chromosome's end
+	counted to it, and a float track among the tracks read as before."""
+
+	rng = numpy.random.default_rng(31)
+	sizes = {'chrA': 4000, 'chrB': 1500}
+	tracks = [{'name': 'depth'}, {'name': 'signed'}, {'name': 'big'},
+		{'name': 'signal', 'dtype': 'float32'}]
+	ref = {}
+	for chrom, length in sizes.items():
+		values = numpy.zeros((4, length))
+		values[0] = rng.integers(0, 60, length)
+		values[1] = rng.integers(-500, 500, length)
+		values[2, ::7] = rng.integers(0, 200, len(values[2, ::7]))
+		values[3] = rng.normal(0, 1, length).astype(numpy.float32)
+		ref[chrom] = values
+	ref['chrA'][2, 640:704] = 300000
+	ref['chrA'][2, 640] += 1
+	path = str(tmp_path / 'depth.fw')
+	with FigWigWriter(path, sizes, tracks, tile=TILE, groups=[['depth',
+			'signed'], ['big'], ['signal']], order=order) as writer:
+		for chrom, length in sizes.items():
+			writer.write(chrom, [0], ref[chrom][None])
+	reader = FigWigReader(path)
+	assert reader.tile_sums('big', 'chrA')[10] != ref['chrA'][2, 640:704].sum()
+
+	n = 80
+	chroms = numpy.array(list(sizes))[rng.integers(0, 2, n)]
+	chroms[:4] = 'chrA'
+	lengths = numpy.array([sizes[c] for c in chroms])
+	starts = (rng.random(n) * lengths).astype(numpy.int64)
+	ends = starts + rng.integers(0, 2000, n)
+	starts[:4], ends[:4] = [0, 64, 600, 10], [4000, 128, 720, 10]
+	ends[4] = lengths[4] + 30
+	clipped = numpy.minimum(ends, lengths)
+	dense = numpy.array([ref[c][:, s:e].sum(-1) for c, s, e in zip(chroms,
+		starts, clipped)])
+	assert ((ends // TILE) - (-(-starts // TILE)) > 2).sum() > 20
+
+	for dtype in ('float64', 'float32', 'int64', None):
+		y = reader.sums(chroms, starts, ends, tracks=['depth', 'signed', 'big'],
+			dtype=dtype, n_jobs=n_jobs)
+		assert_identical(y, dense[:, :3].astype(y.dtype))
+	assert_identical(reader.sums(chroms, starts, ends, tracks='big', n_jobs=
+		n_jobs, nan='skip'), dense[:, 2])
+	y = reader.sums(chroms, starts, ends, dtype='float64', n_jobs=n_jobs)
+	assert_identical(y[:, :3], dense[:, :3])
+	numpy.testing.assert_allclose(y[:, 3], dense[:, 3], rtol=1e-6, atol=1e-4)
+	with pytest.raises(ValueError, match="outside what int16 holds"):
+		reader.sums(chroms, starts, ends, tracks='depth', dtype='int16')
+
+
 @pytest.mark.parametrize('n_jobs', [1, 4])
 def test_nan_modes_of_sums(fw, track_fw, ref, scratch_mode, n_jobs):
 	"""nan='skip' leaves NaN bases out of a sum, 'count' gives the bases
