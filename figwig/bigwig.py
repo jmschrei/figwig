@@ -62,11 +62,11 @@ class BigWigReader:
 
 	Each base gets the value of the interval that covers it. A base that no
 	interval covers gets `missing`, 0 unless given, and a base past the end of
-	its chromosome is NaN. An interval whose value is NaN is treated as
-	covering nothing, so its bases get `missing` too. These are the values
-	pybigtools' `values(chrom, start, end, missing=missing)` gives, cast to
-	float32. pyBigWig's `values()` gives NaN where no interval covers a base,
-	which `missing=numpy.nan` matches.
+	its chromosome gets `oob`, NaN unless given. An interval whose value is
+	NaN is treated as covering nothing, so its bases get `missing` too. These
+	are the values pybigtools' `values(chrom, start, end, missing=missing,
+	oob=oob)` gives, cast to float32. pyBigWig's `values()` gives NaN where
+	no interval covers a base, which `missing=numpy.nan` matches.
 
 	A writer leaves out a chromosome that has no data, so a sample without
 	reads on chrY, say, has no chrY in its file. A window on a chromosome the
@@ -320,7 +320,7 @@ class BigWigReader:
 	def read(self, chroms: str | list[str] | numpy.ndarray, starts: list[int] |
 		numpy.ndarray, width: int, out: numpy.ndarray | None = None,
 		n_jobs: int = 8, missing: float = 0.0, keep_nan: bool = False, *,
-		engine: str = 'auto') -> numpy.ndarray:
+		oob: float = numpy.nan, engine: str = 'auto') -> numpy.ndarray:
 		"""Read the per-base values of many windows of one width.
 
 		Window j covers [starts[j], starts[j] + width) on chroms[j], and its
@@ -343,7 +343,7 @@ class BigWigReader:
 			The start of each window, inclusive and base-0. Every window must
 			start at 0 or later, and its end, start + width, must be at most
 			2**32 - 1. A window may run past the end of its chromosome, and
-			the bases past it are NaN.
+			the bases past it are `oob`.
 
 		width: int
 			The length of every window, in bases. Must be at least 1.
@@ -368,6 +368,12 @@ class BigWigReader:
 			Whether a base that an interval whose value is NaN covers is NaN,
 			as pyBigWig gives it, rather than `missing`. Default is False.
 
+		oob: float, optional
+			The value of a base past the end of its chromosome, as pybigtools'
+			`values(oob=)` takes it. It is cast to float32. Pass 0.0 to read
+			windows that run off a chromosome's end as no signal there.
+			Default is numpy.nan.
+
 
 		engine: str, optional
 			What inflates the data blocks: 'isal', ISA-L, which needs the
@@ -380,12 +386,12 @@ class BigWigReader:
 		-------
 		out: numpy.ndarray, shape=(n, width), dtype=float32
 			The value of every base of every window: the value of the interval
-			covering it, `missing` where no interval does, and NaN past the
+			covering it, `missing` where no interval does, and `oob` past the
 			end of the chromosome.
 		"""
 
 		return _read([self], True, chroms, starts, width, out, n_jobs, missing,
-			keep_nan, engine)
+			keep_nan, engine, oob)
 
 	def _warn_absent(self, windows, missing, stacklevel):
 		"""Warn about windows on chromosomes the file does not have.
@@ -504,12 +510,12 @@ def _check_n_jobs(n_jobs):
 	return int(n_jobs)
 
 
-def _check_missing(missing):
-	"""The `missing` argument as a float32."""
+def _check_missing(missing, name='missing'):
+	"""The `missing` argument, or another named `name`, as a float32."""
 
 	if isinstance(missing, bool) or not isinstance(missing, (int, float,
 			numpy.integer, numpy.floating)):
-		raise TypeError("missing must be a number, not {}.".format(
+		raise TypeError("{} must be a number, not {}.".format(name,
 			type(missing).__name__))
 
 	return numpy.float32(missing)
@@ -594,14 +600,14 @@ class _Read:
 
 	Windows on a chromosome the file does not have are filled with `missing`
 	here and left out of the batches. Without the chromosome's length there
-	is no end past which their bases would be NaN.
+	is no end past which their bases would be `oob`.
 	"""
 
 	def __init__(self, bigwig, windows, out, signal, missing, decoder,
-		keep_nan=False):
+		keep_nan=False, oob=numpy.float32(numpy.nan)):
 		self.bigwig, self.windows = bigwig, windows
 		self.out, self.signal, self.missing = out, signal, missing
-		self.keep_nan = keep_nan
+		self.keep_nan, self.oob = keep_nan, oob
 
 		index = bigwig._get_index()
 		names, codes, starts = windows.names, windows.codes, windows.starts
@@ -663,7 +669,7 @@ class _Read:
 		local = self.rows[w0:w1].copy()
 		local[:, :2] -= b0
 		_read_windows(words, blocks, local, self.out, self.signal,
-			self.failed[w0:w1], self.missing, self.keep_nan)
+			self.failed[w0:w1], self.missing, self.keep_nan, self.oob)
 
 	def finish(self):
 		if self.failed.any():
@@ -677,7 +683,7 @@ class _Read:
 
 
 def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing,
-	keep_nan=False, engine='auto'):
+	keep_nan=False, engine='auto', oob=numpy.nan):
 	"""Read windows from one or more open bigWigs into one array.
 
 	With `single`, `bigwigs` holds one BigWigReader and the output has shape
@@ -690,6 +696,7 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing,
 	decoder = _decoder(engine)
 	n_jobs = _check_n_jobs(n_jobs)
 	missing = _check_missing(missing)
+	oob = _check_missing(oob, 'oob')
 	windows = _Windows(chroms, starts, width)
 	n, width = windows.n, windows.width
 
@@ -712,9 +719,8 @@ def _read(bigwigs, single, chroms, starts, width, out, n_jobs, missing,
 		bigwig._warn_absent(windows, missing, stacklevel=3)
 
 	out3 = out.reshape(n, 1, width) if single else out
-	_run([_Read(bigwig, windows, out3, i, missing, decoder, keep_nan) for i,
-		bigwig in
-		enumerate(bigwigs)], n_jobs)
+	_run([_Read(bigwig, windows, out3, i, missing, decoder, keep_nan, oob)
+		for i, bigwig in enumerate(bigwigs)], n_jobs)
 	return out
 
 
@@ -803,8 +809,8 @@ def _run(reads, n_jobs):
 def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 	chroms: str | list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray,
 	width: int, out: numpy.ndarray | None = None, n_jobs: int = 8,
-	missing: float = 0.0, keep_nan: bool = False, *, engine: str = 'auto'
-	) -> numpy.ndarray:
+	missing: float = 0.0, keep_nan: bool = False, *, oob: float = numpy.nan,
+	engine: str = 'auto') -> numpy.ndarray:
 	"""Read the per-base values of many windows of one width from bigWigs.
 
 	Given one bigWig, this reads the windows as `BigWigReader.read` does, into
@@ -858,6 +864,10 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 		Whether a base that an interval whose value is NaN covers is NaN
 		rather than `missing`; see `BigWigReader.read`. Default is False.
 
+	oob: float, optional
+		The value of a base past the end of its chromosome; see
+		`BigWigReader.read`. Default is numpy.nan.
+
 
 	engine: str, optional
 		What inflates the data blocks: 'isal', 'zlib' or 'auto', as for
@@ -884,4 +894,4 @@ def read_bigwig(bigwigs: str | os.PathLike | BigWigReader | list | tuple,
 	files = [bigwig if isinstance(bigwig, BigWigReader) else BigWigReader(
 		bigwig) for bigwig in files]
 	return _read(files, single, chroms, starts, width, out, n_jobs, missing,
-		keep_nan, engine)
+		keep_nan, engine, oob)

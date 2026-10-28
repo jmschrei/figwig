@@ -9,6 +9,11 @@ Release History
 Unreleased
 ==========
 
+Reading
+-------
+
+	- ``oob=`` on ``BigWigReader.read`` and ``read_bigwig`` sets the value of bases past the end of a chromosome, as in pybigtools' ``values()``. The default stays NaN.
+
 Documentation
 -------------
 
