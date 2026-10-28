@@ -2,6 +2,7 @@
 # Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
 import os
+import pathlib
 import sys
 import pickle
 import shutil
@@ -18,6 +19,7 @@ import figwig._figwig_kernels
 
 from figwig import FigWigReader
 from figwig import FigWigWriter
+from figwig import is_figwig
 from figwig import read_figwig
 from figwig import write_figwig
 from figwig import SparseEntries
@@ -419,6 +421,20 @@ def test_read_figwig(fw, ref):
 	assert y.shape == (2, 5, 50) and y.dtype == numpy.float64
 	with pytest.raises(TypeError, match="path or a FigWigReader"):
 		read_figwig(3, 'chr1', [0], 10)
+
+
+def test_is_figwig(fw, tmp_path):
+	assert is_figwig(fw) and is_figwig(pathlib.Path(fw))
+
+	bigwig = tmp_path / 'track.bw'
+	bigwig.write_bytes(struct.pack('<I', 0x888FFC26) + bytes(60))
+	short = tmp_path / 'short.fw'
+	short.write_bytes(b'FIG')
+	empty = tmp_path / 'empty.fw'
+	empty.write_bytes(b'')
+
+	for path in (bigwig, short, empty, tmp_path, tmp_path / 'missing.fw'):
+		assert is_figwig(path) is False
 
 
 ###
@@ -1159,6 +1175,7 @@ def test_without_jit(tmp_path, ref):
 	script = """
 import numpy, sys
 from figwig import FigWigWriter
+from figwig import is_figwig
 from figwig import FigWigReader
 values = numpy.zeros((1, 2, 100))
 values[0, 0, 5] = 3

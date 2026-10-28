@@ -9,6 +9,11 @@ Release History
 Unreleased
 ==========
 
+figwig files
+------------
+
+	- ``is_figwig(path)`` tells whether a path is a figwig file from the magic number in its first four bytes, without opening it as a reader, so that code taking either a figwig file or bigWigs can choose its reader: it is False for a bigWig, a missing path or a directory.
+
 Documentation
 -------------
 

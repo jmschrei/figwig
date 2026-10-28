@@ -4479,6 +4479,40 @@ class _BlockTask:
 			dtype=numpy.float64), scratch, self.bins, self.pair_stops, self.nan_mode)
 
 
+def is_figwig(path: str | os.PathLike) -> bool:
+	"""Whether a path is a figwig file, by the magic number that starts its
+	header.
+
+	This reads only the first four bytes, so it is cheap enough to tell a
+	figwig file from a bigWig or another file before choosing a reader. It
+	does not check the rest of the file: `FigWigReader` still raises on a
+	file that starts like a figwig file but is damaged, truncated or of a
+	later version.
+
+
+	Parameters
+	----------
+	path: str or os.PathLike
+		The path to check.
+
+
+	Returns
+	-------
+	is_figwig: bool
+		True when `path` is a regular file that starts with the figwig magic
+		number, and False otherwise, including when nothing is at `path` or it
+		is a directory.
+	"""
+
+	path = os.fspath(path)
+	if not os.path.isfile(path):
+		return False
+
+	with open(path, 'rb') as handle:
+		magic = handle.read(4)
+	return len(magic) == 4 and int.from_bytes(magic, 'little') == _FIGWIG_MAGIC
+
+
 def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	list[str] | numpy.ndarray, starts: list[int] | numpy.ndarray, width: int,
 	tracks: str | int | list | None = None, out: numpy.ndarray | None = None,
