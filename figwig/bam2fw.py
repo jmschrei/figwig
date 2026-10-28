@@ -186,14 +186,21 @@ def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 	return trimmed, discarded
 
 
+# The bases of a chromosome `_write_coverage` writes as one dense window: a
+# multiple of every tile.
+_COVERAGE_PIECE = 1 << 22
+
+
 def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 		read_depth):
 	"""Write one file's runs of coverage, strands['+'][chrom] = (starts,
-	ends, values), as intervals of the tracks `names`, each its own group,
-	scaled as `_write_counts` scales counts."""
+	ends, values), into the tracks `names`, each its own group, scaled as
+	`_write_counts` scales counts. Each `_COVERAGE_PIECE` bases of a
+	chromosome go in as one dense window, whose whole tiles the writer
+	encodes on its threads, where intervals are encoded on this one."""
 
 	for name, key in zip(names, ('+', '-')):
-		for chrom, _ in chrom_sizes:
+		for chrom, length in chrom_sizes:
 			starts, ends, values = strands[key][chrom]
 			if len(starts) == 0:
 				continue
@@ -201,7 +208,32 @@ def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 			values *= scale_factor
 			if read_depth is not None:
 				values /= read_depth
-			writer.write(chrom, starts, values[:, None], ends=ends, tracks=[name])
+			first = starts[0] // _COVERAGE_PIECE * _COVERAGE_PIECE
+			for a in range(first, int(ends[-1]), _COVERAGE_PIECE):
+				b = min(a + _COVERAGE_PIECE, length)
+				lo = numpy.searchsorted(ends, a, side='right')
+				hi = numpy.searchsorted(starts, b, side='left')
+				if hi <= lo:
+					continue
+				writer.write(chrom, [a], _dense_runs(starts[lo:hi] - a, ends[lo:hi]
+					- a, values[lo:hi], b - a)[None, None], tracks=[name])
+
+
+def _dense_runs(starts, ends, values, width):
+	"""The `width` bases of a piece holding sorted, disjoint runs, which
+	may run past either end of it: each run's value, 0 between runs."""
+
+	starts = numpy.clip(starts, 0, width)
+	ends = numpy.clip(ends, 0, width)
+	bounds = numpy.empty(2 * len(starts) + 1, dtype=numpy.int64)
+	bounds[0:-1:2] = starts
+	bounds[1:-1:2] = ends
+	bounds[-1] = width
+	fills = numpy.zeros(2 * len(starts), dtype=numpy.float64)
+	fills[0::2] = values
+	out = numpy.zeros(width, dtype=numpy.float64)
+	out[bounds[0]:] = numpy.repeat(fills, numpy.diff(bounds))
+	return out
 
 
 def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
