@@ -1679,8 +1679,8 @@ def test_negative_zero_reads_as_zero(tmp_path):
 
 def test_runs_chunks_hold_binned_signal(tmp_path):
 	"""Intervals of one value over many bases are stored as runs, read
-	back exactly in windows and as entries, and take far less than a
-	dense chunk."""
+	back exactly in windows, in bins and as entries, and take far less than
+	a dense chunk."""
 
 	path = str(tmp_path / 'r.fw')
 	rng = numpy.random.default_rng(3)
@@ -1707,6 +1707,9 @@ def test_runs_chunks_hold_binned_signal(tmp_path):
 		assert numpy.isnan(y[j, :, piece.shape[1]:]).all()
 	found = reader.read('chr1', windows, 777, sparse=True)
 	assert_identical(sparse_to_dense(found, 'float32'), numpy.nan_to_num(y))
+	binned = reader.read('chr1', windows, 777, bins=7, dtype='float64')
+	numpy.testing.assert_array_equal(binned, numpy.nan_to_num(y).astype(
+		numpy.float64).reshape(300, 2, 111, 7).sum(-1))
 	entries = reader.read_entries()
 	assert len(entries.values) == int((dense != 0).sum())
 	y = reader.read('chr1', windows, 777, labels=[0, 0])

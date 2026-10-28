@@ -9,6 +9,11 @@ Release History
 Unreleased
 ==========
 
+figwig files
+------------
+
+	- Speed up binned reading in ``read(..., bins=)``: add a runs chunk's values once per bin rather than base by base.
+
 Documentation
 -------------
 

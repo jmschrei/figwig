@@ -1696,12 +1696,10 @@ def _value(values, i, ones):
 
 @numba.njit(nogil=True, cache=True)
 def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
-	row, k_out, out_rows, out_channels, out_offsets, out_values, bins,
-	nan_mode):
+	row, k_out, out_rows, out_channels, out_offsets, out_values):
 	"""Bases s to e - 1 of a window that starts at `start` take `value`:
-	set or added into row `slot` of `channels`, added per bin of `bins`
-	bases when above 1, or listed as entries when the value is not 0.
-	Returns the entries listed."""
+	set or added into row `slot` of `channels`, or listed as entries when
+	the value is not 0. Returns the entries listed."""
 
 	if listing:
 		if value != 0.0:
@@ -1715,23 +1713,31 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 		return k_out
 
 	dst = channels[slot]
-	if bins > 1:
-		if nan_mode != 0:
-			value = _pick(value, nan_mode)
-		k = (s - start) // bins
-		edge = (k + 1) * bins
-		for p in range(s - start, e - start):
-			if p >= edge:
-				k += 1
-				edge += bins
-			dst[k] += value
-	elif accumulate:
+	if accumulate:
 		for p in range(s - start, e - start):
 			dst[p] += value
 	else:
 		for p in range(s - start, e - start):
 			dst[p] = value
 	return k_out
+
+
+@numba.njit(nogil=True, cache=True, inline='always')
+def _add_binned(dst, value, lo, hi, bins, nan_mode):
+	"""dst[p // bins] += value, as `_pick` takes it under `nan_mode`, for p
+	from lo to hi - 1: a run of one value, added once per bin it covers as
+	the value times its bases in that bin."""
+
+	if nan_mode != 0:
+		value = _pick(value, nan_mode)
+	if value == 0.0:
+		return
+	k = lo // bins
+	while lo < hi:
+		edge = min(hi, (k + 1) * bins)
+		dst[k] += value * (edge - lo)
+		lo = edge
+		k += 1
 
 
 # The decoders below take a chunk's values as a typed view, so that numba
@@ -1779,12 +1785,13 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 				channels[slot, a - start:b - start] = 0
 
 			p = 0
-			if kind == _RUNS and not listing and bins == 1 and nan_mode == 0:
-				# The common case, a window set or added into its row: the
-				# row is taken once and each run filled in place. Taking the
-				# row and calling `_put_run` per change cost 70 ns a change
-				# where runs are a base or two long, as conservation scores'
-				# are, against a few ns here.
+			if kind == _RUNS and not listing and (bins > 1 or nan_mode == 0):
+				# The common case, a window set or added into its row, or
+				# binned: the row is taken once and each run filled in place,
+				# or added once per bin it covers. Taking the row and calling
+				# `_put_run` per change cost 70 ns a change where runs are a
+				# base or two long, as conservation scores' are, against a few
+				# ns here, and binning base by base cost more than a read.
 				dst = channels[slot]
 				current = 0.0
 				since = base
@@ -1798,7 +1805,9 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					if here > since:
 						lo = max(since, a) - start
 						hi = here - start
-						if accumulate:
+						if bins > 1:
+							_add_binned(dst, current, lo, hi, bins, nan_mode)
+						elif accumulate:
 							for q in range(lo, hi):
 								dst[q] += current
 						else:
@@ -1810,7 +1819,9 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 				if since < b:
 					lo = max(since, a) - start
 					hi = b - start
-					if accumulate:
+					if bins > 1:
+						_add_binned(dst, current, lo, hi, bins, nan_mode)
+					elif accumulate:
 						for q in range(lo, hi):
 							dst[q] += current
 					else:
@@ -1831,14 +1842,14 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					if here > since:
 						k_out = _put_run(current, max(since, a), here, start, channels,
 							slot, accumulate, listing, fill, row, k_out, out_rows,
-							out_channels, out_offsets, out_values, bins, nan_mode)
+							out_channels, out_offsets, out_values)
 					current = _value(values, d, ones)
 					since = here
 					d += 1
 				if since < b:
 					k_out = _put_run(current, max(since, a), b, start, channels, slot,
 						accumulate, listing, fill, row, k_out, out_rows,
-						out_channels, out_offsets, out_values, bins, nan_mode)
+						out_channels, out_offsets, out_values)
 			else:
 				k = (a - start) // bins
 				edge = start + (k + 1) * bins
