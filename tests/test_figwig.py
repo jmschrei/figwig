@@ -1402,6 +1402,126 @@ def test_matrix_chunks_are_chosen_for_many_sparse_tracks(cells, tmp_path,
 	assert numpy.bincount(kinds & 7, minlength=5)[3] == 0
 
 
+@pytest.mark.parametrize('level', [6, 0])
+def test_write_sparse_writes_what_write_writes(tmp_path, level):
+	"""A tile written as entries is stored as the kind `write` picks for
+	the rows they fill, so the two give every tile the same chunk, though
+	they may lay a call's groups out in another order: depth-like runs,
+	float32 noise, ones, negative runs, float64 values, scattered counts and
+	a track with none, in groups where a track is absent from tiles, on
+	chromosomes that end inside a tile. Runs broken by NaN read the same and
+	take fewer decoded bytes, a stretch of NaN being one change of value;
+	`write` counts each NaN base as a change when it surveys a row, so it
+	stores such a tile sparse."""
+
+	rng = numpy.random.default_rng(37)
+	sizes = {'a': 3000, 'b': 1000, 'c': 70}
+	tracks = [{'name': 'depth'}, {'name': 'noise', 'dtype': 'float32'},
+		{'name': 'ones'}, {'name': 'negative'}, {'name': 'wide', 'dtype':
+		'float64'}, {'name': 'scattered'}, {'name': 'empty'}]
+	groups = [['depth', 'empty'], ['noise'], ['scattered'], ['ones'], ['negative',
+		'wide']]
+	rows, nan_rows = {}, {}
+	for chrom, length in sizes.items():
+		depth = numpy.cumsum(rng.integers(-1, 2, length)).clip(0, None)
+		values = numpy.zeros((7, length))
+		values[0] = depth
+		values[1] = rng.random(length).astype(numpy.float32)
+		values[1, length // 3:length // 2] = 0
+		values[2] = rng.random(length) < 0.7
+		values[3] = -depth
+		values[3, :length // 2] = 0
+		values[4] = numpy.where(depth > 0, depth * 2.0 ** 30 + 0.25, 0)
+		values[5] = (rng.random(length) < 0.02) * rng.integers(1, 9, length)
+		rows[chrom] = values
+		nan_rows[chrom] = depth[None].astype(numpy.float64)
+		nan_rows[chrom][0, 10:40] = numpy.nan
+		nan_rows[chrom][0, length // 2] = numpy.nan
+
+	def write_both(name, tracks, groups, rows):
+		paths = str(tmp_path / (name + '_dense.fw')), str(tmp_path / (name +
+			'_entries.fw'))
+		with FigWigWriter(paths[0], sizes, tracks, tile=64, groups=groups,
+				level=level) as writer:
+			for chrom, values in rows.items():
+				writer.write(chrom, [0], values[None])
+		with FigWigWriter(paths[1], sizes, tracks, tile=64, groups=groups,
+				level=level) as writer:
+			for chrom, values in rows.items():
+				which, positions = numpy.nonzero(values)
+				order = rng.permutation(len(which))
+				writer.write_sparse(chrom, positions[order], which[order], values[
+					which, positions][order])
+		reader = FigWigReader(paths[1])
+		for chrom, values in rows.items():
+			assert_identical(reader.read(chrom, [0], sizes[chrom], dtype='float64')[
+				0], values)
+		return paths, reader
+
+	def chunks(path, group):
+		kinds, sizes, _, offsets, _ = FigWigReader(path)._group_index(group)
+		with open(path, 'rb') as handle:
+			data = handle.read()
+		return kinds.tolist(), [data[o:o + n] for o, n in zip(offsets.tolist(),
+			sizes.tolist())]
+
+	(dense, entries), reader = write_both('all', tracks, groups, rows)
+	for g in range(len(groups)):
+		assert chunks(dense, g) == chunks(entries, g)
+	kinds = numpy.concatenate([reader._group_index(g)[0] for g in range(len(
+		groups))])
+	counts = numpy.bincount(kinds & 7, minlength=5)
+	assert counts[1] > 0 and counts[2] > 0 and counts[4] > 0
+
+	(dense, entries), reader = write_both('nan', [{'name': 'nan', 'dtype':
+		'float32'}], 1, nan_rows)
+	assert FigWigReader(entries)._group_index(0)[2].sum() < FigWigReader(
+		dense)._group_index(0)[2].sum()
+	assert (reader._group_index(0)[0] & 7 == 4).any()
+
+
+def test_entry_runs_are_the_changes_of_the_rows():
+	"""The changes of value found from a tile's entries are those
+	`_collect_runs` finds in the rows they fill, and take the bytes
+	`_run_bytes` counts: runs, gaps far enough apart to need two- and
+	three-byte offsets, NaN stretches, a run to the tile's end and a track
+	with no entries."""
+
+	kernels = figwig._figwig_kernels
+	rng = numpy.random.default_rng(41)
+	tile = 65536
+	rows = numpy.zeros((5, tile))
+	rows[0] = numpy.repeat(rng.integers(0, 3, tile // 16), 16)
+	rows[1, [3, 4, 5, 300, 301, 40000]] = [2, 2, 7, 1, 1, 9]
+	rows[2] = rows[0]
+	rows[2, 100:140] = numpy.nan
+	rows[2, 141] = numpy.nan
+	rows[3, tile - 50:] = 4
+	which, offsets = numpy.nonzero(rows)
+	touched = numpy.unique(which).astype(numpy.int64)
+	nnz = numpy.bincount(which, minlength=5).astype(numpy.int64)
+	offs = offsets.astype(numpy.int64)
+	vals = rows[which, offsets]
+
+	npts = numpy.zeros(5, dtype=numpy.int64)
+	roffs = numpy.empty(2 * len(offs), dtype=numpy.int64)
+	rvals = numpy.empty(2 * len(offs), dtype=numpy.float64)
+	n_points, run_bytes = kernels._entry_runs(tile, touched, len(touched), nnz,
+		offs, vals, npts, roffs, rvals)
+
+	expected_offs = numpy.empty(5 * tile, dtype=numpy.int64)
+	expected_vals = numpy.empty(5 * tile, dtype=numpy.float64)
+	d, expected_bytes = 0, 0
+	for g in touched:
+		n = kernels._collect_runs(rows[g], tile, 0, expected_offs, expected_vals, d)
+		assert npts[g] == n
+		d += n
+		expected_bytes += kernels._run_bytes(rows[g], tile, 0)
+	assert n_points == d and run_bytes == expected_bytes
+	numpy.testing.assert_array_equal(roffs[:d], expected_offs[:d])
+	assert_identical(rvals[:d], expected_vals[:d])
+
+
 def test_write_sparse_arguments(tmp_path):
 	path = str(tmp_path / 's.fw')
 	writer = FigWigWriter(path, {'chr1': 1000, 'chr2': 500}, ['a', 'b', {'name':
