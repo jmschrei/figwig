@@ -556,6 +556,17 @@ def main(argv=None, prog='figwig bam2fw'):
 		import multiprocessing
 		tqdm.set_lock(multiprocessing.RLock())
 
+	# Coverage of indexed, sorted BAM files is read region by region on every
+	# core and written a chromosome at a time; other files go through
+	# read_files.
+	if args.coverage:
+		from ._indexed import bam2fw_coverage
+		try:
+			if bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
+				return
+		except (ValueError, TypeError, OSError) as e:
+			raise _exit(prog, e)
+
 	# pysam raises for a file that is not a BAM, or is cut short, as the
 	# scanners do for a bad fragments file: a message, not a traceback.
 	try:

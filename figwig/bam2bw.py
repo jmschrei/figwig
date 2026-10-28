@@ -2721,6 +2721,16 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 		tqdm.set_lock(multiprocessing.RLock())
 
 	cores = _cores(args.parallel)
+
+	# Coverage of indexed, sorted BAM files is read region by region on every
+	# core, a chromosome at a time; other files go through read_files.
+	if args.coverage:
+		from ._indexed import bam2bw_coverage
+		if bam2bw_coverage(args, chrom_sizes, cores):
+			if fast_exit:
+				_exit_now(args)
+			return
+
 	reads = read_files(args, chrom_sizes, cores)
 
 	# The persistent per-file bars leave the cursor part-way up the screen, so
