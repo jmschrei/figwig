@@ -622,7 +622,7 @@ def _discarded_line(discarded):
 		.format(chrom, count) for chrom, count in discarded.items())))
 
 
-def bam2bw_coverage(args, chrom_sizes, cores):
+def _bam2bw_coverage(args, chrom_sizes, cores):
 	"""`figwig bam2bw -c` through this reader: True once the bigWigs are
 	written, False when the files are not ones it takes or the record
 	kernel sends one to pysam, with nothing written then. Each chromosome is
@@ -646,7 +646,7 @@ def bam2bw_coverage(args, chrom_sizes, cores):
 	_report_missing(files, chrom_sizes, args)
 	if args.read_depth:
 		try:
-			result = indexed_coverage(files, chrom_sizes, args, cores)
+			result = _indexed_coverage(files, chrom_sizes, args, cores)
 		except _Fallback:
 			return False
 		strands, discarded, read_depth = result
@@ -672,7 +672,7 @@ def bam2bw_coverage(args, chrom_sizes, cores):
 			values)}, args.scale_factor, None)
 
 	try:
-		_, discarded, _ = indexed_coverage(files, chrom_sizes, args, cores, emit)
+		_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, cores, emit)
 		for writer in writers.values():
 			writer.close()
 	except _Fallback as error:
@@ -687,7 +687,7 @@ def bam2bw_coverage(args, chrom_sizes, cores):
 	return True
 
 
-def bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
+def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	"""`figwig bam2fw -c` through this reader, file by file: True once the
 	file is written, False when the files are not ones it takes or the
 	record kernel sends one to pysam, with nothing written then."""
@@ -708,7 +708,7 @@ def bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 
 	if args.read_depth:
 		try:
-			results = [indexed_coverage([f], chrom_sizes, args, cores) for f in files]
+			results = [_indexed_coverage([f], chrom_sizes, args, cores) for f in files]
 		except _Fallback:
 			return False
 		discarded = {chrom: sum(r[1][chrom] for r in results) for chrom, _ in
@@ -744,7 +744,7 @@ def bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 						values *= args.scale_factor
 					writer.write(chrom, [beg], values[None, None], tracks=[track_of[key]])
 
-				_, lost, _ = indexed_coverage([f], chrom_sizes, args, cores, emit,
+				_, lost, _ = _indexed_coverage([f], chrom_sizes, args, cores, emit,
 					dense=True)
 				for chrom in lost:
 					discarded[chrom] += lost[chrom]
@@ -754,7 +754,7 @@ def bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	return True
 
 
-def indexed_coverage(files, chrom_sizes, args, threads, emit=None,
+def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	dense=False):
 	"""The coverage of `files` (from `_open_files`), pooled, as
 	`_coverage_runs` gives it for each chromosome and strand, read region by

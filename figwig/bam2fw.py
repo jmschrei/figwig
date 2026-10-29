@@ -560,9 +560,9 @@ def main(argv=None, prog='figwig bam2fw'):
 	# core and written a chromosome at a time; other files go through
 	# read_files.
 	if args.coverage:
-		from ._indexed import bam2fw_coverage
+		from ._indexed import _bam2fw_coverage
 		try:
-			if bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
+			if _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 				return
 		except (ValueError, TypeError, OSError) as e:
 			raise _exit(prog, e)

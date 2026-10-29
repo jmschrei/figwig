@@ -2725,8 +2725,8 @@ def main(argv=None, prog='figwig bam2bw', fast_exit=False):
 	# Coverage of indexed, sorted BAM files is read region by region on every
 	# core, a chromosome at a time; other files go through read_files.
 	if args.coverage:
-		from ._indexed import bam2bw_coverage
-		if bam2bw_coverage(args, chrom_sizes, cores):
+		from ._indexed import _bam2bw_coverage
+		if _bam2bw_coverage(args, chrom_sizes, cores):
 			if fast_exit:
 				_exit_now(args)
 			return

@@ -1082,13 +1082,13 @@ def test_indexed_coverage_is_the_whole_file_coverage(tmp_path, indexed_bams,
 	unsorted, indexed = indexed_bams
 	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
 	calls = []
-	original = figwig._indexed.indexed_coverage
+	original = figwig._indexed._indexed_coverage
 
 	def counted(*args, **kwargs):
 		calls.append(1)
 		return original(*args, **kwargs)
 
-	monkeypatch.setattr(figwig._indexed, "indexed_coverage", counted)
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", counted)
 	flags = ("-c",) + flags
 	capsys.readouterr()
 	whole = bam2bw(tmp_path / "whole", unsorted, sizes, *flags)
