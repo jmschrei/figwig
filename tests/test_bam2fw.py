@@ -1026,7 +1026,7 @@ def fixed_regions(width):
 	"""A stand-in for figwig._indexed._regions: regions of `width` bases,
 	finer than the 16 kb windows the real one cuts on."""
 
-	def regions(files, chrom, size):
+	def regions(files, chrom, size, longest=None):
 		bounds = list(range(0, max(size, 1), width)) + [max(size, 1)]
 		return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 	return regions
@@ -1199,6 +1199,30 @@ def test_indexed_coverage_keeps_to_its_cores(tmp_path, indexed_bams, sizes,
 	bam2fw(tmp_path / "fw8", [indexed], sizes, "-c", "-p", "8")
 	assert {name for name, _ in calls} == {"_region_runs", "_region_dense"}
 	assert not any(main for _, main in calls)
+
+
+@pytest.mark.parametrize("spacing", [1, 1 << 30])
+@pytest.mark.parametrize("flags", [("-u",), ("-ps", "-7", "-ns", "9", "-sf",
+	"2")])
+def test_indexed_depth_goes_to_the_writer_as_runs_or_windows(tmp_path,
+		indexed_bams, sizes, monkeypatch, spacing, flags):
+	"""On threads, a region's depth goes to the writer as one window or, when
+	it changes value less often than once per `_RUN_SPACING` bases, as runs;
+	either gives the whole file's values, and for one track, with regions of
+	whole tiles as the index's 16 kb windows are of the default tile, the
+	same chunks."""
+
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	monkeypatch.setattr(figwig._indexed, "_RUN_SPACING", spacing)
+	flags = ("-c", "-t", "16") + flags
+	whole = bam2fw(tmp_path / "whole", [unsorted], sizes, *flags)
+	got = bam2fw(tmp_path / "got", [indexed], sizes, "-p", "8", *flags)
+	assert_same_figwig_values(whole, got)
+	if "-u" in flags:
+		assert chunks_of(whole, 0) == chunks_of(got, 0)
 
 
 def test_reading_and_writing_share_the_cores():

@@ -35,9 +35,15 @@ from .bam2bw import _inflate_engine
 
 # A region's most bases, a multiple of the 16 kb index windows, and the
 # BAM bytes at which a region is cut sooner. A region in flight holds an
-# int32 of depth per base.
+# int32 of depth per base; one read as runs holds its keys, which the cut
+# by bytes bounds, and may be longer.
 _REGION = 1 << 22
+_RUNS_REGION = 1 << 25
 _REGION_BYTES = 16 << 20
+
+# A region's depth with fewer changes of value than one per this many bases
+# goes to the writer as runs, which cost it less than every base.
+_RUN_SPACING = 256
 
 # The bytes a region reads at a time, and the BGZF blocks its records are
 # walked by. Each walk holds the GIL for its calls, and each reading thread
@@ -180,11 +186,11 @@ def _parse_index(data, n_ref):
 	return refs
 
 
-def _regions(files, chrom, size):
+def _regions(files, chrom, size, longest=None):
 	"""The [beg, end) regions of a chromosome: cut where the files' BAM
 	bytes since the region's start, from their linear indexes, pass
-	`_REGION_BYTES`, or its length `_REGION`, on 16 kb windows, so that a
-	stretch of many reads is cut finer than one of few."""
+	`_REGION_BYTES`, or its length `longest` (`_REGION` by default), on 16 kb
+	windows, so that a stretch of many reads is cut finer than one of few."""
 
 	n_windows = max((size + (1 << _WINDOW_SHIFT) - 1) >> _WINDOW_SHIFT, 1)
 	offsets = numpy.zeros(n_windows + 1, dtype=numpy.float64)
@@ -205,7 +211,7 @@ def _regions(files, chrom, size):
 		offsets[n_windows] += at[-1] - at[0]
 	bounds = [0]
 	start = 0
-	window = _REGION >> _WINDOW_SHIFT
+	window = (longest or _REGION) >> _WINDOW_SHIFT
 	for w in range(1, n_windows):
 		if w - start >= window or offsets[w] - offsets[start] >= _REGION_BYTES:
 			bounds.append(w << _WINDOW_SHIFT)
@@ -590,10 +596,23 @@ def _region_dense(files, chrom, size, beg, end, first, last, margin,
 		out = numpy.empty(width, dtype=numpy.int32)
 		c, gone = kernel(keys, int(bounds[k]), int(bounds[k + 1]), beg, size,
 			first, last, 0 if first else beg, size if last else min(end, size), out)
-		result.append(out)
+		changes = int(numpy.count_nonzero(out[1:] != out[:-1])) + 1
+		result.append(_depth_runs(out, beg) if changes * _RUN_SPACING < width
+			else out)
 		counted += c
 		lost += gone
 	return result, counted, lost
+
+
+def _depth_runs(depth, beg):
+	"""The runs of nonzero depth, (starts, ends, values), with depth[0] at
+	base `beg`."""
+
+	bounds = numpy.concatenate([[0], numpy.flatnonzero(depth[1:] != depth[:-1])
+		+ 1, [len(depth)]])
+	values = depth[bounds[:-1]]
+	kept = values != 0
+	return beg + bounds[:-1][kept], beg + bounds[1:][kept], values[kept]
 
 
 def _region_runs(files, chrom, size, beg, end, first, last, margin, unstranded):
@@ -821,6 +840,14 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 				track_of = dict(zip(['+', '-'], group))
 
 				def emit_depth(chrom, key, beg, depth):
+					if isinstance(depth, tuple):
+						starts, ends, values = depth
+						if len(starts):
+							values = values.astype(numpy.float64)
+							values *= args.scale_factor
+							writer.write(chrom, starts, values[:, None], ends=ends, tracks=[
+								track_of[key]])
+						return
 					if not depth.any():
 						return
 					values = depth
@@ -875,7 +902,7 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	# the region being put together, so that memory follows that window.
 	regions = []
 	for chrom, size in chrom_sizes:
-		pieces = _regions(files, chrom, size)
+		pieces = _regions(files, chrom, size, _REGION if dense else _RUNS_REGION)
 		for i, (beg, end) in enumerate(pieces):
 			regions.append((chrom, size, beg, end, i == 0, i == len(pieces) - 1))
 
