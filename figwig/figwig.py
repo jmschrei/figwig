@@ -788,6 +788,7 @@ class FigWigWriter:
 
 		self.order = _check_order(order)
 		self.tracks = _check_tracks(tracks, empty_ok=True)
+		self._integer_tracks = None
 		if self.order == 'tracks':
 			self._groups = [numpy.array([i]) for i in range(len(self.tracks))]
 		else:
@@ -1071,6 +1072,7 @@ class FigWigWriter:
 			return new + own if first else own + new
 
 		self.tracks = splice(self.tracks, records)
+		self._integer_tracks = None
 		self._track_ids = {track['name']: i for i, track in enumerate(self.tracks)}
 		self._stats = numpy.concatenate([stats, self._stats] if first else [
 			self._stats, stats])
@@ -1514,8 +1516,7 @@ class FigWigWriter:
 
 		# Declared dtypes are checked over all their tracks' entries at once,
 		# with each track's range found in one pass.
-		declared = [i for i in ids.tolist() if self.tracks[i]['dtype'] not in
-			(None, 'float32', 'float64')]
+		declared = ids[self._declared_integers()[ids]].tolist()
 		if declared:
 			mask = numpy.isin(track_ids, declared)
 			block = values[mask].astype(numpy.float64)
@@ -1646,6 +1647,16 @@ class FigWigWriter:
 		if longest + 25 + high_bits <= 63:
 			return numpy.argsort((high << (longest + 25)) | low, kind='stable')
 		return numpy.lexsort((low, high))
+
+	def _declared_integers(self):
+		"""Which tracks were given an integer dtype, which a write checks its
+		values against; the records hold no other dtype until close."""
+
+		if self._integer_tracks is None or len(self._integer_tracks) != len(
+				self.tracks):
+			self._integer_tracks = numpy.array([track['dtype'] not in (None,
+				'float32', 'float64') for track in self.tracks], dtype=bool)
+		return self._integer_tracks
 
 	def _radix_entries(self, tids, single, track_ids, positions, values, top):
 		"""The entries in the order `_entry_order` gives, with each array
