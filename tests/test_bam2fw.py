@@ -825,6 +825,31 @@ def test_coverage_scaling_and_depth(tmp_path, coverage_bam, sizes):
 		numpy.testing.assert_allclose(y[0, 0], expected[chrom]["+"] * 2 / 8)
 
 
+@pytest.mark.parametrize("flags, shifts", [((), (0, 0)), (("-u", "-ps", "4",
+	"-ns", "-5"), (4, -5)), (("-sf", "0.5"), (0, 0))])
+def test_coverage_in_pieces_is_the_file_of_one_piece(tmp_path, coverage_bam,
+		sizes, monkeypatch, flags, shifts):
+	"""bam2fw -c writes a chromosome's coverage a piece at a time, a whole
+	number of tiles each. Pieces of 64 bases over tiles of 16, which runs
+	cross and some of which hold no run, give the file one piece per
+	chromosome gives, byte for byte, and the pileup."""
+
+	flags = ("-c", "-t", "16") + flags
+	whole = bam2fw(tmp_path / "whole", [coverage_bam], sizes, *flags)
+	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", 64)
+	pieces = bam2fw(tmp_path / "pieces", [coverage_bam], sizes, *flags)
+	with open(whole, "rb") as a, open(pieces, "rb") as b:
+		assert a.read() == b.read()
+
+	expected = pileup(*shifts, stranded="-u" not in flags)
+	scale = 0.5 if "-sf" in flags else 1.0
+	reader = FigWigReader(pieces)
+	for chrom, length in CHROM_SIZES:
+		y = reader.read(chrom, [0], length, dtype="float64")[0]
+		for k, strand in enumerate(["+"] if "-u" in flags else ["+", "-"]):
+			numpy.testing.assert_array_equal(y[k], expected[chrom][strand] * scale)
+
+
 def test_coverage_reports_the_bases_clipped_away(tmp_path, coverage_bam, sizes,
 		capsys):
 	bam2bw(tmp_path, coverage_bam, sizes, "-c")
