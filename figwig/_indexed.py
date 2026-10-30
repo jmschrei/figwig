@@ -193,10 +193,12 @@ def _regions(files, chrom, size, longest=None):
 	"""The [beg, end) regions of a chromosome: cut where the files' BAM
 	bytes since the region's start, from their linear indexes, pass
 	`_REGION_BYTES`, or its length `longest` (`_REGION` by default), on 16 kb
-	windows, so that a stretch of many reads is cut finer than one of few."""
+	windows, so that a stretch of many reads is cut finer than one of few;
+	one region for a chromosome no file has reads on."""
 
 	n_windows = max((size + (1 << _WINDOW_SHIFT) - 1) >> _WINDOW_SHIFT, 1)
 	offsets = numpy.zeros(n_windows + 1, dtype=numpy.float64)
+	indexed = False
 	for f in files:
 		tid = f.tids.get(chrom)
 		if tid is None:
@@ -204,6 +206,7 @@ def _regions(files, chrom, size, longest=None):
 		linear = f.index[tid][0].astype(numpy.int64) >> 16
 		if len(linear) == 0:
 			continue
+		indexed = True
 		# Empty windows take the offset of the window before them.
 		filled = numpy.maximum.accumulate(linear[:n_windows])
 		at = numpy.zeros(n_windows, dtype=numpy.int64)
@@ -212,6 +215,8 @@ def _regions(files, chrom, size, longest=None):
 			at[len(filled):] = filled[-1]
 		offsets[:n_windows] += at - at[0]
 		offsets[n_windows] += at[-1] - at[0]
+	if not indexed:
+		return [(0, max(size, 1))]
 	bounds = [0]
 	start = 0
 	window = (longest or _REGION) >> _WINDOW_SHIFT
@@ -648,8 +653,6 @@ def _region_dense(files, chrom, size, beg, end, first, last, margin,
 	keys = _region_keys(files, chrom, beg - margin[0], end, stop)
 	n_outs = 1 if unstranded else 2
 	width = max(min(end, size) - beg, 0)
-	if len(keys) == 0:
-		return [numpy.zeros(width, dtype=numpy.int32) for _ in range(n_outs)], 0, 0
 	keys.sort(kind='stable')
 	bounds = numpy.searchsorted(keys, numpy.arange(n_outs + 1, dtype='int64') <<
 		_KEY_SHIFT)

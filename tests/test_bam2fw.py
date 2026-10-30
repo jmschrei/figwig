@@ -1344,14 +1344,15 @@ def test_reading_and_writing_share_the_cores():
 
 def test_regions_follow_the_bam_bytes(tmp_path, monkeypatch):
 	"""Regions cover each chromosome from 0 to its end on 16 kb windows,
-	at most _REGION long, and are cut finer where the reads are dense."""
+	at most _REGION long, and are cut finer where the reads are dense; a
+	chromosome without reads, or not in the BAM, is one region."""
 
 	import pysam
 	import figwig._indexed
 
 	monkeypatch.setattr(figwig._indexed, "_REGION", 1 << 16)
 	monkeypatch.setattr(figwig._indexed, "_REGION_BYTES", 1 << 13)
-	chrom_sizes = [("dense", 300000), ("empty", 50000)]
+	chrom_sizes = [("dense", 300000), ("empty", 200000)]
 	reads = [("dense", int(p), 50, False) for p in numpy.linspace(0, 299900,
 		600).astype(int)]
 	reads += [("dense", int(p), 50, False) for p in numpy.linspace(20000, 40000,
@@ -1364,15 +1365,14 @@ def test_regions_follow_the_bam_bytes(tmp_path, monkeypatch):
 	args = figwig.bam2bw._parser("t").parse_args([indexed, "-s", sizes_path, "-n",
 		"x", "-c"])
 	files = figwig._indexed._open_files([indexed], chrom_sizes, args)
-	for chrom, size in chrom_sizes:
-		regions = figwig._indexed._regions(files, chrom, size)
-		assert regions[0][0] == 0 and regions[-1][1] == size
-		assert all(b == c for (_, b), (c, _) in zip(regions, regions[1:]))
-		assert all(a % (1 << 14) == 0 and b - a <= 1 << 16 for a, b in regions)
 	dense = figwig._indexed._regions(files, "dense", 300000)
+	assert dense[0][0] == 0 and dense[-1][1] == 300000
+	assert all(b == c for (_, b), (c, _) in zip(dense, dense[1:]))
+	assert all(a % (1 << 14) == 0 and b - a <= 1 << 16 for a, b in dense)
 	within = [b - a for a, b in dense if 16384 <= a < 40000]
 	assert within and max(within) < 1 << 16
-	assert len(figwig._indexed._regions(files, "empty", 50000)) == 1
+	assert figwig._indexed._regions(files, "empty", 200000) == [(0, 200000)]
+	assert figwig._indexed._regions(files, "absent", 200000) == [(0, 200000)]
 
 
 def sorted_indexed(path, chrom_sizes, reads, **kwargs):
