@@ -2614,3 +2614,43 @@ def _bucket_ascending(rows, channels, offsets, lo, hi):
 				offsets[i] <= offsets[i - 1]:
 			return False
 	return True
+
+
+@numba.njit(nogil=True, cache=True)
+def _batch_cuts(bounds, live, cap, most, continues, binned):
+	"""Where a read's planner cuts a group's chunks into batches: each
+	batch takes chunks while its bytes stay within `cap` and its live
+	chunks below `most`, at least one; a binned read's batch then takes the
+	chunks of a window it is inside, up to twice those, and marks a window
+	cut inside a batch when it stops short. Returns each batch's first
+	chunk and its bytes, with the end appended to the firsts, and whether
+	a window was cut inside."""
+
+	n = bounds.shape[0]
+	firsts = [0]
+	totals = [0]
+	totals.pop()
+	cut_inside = False
+	a = 0
+	while a < n:
+		total_bytes = 0
+		n_live = 0
+		b = a
+		while b < n and (b == a or (total_bytes + bounds[b] <= cap and n_live <
+				most)):
+			total_bytes += bounds[b]
+			n_live += live[b]
+			b += 1
+		if binned:
+			while b < n and continues[b - 1]:
+				if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+					cut_inside = True
+					break
+				total_bytes += bounds[b]
+				n_live += live[b]
+				b += 1
+		totals.append(total_bytes)
+		firsts.append(b)
+		a = b
+	return numpy.array(firsts, dtype=numpy.int64), numpy.array(totals,
+		dtype=numpy.int64), cut_inside

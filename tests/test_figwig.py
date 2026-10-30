@@ -1274,6 +1274,52 @@ def test_sparse_gather_sorts_offsets_that_do_not_ascend(fw, monkeypatch,
 		assert found.values.dtype == numpy.float32 and found.shape == (2, 2, 10)
 
 
+def test_batch_cuts_are_the_planners_loop():
+	"""The kernel that cuts a read's chunks into batches gives the batches
+	and bytes of the loop the planner ran before, binned or not, and finds
+	a window cut inside a batch where the loop did."""
+
+	from figwig._figwig_kernels import _batch_cuts
+
+	def loop(bounds, live, cap, most, continues, binned):
+		firsts, totals, cut_inside, a = [0], [], False, 0
+		while a < len(bounds):
+			total_bytes, n_live, b = 0, 0, a
+			while b < len(bounds) and (b == a or (total_bytes + bounds[b] <= cap
+					and n_live < most)):
+				total_bytes += int(bounds[b])
+				n_live += int(live[b])
+				b += 1
+			if binned:
+				while b < len(bounds) and continues[b - 1]:
+					if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+						cut_inside = True
+						break
+					total_bytes += int(bounds[b])
+					n_live += int(live[b])
+					b += 1
+			totals.append(total_bytes)
+			firsts.append(b)
+			a = b
+		return firsts, totals, cut_inside
+
+	rng = numpy.random.default_rng(7)
+	seen = set()
+	for trial in range(300):
+		n = int(rng.integers(0, 60))
+		bounds = rng.integers(8, 400, n).astype(numpy.int64)
+		live = rng.integers(0, 2, n).astype(numpy.int64)
+		continues = rng.random(n) < 0.6
+		cap, most = int(rng.integers(8, 1200)), int(rng.integers(1, 9))
+		for binned in (False, True):
+			firsts, totals, cut_inside = _batch_cuts(bounds, live, cap, most,
+				continues if binned else numpy.zeros(0, dtype=bool), binned)
+			expected = loop(bounds, live, cap, most, continues, binned)
+			assert (firsts.tolist(), totals.tolist(), bool(cut_inside)) == expected
+			seen.add(bool(cut_inside))
+	assert seen == {False, True}
+
+
 def test_labels_sum_tracks(fw, ref, read_batching):
 	rng = numpy.random.default_rng(21)
 	chroms, starts = random_windows(rng, 100, 150)

@@ -78,6 +78,7 @@ from ._figwig_kernels import _encode_tiles
 from ._figwig_kernels import _entry_gather
 from ._figwig_kernels import _entry_keys
 from ._figwig_kernels import _inflate_chunks
+from ._figwig_kernels import _batch_cuts
 from ._figwig_kernels import _bucket_ascending
 from ._figwig_kernels import _bucket_counts
 from ._figwig_kernels import _bucket_scatter
@@ -4251,26 +4252,12 @@ class FigWigReader:
 		# are not cut inside a window, whose bins would otherwise be summed
 		# by two tasks at once, unless the window runs past twice a batch.
 		tasks = []
-		cut_inside = False
 		continues = _continuing_windows(rows, inverse, len(unique)) if bins > 1 \
-			else None
-		a = 0
-		while a < len(unique):
-			total_bytes, n_live, b = 0, 0, a
-			while b < len(unique) and (b == a or (total_bytes + bounds[b] <=
-					cap and n_live < most)):
-				total_bytes += int(bounds[b])
-				n_live += int(live[b])
-				b += 1
-			if bins > 1:
-				while b < len(unique) and continues[b - 1]:
-					if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
-						cut_inside = True
-						break
-					total_bytes += int(bounds[b])
-					n_live += int(live[b])
-					b += 1
-
+			else numpy.zeros(0, dtype=bool)
+		firsts, totals, cut_inside = _batch_cuts(bounds, live.astype(numpy.int64),
+			int(cap), int(most), continues, bins > 1)
+		for a, b, total_bytes in zip(firsts[:-1].tolist(), firsts[1:].tolist(),
+				totals.tolist()):
 			p0, p1 = int(first[a]), int(first[b]) if b < len(unique) else total
 			chunk = numpy.where(live[inverse[p0:p1]], inverse[p0:p1] - a, -1)
 			tasks.append(_Task(self, g, slots, unique[a:b][live[a:b]],
@@ -4280,9 +4267,8 @@ class FigWigReader:
 				rows[p0:p1], out, width, mode, accumulate, bins, crcs[unique[a:b][
 				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]],
 				nan_mode))
-			a = b
 
-		return tasks, cut_inside
+		return tasks, bool(cut_inside)
 
 	def _plan_tracks(self, channels, tids, starts, lengths, width, out, mode,
 		accumulate, bins, n_jobs, stops=None, nan_mode=0):
