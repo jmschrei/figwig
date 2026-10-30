@@ -1562,13 +1562,14 @@ class FigWigWriter:
 			group_ids = None
 			values = numpy.asarray(values, dtype=numpy.float64)
 			bounds = numpy.array([0, n], dtype=numpy.int64)
-			slots = self._slot_of[track_ids]
+			slots, by_track = track_ids, True
 		elif self._sorted_entries:
 			order = None
 			group_ids = self._group_of[track_ids]
 			values = numpy.asarray(values, dtype=numpy.float64)
-			slots = self._slot_of[track_ids]
+			slots, by_track = track_ids, True
 		else:
+			by_track = False
 			# A key per entry sorts in a radix sort on the pool, and two entries
 			# on one base of one track have equal keys; where the key would not
 			# fit in 63 bits, a numpy sort of two keys.
@@ -1629,7 +1630,7 @@ class FigWigWriter:
 					positions[a:b], values[a:b], int(positions[b - 1]) + 1)
 			else:
 				self._write_group_entries(g, tid, slots[a:b], positions[a:b],
-					values[a:b], pieces)
+					values[a:b], pieces, by_track)
 		self._submit_pieces(pieces)
 
 		self._drain(0 if self._pool is None else 2 * self.n_jobs)
@@ -1884,11 +1885,13 @@ class FigWigWriter:
 			self._done[g].add(last[0])
 		self._last[g] = (tid, end)
 
-	def _write_group_entries(self, g, tid, slots, positions, values, pieces):
+	def _write_group_entries(self, g, tid, slots, positions, values, pieces,
+		by_track=False):
 		"""Cut one group's nonzero bases on one chromosome, sorted by tile,
 		track and position, into batches of whole tiles, added to `pieces`
 		for `_submit_pieces` to encode on the pool. This thread only finds
-		where to cut; each task finds its own tiles."""
+		where to cut; each task finds its own tiles, and with `by_track`,
+		where `slots` holds track ids, its tracks' slots."""
 
 		tile = self.tile
 		n_tracks = len(self._groups[g])
@@ -1917,7 +1920,7 @@ class FigWigWriter:
 			cuts = _tile_cuts(positions, tile, per_batch, max_tiles).tolist()
 		for e0, e1 in zip(cuts[:-1], cuts[1:]):
 			pieces.append((g, tid, slots[e0:e1], positions[e0:e1], values[e0:e1],
-				n_tracks))
+				n_tracks, by_track))
 
 		self._sealed[g] = (tid, int(positions[-1]) // tile)
 		self._note_written(g, tid, int(positions[-1]) + 1)
@@ -1972,12 +1975,15 @@ class FigWigWriter:
 			dtype=numpy.uint8), lives, totals, [r[6] for r in results], [r[7] for r
 			in results])
 
-	def _entries_task(self, g, tid, slots, positions, values, n_tracks):
+	def _entries_task(self, g, tid, slots, positions, values, n_tracks,
+		by_track=False):
 		"""Encode and compress one batch of tiles from their entries, each
-		track given by its slot in the group. The encoder stops before a
-		tile that might not fit its buffer, which holds at most about
-		_BATCH_BYTES, and is called again from there."""
+		track given by its slot in the group, or by its id with `by_track`.
+		The encoder stops before a tile that might not fit its buffer, which
+		holds at most about _BATCH_BYTES, and is called again from there."""
 
+		if by_track:
+			slots = self._slot_of[slots]
 		all_tiles = positions // self.tile
 		first = numpy.concatenate([[0], numpy.flatnonzero(all_tiles[1:] !=
 			all_tiles[:-1]) + 1, [len(all_tiles)]])

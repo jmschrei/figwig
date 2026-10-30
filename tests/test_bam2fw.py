@@ -393,6 +393,24 @@ def test_groups_and_several_files(tmp_path, fragments, fragments_gz, sizes):
 	numpy.testing.assert_array_equal(y[0, :3], y[0, 3:])
 
 
+@pytest.mark.parametrize("threads", ["1", "3"])
+def test_several_files_in_a_group_each(tmp_path, fragments, fragments_gz, sizes,
+		threads):
+	# Each file's cells are one group, written as already sorted entries,
+	# so the second file's tracks lie at slots other than their ids.
+	table = tmp_path / "files.tsv"
+	table.write_text("file\tname\ncells.tsv\tA\ncells.tsv.gz\tB\n")
+	path = bam2fw(tmp_path, [fragments, fragments_gz], sizes, "--barcode-column",
+		"4", "-f", "-p", threads, "-m", str(table))
+	reader = FigWigReader(path)
+	assert [track["group"] for track in reader.tracks] == [0, 0, 0, 1, 1, 1]
+	y = reader.read("chr1", [0], 1000, dtype="float32")
+	assert y.sum() > 0
+	numpy.testing.assert_array_equal(y[0, :3], y[0, 3:])
+	numpy.testing.assert_array_equal(reader.stats["sum"][:3], reader.stats[
+		"sum"][3:])
+
+
 def test_threads_and_units_give_the_same_file(tmp_path, fragments, fragments_gz,
 		sizes, monkeypatch):
 	one = bam2fw(tmp_path / "one", [fragments], sizes, "--barcode-column", "4",
