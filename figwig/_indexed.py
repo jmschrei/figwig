@@ -62,8 +62,9 @@ _WRITER_SHARE = 4
 # Inputs below these, and fewer cores, go to the whole-file reader, which
 # is as fast or faster on them: bam2bw -c below this many mapped reads in
 # the indexes, summed, and bam2fw -c when a file is below this many bytes
-# or mapped reads.
-_MIN_CORES = 2
+# or mapped reads. Below 8 cores the writer has one, and the whole-file
+# reader, which reads and then writes on all of them, was faster.
+_MIN_CORES = 8
 _MIN_MAPPED = 5_000_000
 _MIN_BYTES = 128 << 20
 _MIN_FILE_MAPPED = 50_000
