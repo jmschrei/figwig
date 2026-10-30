@@ -31,6 +31,7 @@ from .bam2bw import _bgzf_kernel
 from .bam2bw import _KEY_SHIFT
 from .bam2bw import _inflate_bgzf
 from .bam2bw import _inflate_engine
+from .bam2fw import _RUN_SPACING
 
 
 # A region's most bases, a multiple of the 16 kb index windows, and the
@@ -40,10 +41,6 @@ from .bam2bw import _inflate_engine
 _REGION = 1 << 22
 _RUNS_REGION = 1 << 25
 _REGION_BYTES = 16 << 20
-
-# A region's depth with fewer changes of value than one per this many bases
-# goes to the writer as runs, which cost it less than every base.
-_RUN_SPACING = 256
 
 # The bytes a region reads at a time, and the BGZF blocks its records are
 # walked by. Each walk holds the GIL for its calls, and each reading thread
