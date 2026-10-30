@@ -47,6 +47,10 @@ _REGION_BLOCKS = 256
 # leaves the others room to work.
 _AHEAD = 2
 
+# The writer's share of the cores while regions are read: one in this many,
+# at least one, the regions taking the rest.
+_WRITER_SHARE = 4
+
 # The linear index of a .bai has one offset per 2**14 bases.
 _WINDOW_SHIFT = 14
 
@@ -622,6 +626,17 @@ def _discarded_line(discarded):
 		.format(chrom, count) for chrom, count in discarded.items())))
 
 
+def _shares(cores):
+	"""The threads that read regions and the writer's n_jobs while both
+	work at once, which together take `cores`; with one, the main thread
+	does both in turn."""
+
+	if cores <= 1:
+		return 1, 1
+	writer = max(1, cores // _WRITER_SHARE)
+	return cores - writer, writer
+
+
 def _bam2bw_coverage(args, chrom_sizes, cores):
 	"""`figwig bam2bw -c` through this reader: True once the bigWigs are
 	written, False when the files are not ones it takes or the record
@@ -639,9 +654,9 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 	names = [args.name + ".bw"] if args.unstranded else [args.name + ".+.bw",
 		args.name + ".-.bw"]
 
-	def open_bigwig(path):
+	def open_bigwig(path, n_jobs=cores):
 		return BigWigWriter(path, chrom_sizes, zooms=args.zooms, level=_LEVEL,
-			n_jobs=cores)
+			n_jobs=n_jobs)
 
 	_report_missing(files, chrom_sizes, args)
 	if args.read_depth:
@@ -665,14 +680,17 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 			raise
 		return True
 
-	writers = {key: open_bigwig(name) for key, name in zip(['+', '-'], names)}
+	readers, writing = _shares(cores)
+	writers = {key: open_bigwig(name, writing) for key, name in zip(['+', '-'],
+		names)}
 
 	def emit(chrom, key, starts, ends, values):
 		write_counts(writers[key], [(chrom, sizes[chrom])], {chrom: (starts, ends,
 			values)}, args.scale_factor, None)
 
 	try:
-		_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, cores, emit)
+		_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, readers,
+			emit)
 		for writer in writers.values():
 			writer.close()
 	except _Fallback as error:
@@ -693,6 +711,7 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	record kernel sends one to pysam, with nothing written then."""
 
 	from .bam2fw import _write_coverage
+	from .bam2fw import _write_runs
 	from .figwig import FigWigWriter
 
 	files = _open_files(args.filename, chrom_sizes, args)
@@ -701,10 +720,10 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	per_file = len(groups) // len(files)
 	_report_missing(files, chrom_sizes, args)
 
-	def writer_for():
+	def writer_for(n_jobs=cores):
 		return FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 			genome=args.genome, tile=args.tile, groups=groups, level=args.level,
-			n_jobs=cores, zooms=args.zooms)
+			n_jobs=n_jobs, zooms=args.zooms)
 
 	if args.read_depth:
 		try:
@@ -726,16 +745,21 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 					args.scale_factor, depth)
 		return True
 
+	# A writer with threads takes each region's depth as one dense window,
+	# whose tiles it encodes on them; one without takes the runs, which cost
+	# it less than every base of the window.
+	readers, writing = _shares(cores)
+	sizes = dict(chrom_sizes)
 	discarded = {chrom: 0 for chrom, _ in chrom_sizes}
 	try:
-		with writer_for() as writer:
+		with writer_for(writing) as writer:
 			writer._copies = False
 			for k, f in enumerate(files):
 				group = [name for names in groups[k * per_file:(k + 1) * per_file]
 					for name in names]
 				track_of = dict(zip(['+', '-'], group))
 
-				def emit(chrom, key, beg, depth):
+				def emit_depth(chrom, key, beg, depth):
 					if not depth.any():
 						return
 					values = depth
@@ -744,8 +768,13 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 						values *= args.scale_factor
 					writer.write(chrom, [beg], values[None, None], tracks=[track_of[key]])
 
-				_, lost, _ = _indexed_coverage([f], chrom_sizes, args, cores, emit,
-					dense=True)
+				def emit_runs(chrom, key, starts, ends, values):
+					_write_runs(writer, track_of[key], chrom, sizes[chrom], starts, ends,
+						values, args.scale_factor, None)
+
+				dense = writing > 1
+				_, lost, _ = _indexed_coverage([f], chrom_sizes, args, readers,
+					emit_depth if dense else emit_runs, dense=dense)
 				for chrom in lost:
 					discarded[chrom] += lost[chrom]
 	except _Fallback:
@@ -789,7 +818,9 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	_bam_kernel()
 	_bgzf_kernel()
 	_inflate_engine()
-	with concurrent.futures.ThreadPoolExecutor(max(threads, 1)) as pool:
+	# One thread reads each region in turn on this one, between writes.
+	pool = concurrent.futures.ThreadPoolExecutor(threads) if threads > 1 else None
+	try:
 		pending = collections.deque()
 		todo = iter(regions)
 
@@ -798,10 +829,16 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 			if region is not None:
 				chrom, size, beg, end, first, last = region
 				task = _region_dense if dense else _region_runs
-				pending.append((region, pool.submit(task, files, chrom, size, beg,
-					end, first, last, margin, args.unstranded)))
+				work = (files, chrom, size, beg, end, first, last, margin,
+					args.unstranded)
+				if pool is None:
+					future = concurrent.futures.Future()
+					future.set_result(task(*work))
+				else:
+					future = pool.submit(task, *work)
+				pending.append((region, future))
 
-		for _ in range(_AHEAD * max(threads, 1)):
+		for _ in range(_AHEAD * threads if pool is not None else 1):
 			submit()
 
 		# A region's last run that its edge cut is held until the next
@@ -852,5 +889,8 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 						strands[key][chrom] = tuple(numpy.concatenate([c[i] for c in
 							chunks]) if chunks else numpy.empty(0, dtype='int64') for i in
 							range(3))
+	finally:
+		if pool is not None:
+			pool.shutdown(wait=True, cancel_futures=True)
 
 	return strands, discarded, read_count

@@ -1070,7 +1070,8 @@ def assert_same_figwig_values(a, b):
 
 @pytest.mark.parametrize("flags", [(), ("-u",), ("-ps", "3", "-ns", "-2"), ("-ps",
 	"-7", "-ns", "9", "-u"), ("-r",), ("-sf", "0.5", "-p", "4"), ("-u", "-r",
-	"-p", "3")])
+	"-p", "3"), ("-u", "-p", "8"), ("-ps", "-7", "-ns", "9", "-sf", "2", "-p",
+	"12")])
 def test_indexed_coverage_is_the_whole_file_coverage(tmp_path, indexed_bams,
 		sizes, flags, monkeypatch, capsys):
 	"""-c of a sorted, indexed BAM is read region by region (here regions of
@@ -1160,6 +1161,51 @@ def test_indexed_coverage_over_index_windows(tmp_path, monkeypatch, flags):
 	if "-u" in flags:
 		with open(whole, "rb") as fa, open(by_region, "rb") as fb:
 			assert fa.read() == fb.read()
+
+
+def test_indexed_coverage_keeps_to_its_cores(tmp_path, indexed_bams, sizes,
+		monkeypatch):
+	"""On one core every region is read on the main thread, between writes,
+	and bam2fw writes runs; on eight, regions are read on other threads and
+	bam2fw writes each region's depth."""
+
+	import threading
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	calls = []
+	for name in ("_region_runs", "_region_dense"):
+		original = getattr(figwig._indexed, name)
+
+		def recorded(*args, _name=name, _original=original):
+			calls.append((_name, threading.current_thread() is
+				threading.main_thread()))
+			return _original(*args)
+
+		monkeypatch.setattr(figwig._indexed, name, recorded)
+
+	bam2bw(tmp_path / "bw1", indexed, sizes, "-c")
+	bam2fw(tmp_path / "fw1", [indexed], sizes, "-c")
+	assert calls and set(calls) == {("_region_runs", True)}
+	calls.clear()
+	bam2bw(tmp_path / "bw8", indexed, sizes, "-c", "-p", "8")
+	bam2fw(tmp_path / "fw8", [indexed], sizes, "-c", "-p", "8")
+	assert {name for name, _ in calls} == {"_region_runs", "_region_dense"}
+	assert not any(main for _, main in calls)
+
+
+def test_reading_and_writing_share_the_cores():
+	"""While regions are read the writer takes a quarter of the cores, at
+	least one, and the regions the rest; one core does both in turn."""
+
+	from figwig._indexed import _shares
+
+	assert _shares(1) == (1, 1)
+	for cores in range(2, 70):
+		readers, writer = _shares(cores)
+		assert readers + writer == cores and readers >= 1
+		assert writer == max(1, cores // 4)
 
 
 def test_regions_follow_the_bam_bytes(tmp_path, monkeypatch):
