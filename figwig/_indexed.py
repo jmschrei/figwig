@@ -578,10 +578,70 @@ def _keys_to_dense(keys, lo, hi, beg, size, first, last, count_lo, count_hi,
 	return counted, lost
 
 
+def _sparse_kernel():
+	"""`_keys_to_sparse` compiled, on first use."""
+
+	global _sparse_compiled
+	if _sparse_compiled is None:
+		import numba
+		_sparse_compiled = numba.njit(cache=True, nogil=True)(_keys_to_sparse)
+	return _sparse_compiled
+
+
+_sparse_compiled = None
+
+
+def _keys_to_sparse(keys, lo, hi, beg, end, size, first, last, count_lo,
+	count_hi, starts, ends, values):
+	"""`_keys_to_dense` over [beg, end) without the window: its runs of
+	one nonzero value, in order, written to starts, ends and values; their
+	number, the start events and the coverage lost."""
+
+	mask = (numpy.int64(1) << 35) - 1
+	bias = numpy.int64(1) << 33
+	n = 0
+	counted = 0
+	lost = 0
+	depth = 0
+	i = lo
+	while i < hi:
+		place = ((keys[i] & mask) - bias) >> 1
+		while i < hi and ((keys[i] & mask) - bias) >> 1 == place:
+			p = (keys[i] & mask) - bias
+			if p & 1:
+				depth -= 1
+			else:
+				depth += 1
+				if count_lo <= place and place < count_hi:
+					counted += 1
+			i += 1
+		if i >= hi or depth == 0:
+			continue
+		next_place = ((keys[i] & mask) - bias) >> 1
+		if first and place < 0:
+			lost += (min(next_place, 0) - place) * depth
+		if last and next_place > size:
+			lost += (next_place - max(place, size)) * depth
+		a = max(place, beg)
+		b = min(next_place, end)
+		if a >= b:
+			continue
+		if n > 0 and ends[n - 1] == a and values[n - 1] == depth:
+			ends[n - 1] = b
+		else:
+			starts[n] = a
+			ends[n] = b
+			values[n] = depth
+			n += 1
+	return n, counted, lost
+
+
 def _region_dense(files, chrom, size, beg, end, first, last, margin,
 	unstranded):
 	"""The depth of each strand at each base of [beg, end) inside chrom, as
-	int32 arrays, with the start events and the coverage clipped away that
+	an int32 array, or as its runs of one nonzero value (starts, ends,
+	values) where it changes value less often than once per `_RUN_SPACING`
+	bases, with the start events and the coverage clipped away that
 	`_region_runs` gives."""
 
 	stop = (1 << 62) if last else end + margin[1]
@@ -593,29 +653,35 @@ def _region_dense(files, chrom, size, beg, end, first, last, margin,
 	keys.sort(kind='stable')
 	bounds = numpy.searchsorted(keys, numpy.arange(n_outs + 1, dtype='int64') <<
 		_KEY_SHIFT)
-	kernel = _dense_kernel()
+	dense, sparse = _dense_kernel(), _sparse_kernel()
 	result, counted, lost = [], 0, 0
+	count_lo, count_hi = 0 if first else beg, size if last else min(end, size)
 	for k in range(n_outs):
-		out = numpy.empty(width, dtype=numpy.int32)
-		c, gone = kernel(keys, int(bounds[k]), int(bounds[k + 1]), beg, size,
-			first, last, 0 if first else beg, size if last else min(end, size), out)
-		changes = int(numpy.count_nonzero(out[1:] != out[:-1])) + 1
-		result.append(_depth_runs(out, beg) if changes * _RUN_SPACING < width
-			else out)
+		lo, hi = int(bounds[k]), int(bounds[k + 1])
+		starts = numpy.empty(hi - lo, dtype=numpy.int64)
+		ends = numpy.empty(hi - lo, dtype=numpy.int64)
+		values = numpy.empty(hi - lo, dtype=numpy.int32)
+		n, c, gone = sparse(keys, lo, hi, beg, beg + width, size, first, last,
+			count_lo, count_hi, starts, ends, values)
 		counted += c
 		lost += gone
+		runs = starts[:n], ends[:n], values[:n]
+		if _changes(runs[0], runs[1], beg, beg + width) * _RUN_SPACING < width:
+			result.append(runs)
+			continue
+		out = numpy.empty(width, dtype=numpy.int32)
+		dense(keys, lo, hi, beg, size, first, last, count_lo, count_hi, out)
+		result.append(out)
 	return result, counted, lost
 
 
-def _depth_runs(depth, beg):
-	"""The runs of nonzero depth, (starts, ends, values), with depth[0] at
-	base `beg`."""
+def _changes(starts, ends, beg, end):
+	"""The bases of [beg, end) where a depth whose nonzero runs, in order,
+	are these differs from the base before, the first base included: an edge
+	of a run inside [beg, end) is one, and two runs that touch share one."""
 
-	bounds = numpy.concatenate([[0], numpy.flatnonzero(depth[1:] != depth[:-1])
-		+ 1, [len(depth)]])
-	values = depth[bounds[:-1]]
-	kept = values != 0
-	return beg + bounds[:-1][kept], beg + bounds[1:][kept], values[kept]
+	return 1 + int(numpy.count_nonzero(starts > beg)) + int(numpy.count_nonzero(
+		ends < end)) - int(numpy.count_nonzero(ends[:-1] == starts[1:]))
 
 
 def _region_runs(files, chrom, size, beg, end, first, last, margin, unstranded):

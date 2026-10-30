@@ -1282,6 +1282,52 @@ def test_indexed_depth_goes_to_the_writer_as_runs_or_windows(tmp_path,
 		assert chunks_of(whole, 0) == chunks_of(got, 0)
 
 
+@pytest.mark.parametrize("seed", range(4))
+def test_sparse_regions_are_the_runs_of_their_depth(seed):
+	"""The runs of a strand's depth over a region, found without its window,
+	are the window's runs of one nonzero value, and count its changes of
+	value: reads that touch, overlap, start before the chromosome or end
+	past it, with the start events and the coverage lost of the first and
+	last regions."""
+
+	from figwig._indexed import _changes, _dense_kernel, _sparse_kernel
+
+	rng = numpy.random.default_rng(seed)
+	size = 1000
+	starts = rng.integers(-50, size + 20, 60)
+	ends = starts + rng.integers(1, 80, 60)
+	starts[:10] = ends[10:20]
+	bias = 1 << 33
+	keys = numpy.sort(numpy.concatenate([bias + 2 * starts, bias + 2 * ends +
+		1])).astype(numpy.int64)
+	for beg, end in [(0, 300), (250, 700), (650, size), (0, size), (400, 400),
+			(990, size)]:
+		for first in (beg == 0, False):
+			for last in (end == size, False):
+				count_lo, count_hi = 0 if first else beg, size if last else end
+				out = numpy.empty(end - beg, dtype=numpy.int32)
+				counted, lost = _dense_kernel()(keys, 0, len(keys), beg, size, first,
+					last, count_lo, count_hi, out)
+				runs = [numpy.empty(len(keys), dtype=dtype) for dtype in ("int64",
+					"int64", "int32")]
+				n, c, gone = _sparse_kernel()(keys, 0, len(keys), beg, end, size,
+					first, last, count_lo, count_hi, *runs)
+				assert (c, gone) == (counted, lost)
+				if end == beg:
+					assert n == 0
+					continue
+
+				edges = numpy.flatnonzero(out[1:] != out[:-1]) + 1
+				lefts = numpy.concatenate([[0], edges])
+				rights = numpy.concatenate([edges, [len(out)]])
+				kept = out[lefts] != 0
+				assert runs[0][:n].tolist() == (beg + lefts[kept]).tolist()
+				assert runs[1][:n].tolist() == (beg + rights[kept]).tolist()
+				assert runs[2][:n].tolist() == out[lefts[kept]].tolist()
+				assert _changes(runs[0][:n], runs[1][:n], beg, end) == len(edges) + 1
+				assert n > 0
+
+
 def test_reading_and_writing_share_the_cores():
 	"""While regions are read the writer takes a quarter of the cores, at
 	least one, and the regions the rest; one core does both in turn on the
