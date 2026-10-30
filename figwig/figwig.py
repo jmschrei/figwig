@@ -159,6 +159,10 @@ _RADIX_PARALLEL = 1 << 18
 _GATHER_PER_THREAD = 1 << 18
 _GATHER_ROW_BYTES = 1
 
+# read_entries reads chromosomes together while a sparse read's sort key of
+# window, track and offset stays below this.
+_SPARSE_KEYS = 1 << 63
+
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
@@ -4275,17 +4279,26 @@ class FigWigReader:
 			return SparseEntries(empty, empty, empty, numpy.zeros(0,
 				dtype=self._dtype(ids, None)))
 
-		# One sparse read of a window per chromosome, each as wide as the
-		# longest, which reads nothing past a chromosome's end: its entries
-		# come sorted by chromosome, track and position, and every
-		# chromosome's tiles share the threads, where a read per chromosome
-		# took them one chromosome at a time.
+		# A sparse read of a window per chromosome, each as wide as the
+		# longest, reads nothing past a chromosome's end and gives its
+		# entries sorted by chromosome, track and position. The chromosomes
+		# go in as few reads as keep the read's sort key of window, track and
+		# offset below _SPARSE_KEYS.
 		widest = max(self.chrom_sizes[name] for name in names)
-		found = self.read(names, numpy.zeros(len(names), dtype=numpy.int64),
-			widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
-		tids = numpy.array([self._tids[name] for name in names], dtype=numpy.int64)
-		return SparseEntries(tids[found.rows], found.offsets, ids[found.channels],
-			found.values)
+		per_read = max(1, _SPARSE_KEYS // (max(1, len(ids)) * max(1, widest)))
+		parts = []
+		for a in range(0, len(names), per_read):
+			batch = names[a:a + per_read]
+			found = self.read(batch, numpy.zeros(len(batch), dtype=numpy.int64),
+				widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
+			tids = numpy.array([self._tids[name] for name in batch],
+				dtype=numpy.int64)
+			parts.append((tids[found.rows], found.offsets, ids[found.channels],
+				found.values))
+		if len(parts) == 1:
+			return SparseEntries(*parts[0])
+		return SparseEntries(*[numpy.concatenate([p[k] for p in parts]) for k
+			in range(4)])
 
 	def _select(self, tracks):
 		"""The tracks a call names, as (track ids in channel order, whether a

@@ -1434,6 +1434,37 @@ def test_read_entries(fw, ref):
 		reader.read_entries(chroms=['chr9'])
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('per_read', [1, 2])
+def test_read_entries_in_several_reads(fw, track_fw, monkeypatch, order,
+	per_read):
+	"""Chromosomes whose sort keys would pass the limit together are read a
+	few at a time, and give the entries one read of them all gives."""
+
+	reader = FigWigReader(fw if order == 'positions' else track_fw)
+	tracks = ['atac_plus', 'signal', 'negative']
+	one = reader.read_entries(tracks=tracks, n_jobs=2)
+	widest = max(reader.chrom_sizes.values())
+	monkeypatch.setattr(figwig.figwig, '_SPARSE_KEYS', per_read * len(tracks) *
+		widest)
+	calls = []
+	read = FigWigReader.read
+
+	def counted(self, chroms, *args, **kwargs):
+		calls.append(len(chroms))
+		return read(self, chroms, *args, **kwargs)
+
+	monkeypatch.setattr(FigWigReader, 'read', counted)
+	several = reader.read_entries(tracks=tracks, n_jobs=2)
+	n_chroms = len(reader.chrom_sizes)
+	assert calls == [min(per_read, n_chroms - a) for a in range(0, n_chroms,
+		per_read)]
+	for a, b in zip((one.chroms, one.positions, one.tracks, one.values), (
+			several.chroms, several.positions, several.tracks, several.values)):
+		assert a.dtype == b.dtype
+		numpy.testing.assert_array_equal(a, b)
+
+
 ###
 # Nonzero bases as input, and matrix chunks
 
