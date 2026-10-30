@@ -1341,6 +1341,26 @@ def test_sparse_regions_are_the_runs_of_their_depth(seed):
 				assert n > 0
 
 
+def test_bam2bw_reads_on_every_core(tmp_path, indexed_bams, sizes, monkeypatch):
+	"""bam2bw -c reads regions on all its cores, its bigWig writer taking
+	little of the time; bam2fw -c leaves the figwig writer its share."""
+
+	import figwig._indexed
+
+	_, indexed = indexed_bams
+	threads = []
+	original = figwig._indexed._indexed_coverage
+
+	def recorded(files, chrom_sizes, args, n, *rest, **kwargs):
+		threads.append(n)
+		return original(files, chrom_sizes, args, n, *rest, **kwargs)
+
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", recorded)
+	bam2bw(tmp_path / "bw", indexed, sizes, "-c", "-p", "8")
+	bam2fw(tmp_path / "fw", [indexed], sizes, "-c", "-p", "8")
+	assert threads == [8, figwig._indexed._shares(8)[0]] == [8, 6]
+
+
 def test_reading_and_writing_share_the_cores():
 	"""While regions are read the writer takes a quarter of the cores, at
 	least one, and the regions the rest; one core does both in turn on the

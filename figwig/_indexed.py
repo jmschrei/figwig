@@ -844,10 +844,11 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 				write_counts(writers[key], chrom_sizes, strands[key], args.scale_factor,
 					read_depth)
 		else:
-			readers, writing = _shares(cores)
+			# The bigWig writer takes little of the time, so every core reads.
+			_, writing = _shares(cores)
 			open_bigwigs(writing)
-			_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, readers,
-				emit)
+			_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, cores if
+				cores > 1 else 0, emit)
 		for writer in writers.values():
 			writer.close()
 		for key, name in names.items():
