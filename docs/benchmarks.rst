@@ -181,22 +181,23 @@ command                               threads   time      peak RSS  output
 ``figwig bam2bw -c -u``               1         11.9 s    1.6 GB    193 MB
 ``figwig bam2bw -c -u``               8         3.4 s     2.0 GB    193 MB
 ``figwig bam2bw -c -u``               32        3.7 s     2.0 GB    193 MB
-``figwig bam2fw -c -u``               1         22.9 s    1.8 GB    79 MB
-``figwig bam2fw -c -u``               8         7.6 s     1.9 GB    79 MB
-``figwig bam2fw -c -u``               32        7.7 s     2.1 GB    79 MB
+``figwig bam2fw -c -u``               1         22.5 s    1.8 GB    79 MB
+``figwig bam2fw -c -u``               8         7.2 s     2.1 GB    79 MB
+``figwig bam2fw -c -u``               32        7.1 s     2.1 GB    79 MB
 ``bamCoverage --binSize 1``           1         46.2 s    1.3 GB    249 MB
 ``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
 ====================================  ========  ========  ========  ========
 
-The ``bam2fw`` rows are medians of three runs at about 6% of the CPUs in
-use, with ``/usr/bin/time``'s peak RSS. The coverage is two events per
-read on the readers and sorts the end counts use, so it costs about what
-``-f`` costs; the figwig file is a runs chunk per tile, which takes less
-space and, on one thread, longer to write. On threads ``bam2fw`` hands the
-writer each 4 Mb of a chromosome as one window, whose tiles it encodes in
-parallel, and ``figwig reorder`` writes the file again as the same 79 MB
-of runs chunks. deepTools' time is its own reading of the BAM through
-pysam, a process per thread.
+The ``bam2fw`` rows are medians of three runs, with ``/usr/bin/time``'s
+peak RSS. The coverage is two events per read on the readers and sorts the
+end counts use, so it costs about what ``-f`` costs; the figwig file is a
+runs chunk per tile, which takes less space and, on one thread, longer to
+write. On threads ``bam2fw`` hands the writer each 4 Mb of a chromosome as
+one window, whose tiles it encodes in parallel, or as its runs where it
+holds fewer than one per 1,024 bases, as sparse coverage such as RNA-seq's
+does; ``figwig reorder`` writes the file again as the same 79 MB of runs
+chunks. deepTools' time is its own reading of the BAM through pysam, a
+process per thread.
 
 Ten more experiments of the test-data collection, from 40 MB to 2.4 GB,
 single- and paired-end, two genomes, spliced short and long reads, were

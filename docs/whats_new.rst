@@ -19,7 +19,7 @@ figwig files
 Converters and commands
 -----------------------
 
-	- ``figwig bam2fw -c`` on threads writes each 4 Mb of a chromosome's coverage as one dense window, whose tiles the writer encodes on its threads, where it encoded every run on the calling thread: the 2.4 GB ATAC-seq BAM takes 7.6 s on 8 threads, where it took 14.6 s. The file is the same to the byte, and one thread writes it as before.
+	- ``figwig bam2fw -c`` on threads writes each 4 Mb of a chromosome's coverage as one dense window, whose tiles the writer encodes on its threads, where it encoded every run on the calling thread, unless the 4 Mb hold fewer runs than one per 1,024 bases, as sparse coverage such as RNA-seq's does, which goes in as runs as before: the 2.4 GB ATAC-seq BAM takes 7.2 s on 8 threads, where it took 14.2 s. The file is the same to the byte, and one thread writes it as before.
 
 Documentation
 -------------
