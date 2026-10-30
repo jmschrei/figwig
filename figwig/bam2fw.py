@@ -195,9 +195,11 @@ def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 		read_depth):
 	"""Write one file's runs of coverage, strands['+'][chrom] = (starts,
 	ends, values), into the tracks `names`, each its own group, scaled as
-	`_write_counts` scales counts. Each `_COVERAGE_PIECE` bases of a
-	chromosome go in as one dense window, whose whole tiles the writer
-	encodes on its threads, where intervals are encoded on this one."""
+	`_write_counts` scales counts. With threads, each `_COVERAGE_PIECE` bases
+	of a chromosome go in as one dense window, whose whole tiles the writer
+	encodes on its threads, where intervals are encoded on this one; on one
+	thread the runs go in as intervals, which costs less than the window's
+	every base."""
 
 	for name, key in zip(names, ('+', '-')):
 		for chrom, length in chrom_sizes:
@@ -208,6 +210,9 @@ def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 			values *= scale_factor
 			if read_depth is not None:
 				values /= read_depth
+			if writer.n_jobs == 1:
+				writer.write(chrom, starts, values[:, None], ends=ends, tracks=[name])
+				continue
 			first = starts[0] // _COVERAGE_PIECE * _COVERAGE_PIECE
 			for a in range(first, int(ends[-1]), _COVERAGE_PIECE):
 				b = min(a + _COVERAGE_PIECE, length)

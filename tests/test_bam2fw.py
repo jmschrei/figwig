@@ -825,21 +825,38 @@ def test_coverage_scaling_and_depth(tmp_path, coverage_bam, sizes):
 		numpy.testing.assert_allclose(y[0, 0], expected[chrom]["+"] * 2 / 8)
 
 
+def chunks_of(path, group):
+	"""A group's kind bytes and chunks, tile by tile, wherever in the file
+	they lie."""
+
+	kinds, sizes, _, offsets, _ = FigWigReader(path)._group_index(group)
+	with open(path, "rb") as handle:
+		data = handle.read()
+	return kinds.tolist(), [data[o:o + n] for o, n in zip(offsets.tolist(),
+		sizes.tolist())]
+
+
 @pytest.mark.parametrize("flags, shifts", [((), (0, 0)), (("-u", "-ps", "4",
 	"-ns", "-5"), (4, -5)), (("-sf", "0.5"), (0, 0))])
 def test_coverage_in_pieces_is_the_file_of_one_piece(tmp_path, coverage_bam,
 		sizes, monkeypatch, flags, shifts):
-	"""bam2fw -c writes a chromosome's coverage a piece at a time, a whole
-	number of tiles each. Pieces of 64 bases over tiles of 16, which runs
-	cross and some of which hold no run, give the file one piece per
-	chromosome gives, byte for byte, and the pileup."""
+	"""bam2fw -c on threads writes a chromosome's coverage a piece at a
+	time, a whole number of tiles each, and on one thread as intervals.
+	Pieces of 64 bases over tiles of 16, which runs cross and some of which
+	hold no run, give the file one piece per chromosome gives, byte for
+	byte, every tile the chunk the intervals give, though the two groups'
+	chunks may lie in another order, and the pileup."""
 
 	flags = ("-c", "-t", "16") + flags
-	whole = bam2fw(tmp_path / "whole", [coverage_bam], sizes, *flags)
+	intervals = bam2fw(tmp_path / "intervals", [coverage_bam], sizes, *flags)
+	whole = bam2fw(tmp_path / "whole", [coverage_bam], sizes, "-p", "2", *flags)
 	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", 64)
-	pieces = bam2fw(tmp_path / "pieces", [coverage_bam], sizes, *flags)
+	pieces = bam2fw(tmp_path / "pieces", [coverage_bam], sizes, "-p", "2",
+		*flags)
 	with open(whole, "rb") as a, open(pieces, "rb") as b:
 		assert a.read() == b.read()
+	for g in range(len(FigWigReader(pieces).tracks)):
+		assert chunks_of(intervals, g) == chunks_of(pieces, g)
 
 	expected = pileup(*shifts, stranded="-u" not in flags)
 	scale = 0.5 if "-sf" in flags else 1.0
