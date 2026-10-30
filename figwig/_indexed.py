@@ -144,6 +144,9 @@ def _parse_index(data, n_ref):
 		at += 4
 		if n_intv < 0:
 			return None
+		# htslib writes no pseudo-bin for a reference without reads.
+		if n_bin == 0:
+			mapped = 0
 		linear = numpy.frombuffer(data, dtype='<u8', count=n_intv, offset=at
 			).astype(numpy.uint64)
 		at += 8 * n_intv
@@ -247,18 +250,26 @@ class _File:
 	def __init__(self, filename, chrom_sizes, args):
 		import pysam
 
+		# Before pysam opens the BAM, which warns of a stale index itself.
+		index = _index_path(filename)
+		if index is None:
+			raise LookupError(filename)
 		with pysam.AlignmentFile(filename, 'rb') as bam:
 			self.references = [bam.get_reference_name(tid) for tid in range(
 				bam.nreferences)]
 			sort_order = bam.header.to_dict().get('HD', {}).get('SO')
 		if sort_order != 'coordinate':
 			raise LookupError(filename)
-		index = _index_path(filename)
-		if index is None:
-			raise LookupError(filename)
 		self.index = _read_index(index, len(self.references))
 		if self.index is None:
 			raise LookupError(filename)
+		# An index of another BAM can point past this one's end.
+		size = os.path.getsize(filename)
+		for linear, first, _, last, _ in self.index:
+			furthest = max([first or 0, int(last.max()), int(linear.max()) if
+				len(linear) else 0])
+			if furthest >> 16 >= size:
+				raise LookupError(filename)
 		self.filename = filename
 		self.tids = {name: tid for tid, name in enumerate(self.references)}
 		self.options = numpy.array([args.pos_shift, args.neg_shift,
@@ -322,11 +333,13 @@ def _region_keys(files, chrom, beg, end, stop):
 			rest = numpy.empty(0, dtype='uint8')
 			carry = numpy.empty(0, dtype='uint8')
 			stopped = False
+			got = 0
 			while not stopped:
 				size = max(0, min(_REGION_READ, remaining))
 				data = _buffer('data', len(carry) + size)[:len(carry) + size]
 				data[:len(carry)] = carry
 				n_read = handle.readinto(memoryview(data)[len(carry):])
+				got += n_read
 				remaining -= n_read
 				n = len(carry) + n_read
 				scan(data, n, offsets, sizes, lengths, scanned)
@@ -377,7 +390,7 @@ def _region_keys(files, chrom, beg, end, stop):
 					# The end of the file, or of the bytes the index gives:
 					# whatever is left is records past the region.
 					if n_read == 0 and remaining > 0 and (len(carry) > 0 or len(rest)
-							> 0):
+							> 0 or not got):
 						raise _Fallback()
 					break
 
@@ -630,10 +643,10 @@ def _discarded_line(discarded):
 def _shares(cores):
 	"""The threads that read regions and the writer's n_jobs while both
 	work at once, which together take `cores`; with one, the main thread
-	does both in turn."""
+	does both in turn, which 0 reading threads means."""
 
 	if cores <= 1:
-		return 1, 1
+		return 0, 1
 	writer = max(1, cores // _WRITER_SHARE)
 	return cores - writer, writer
 
@@ -641,68 +654,67 @@ def _shares(cores):
 def _bam2bw_coverage(args, chrom_sizes, cores):
 	"""`figwig bam2bw -c` through this reader: True once the bigWigs are
 	written, False when the files are not ones it takes or the record
-	kernel sends one to pysam, with nothing written then. Each chromosome is
-	written as it is done unless -r needs the whole file's reads first."""
+	kernel sends one to pysam. Each chromosome is written as it is done
+	unless -r needs the whole file's reads first. The bigWigs are written
+	beside their names and moved there once complete, so that a run that
+	fails or falls back leaves the paths as they were."""
 
 	from .bam2bw import _LEVEL
 	from .bam2bw import write_counts
+	from .figwig import _temporary_path
 	from .writer import BigWigWriter
 
 	files = _open_files(args.filename, chrom_sizes, args)
 	if files is None:
 		return False
 	sizes = dict(chrom_sizes)
-	names = [args.name + ".bw"] if args.unstranded else [args.name + ".+.bw",
-		args.name + ".-.bw"]
+	names = dict(zip(['+', '-'], [args.name + ".bw"] if args.unstranded else
+		[args.name + ".+.bw", args.name + ".-.bw"]))
+	partials, writers = {}, {}
 
-	def open_bigwig(path, n_jobs=cores):
-		return BigWigWriter(path, chrom_sizes, zooms=args.zooms, level=_LEVEL,
-			n_jobs=n_jobs)
-
-	_report_missing(files, chrom_sizes, args)
-	if args.read_depth:
-		try:
-			result = _indexed_coverage(files, chrom_sizes, args, cores)
-		except _Fallback:
-			return False
-		strands, discarded, read_depth = result
-		print(_discarded_line(discarded))
-		writers = [open_bigwig(name) for name in names]
-		try:
-			if args.verbose:
-				print("Dividing through by a read depth of {}.".format(read_depth))
-			for writer, key in zip(writers, strands):
-				write_counts(writer, chrom_sizes, strands[key], args.scale_factor,
-					read_depth)
-				writer.close()
-		except BaseException as error:
-			for writer in writers:
-				writer.__exit__(type(error), error, error.__traceback__)
-			raise
-		return True
-
-	readers, writing = _shares(cores)
-	writers = {key: open_bigwig(name, writing) for key, name in zip(['+', '-'],
-		names)}
+	def open_bigwigs(n_jobs):
+		for key, name in names.items():
+			partials[key] = _temporary_path(name)
+			writers[key] = BigWigWriter(partials[key], chrom_sizes, zooms=args.zooms,
+				level=_LEVEL, n_jobs=n_jobs)
 
 	def emit(chrom, key, starts, ends, values):
 		write_counts(writers[key], [(chrom, sizes[chrom])], {chrom: (starts, ends,
 			values)}, args.scale_factor, None)
 
 	try:
-		_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, readers,
-			emit)
+		if args.read_depth:
+			strands, discarded, read_depth = _indexed_coverage(files, chrom_sizes,
+				args, cores if cores > 1 else 0)
+			_report_missing(files, chrom_sizes, args)
+			print(_discarded_line(discarded))
+			open_bigwigs(cores)
+			if args.verbose:
+				print("Dividing through by a read depth of {}.".format(read_depth))
+			for key in strands:
+				write_counts(writers[key], chrom_sizes, strands[key], args.scale_factor,
+					read_depth)
+		else:
+			readers, writing = _shares(cores)
+			open_bigwigs(writing)
+			_, discarded, _ = _indexed_coverage(files, chrom_sizes, args, readers,
+				emit)
 		for writer in writers.values():
 			writer.close()
-	except _Fallback as error:
-		for writer in writers.values():
-			writer.__exit__(type(error), error, error.__traceback__)
-		return False
+		for key, name in names.items():
+			os.replace(partials[key], name)
 	except BaseException as error:
 		for writer in writers.values():
 			writer.__exit__(type(error), error, error.__traceback__)
+		for partial in partials.values():
+			if os.path.exists(partial):
+				os.remove(partial)
+		if isinstance(error, _Fallback):
+			return False
 		raise
-	print(_discarded_line(discarded))
+	if not args.read_depth:
+		_report_missing(files, chrom_sizes, args)
+		print(_discarded_line(discarded))
 	return True
 
 
@@ -719,7 +731,6 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	if files is None:
 		return False
 	per_file = len(groups) // len(files)
-	_report_missing(files, chrom_sizes, args)
 
 	def writer_for(n_jobs=cores):
 		return FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
@@ -728,11 +739,13 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 
 	if args.read_depth:
 		try:
-			results = [_indexed_coverage([f], chrom_sizes, args, cores) for f in files]
+			results = [_indexed_coverage([f], chrom_sizes, args, cores if cores > 1
+				else 0) for f in files]
 		except _Fallback:
 			return False
 		discarded = {chrom: sum(r[1][chrom] for r in results) for chrom, _ in
 			chrom_sizes}
+		_report_missing(files, chrom_sizes, args)
 		print(_discarded_line(discarded))
 		with writer_for() as writer:
 			writer._copies = False
@@ -765,8 +778,10 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 						return
 					values = depth
 					if args.scale_factor != 1:
+						# Only the covered bases, as the runs are scaled.
 						values = depth.astype(numpy.float64)
-						values *= args.scale_factor
+						numpy.multiply(values, args.scale_factor, out=values, where=depth !=
+							0)
 					writer.write(chrom, [beg], values[None, None], tracks=[track_of[key]])
 
 				def emit_runs(chrom, key, starts, ends, values):
@@ -780,6 +795,7 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 					discarded[chrom] += lost[chrom]
 	except _Fallback:
 		return False
+	_report_missing(files, chrom_sizes, args)
 	print(_discarded_line(discarded))
 	return True
 
@@ -788,7 +804,7 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	dense=False):
 	"""The coverage of `files` (from `_open_files`), pooled, as
 	`_coverage_runs` gives it for each chromosome and strand, read region by
-	region on `threads` threads. Each chromosome's runs, in the order of
+	region on `threads` threads, or on this one when `threads` is 0. Each chromosome's runs, in the order of
 	`chrom_sizes`, go to `emit(chrom, strand, starts, ends, values)` a region
 	at a time, a run that crosses a region's edge whole in the first call
 	that holds it, or into the returned strands when `emit` is None. With
@@ -819,8 +835,8 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	_bam_kernel()
 	_bgzf_kernel()
 	_inflate_engine()
-	# One thread reads each region in turn on this one, between writes.
-	pool = concurrent.futures.ThreadPoolExecutor(threads) if threads > 1 else None
+	# With no threads, each region is read in turn on this one, between writes.
+	pool = concurrent.futures.ThreadPoolExecutor(threads) if threads > 0 else None
 	try:
 		pending = collections.deque()
 		todo = iter(regions)
