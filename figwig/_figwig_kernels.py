@@ -2514,3 +2514,65 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 				out_offsets, out_values)
 
 	return k_out
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_keys(positions, track_ids, tids, multi, group_of, slot_of, n_groups,
+	shift, slot_bits, tile_bits, keys, lo, hi):
+	"""The sort keys of entries lo to hi of a write_sparse call: from high
+	bits to low, the chromosome and group, the tile, the track's slot in its
+	group and the offset in the tile, each in its own bits."""
+
+	mask = (numpy.int64(1) << shift) - 1
+	for i in range(lo, hi):
+		p = positions[i]
+		t = track_ids[i]
+		high = (tids[i] if multi else tids[0]) * n_groups + group_of[t]
+		keys[i] = ((((high << tile_bits) | (p >> shift)) << slot_bits) | slot_of[t]
+			) << shift | (p & mask)
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_counts(keys, lo, hi, shift, mask, counts):
+	"""How many of keys lo to hi hold each value of the digit at `shift`."""
+
+	for i in range(lo, hi):
+		counts[(keys[i] >> shift) & mask] += 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_scatter(keys, order, first, lo, hi, shift, mask, starts, keys_out,
+	order_out):
+	"""Moves keys lo to hi, and their places in the input (their own when
+	`first`), to the slots `starts` gives each digit, in order, so that
+	equal digits keep the order they came in."""
+
+	for i in range(lo, hi):
+		d = (keys[i] >> shift) & mask
+		j = starts[d]
+		starts[d] = j + 1
+		keys_out[j] = keys[i]
+		order_out[j] = i if first else order[i]
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_gather(keys, order, track_ids, values, multi, shift, slot_bits,
+	tile_bits, n_groups, lo, hi, positions_out, tracks_out, values_out,
+	groups_out, tids_out):
+	"""Entries lo to hi in sorted order: the position, group and chromosome
+	from each sorted key, the track and the value (as float64) from the
+	entry it came from."""
+
+	mask = (numpy.int64(1) << shift) - 1
+	tile_mask = (numpy.int64(1) << tile_bits) - 1
+	for i in range(lo, hi):
+		k = keys[i]
+		positions_out[i] = (((k >> (shift + slot_bits)) & tile_mask) << shift) | (
+			k & mask)
+		high = k >> (shift + slot_bits + tile_bits)
+		groups_out[i] = high % n_groups
+		if multi:
+			tids_out[i] = high // n_groups
+		j = order[i]
+		tracks_out[i] = track_ids[j]
+		values_out[i] = values[j]

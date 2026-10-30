@@ -1522,6 +1522,100 @@ def test_entry_runs_are_the_changes_of_the_rows():
 	assert_identical(rvals[:d], expected_vals[:d])
 
 
+@pytest.mark.parametrize('n_chunks', [1, 3, 8])
+def test_radix_order_is_a_stable_argsort(n_chunks):
+	"""The radix sort gives numpy's stable argsort and the sorted keys, for
+	keys of any width with many ties, whatever the number of chunks."""
+
+	from concurrent.futures import ThreadPoolExecutor
+	from figwig.figwig import _radix_order
+
+	rng = numpy.random.default_rng(n_chunks)
+	with ThreadPoolExecutor(4) as pool:
+		for bits in (1, 5, 16, 17, 31, 40, 63):
+			for n in (0, 1, 7, 5000):
+				keys = rng.integers(0, 1 << min(bits, 62), n, dtype=numpy.int64)
+				if bits == 63:
+					keys |= rng.integers(0, 2, n, dtype=numpy.int64) << 62
+				keys[::3] = keys[0] if n else 0
+				expected = numpy.argsort(keys, kind='stable')
+				order, sorted_keys = _radix_order(keys.copy(), bits, pool if
+					n_chunks > 1 else None, n_chunks)
+				numpy.testing.assert_array_equal(order, expected)
+				numpy.testing.assert_array_equal(sorted_keys, keys[expected])
+		order, _ = _radix_order(numpy.full(100, 5), 4, None, 1)
+		numpy.testing.assert_array_equal(order, numpy.arange(100))
+
+
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
+	monkeypatch, n_jobs):
+	"""Entries sorted by the radix sort, in one chunk or several, give the
+	file the numpy sort of the composite keys gives, byte for byte, over
+	several chromosomes and groups in one call, values of every kind, and
+	the same message for two entries on one base."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	original = FigWigWriter._radix_entries
+	radix, used = [True], []
+
+	def chosen(self, *args):
+		result = original(self, *args) if radix[0] else None
+		used.append(result is not None)
+		return result
+
+	monkeypatch.setattr(FigWigWriter, '_radix_entries', chosen)
+	rng = numpy.random.default_rng(5)
+	tracks = ['t{}'.format(i) for i in range(40)]
+	groups = [tracks[:1], tracks[1:9], tracks[9:30], tracks[30:]]
+	n = 6000
+	chroms = rng.choice(['chr1', 'chr2', 'chrM'], n)
+	sizes = numpy.array([CHROM_SIZES[c] for c in chroms])
+	positions = (rng.random(n) * sizes).astype(numpy.int64)
+	which = rng.integers(0, 40, n)
+	key = numpy.unique(numpy.stack([numpy.searchsorted(['chr1', 'chr2', 'chrM'],
+		chroms), which, positions]), axis=1, return_index=True)[1]
+	chroms, positions, which = chroms[key], positions[key], which[key]
+	values = {'int32': rng.integers(1, 50, len(key)).astype(numpy.int32),
+		'float16': rng.random(len(key)).astype(numpy.float16) + 1,
+		'>f8': (rng.random(len(key)) - 0.5).astype('>f8'),
+		'uint8': numpy.ones(len(key), dtype=numpy.uint8)}
+
+	def write(use_radix, vals, names=None):
+		radix[0] = use_radix
+		path = str(tmp_path / '{}.fw'.format(use_radix))
+		with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=groups,
+				n_jobs=n_jobs) as writer:
+			if names is None:
+				writer.write_sparse(chroms, positions, which, vals)
+			else:
+				for chrom in ['chr1', 'chr2', 'chrM']:
+					take = chroms == chrom
+					writer.write_sparse(chrom, positions[take], names[take], vals[
+						take])
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	for kind, vals in values.items():
+		assert write(True, vals) == write(False, vals), kind
+	names = numpy.array(tracks)[which]
+	assert write(True, values['int32'], names) == write(False, values['int32'],
+		names)
+
+	messages = []
+	for use_radix in (True, False):
+		radix[0] = use_radix
+		with FigWigWriter(str(tmp_path / 'c.fw'), CHROM_SIZES, tracks, tile=64,
+				groups=groups, n_jobs=n_jobs) as writer:
+			with pytest.raises(ValueError, match='both name base') as error:
+				writer.write_sparse(numpy.append(chroms, chroms[7]), numpy.append(
+					positions, positions[7]), numpy.append(which, which[7]),
+					numpy.ones(len(key) + 1))
+			messages.append(str(error.value))
+	assert messages[0] == messages[1]
+	assert used.count(True) == len(values) + 3 + 1
+
+
 def test_write_sparse_arguments(tmp_path):
 	path = str(tmp_path / 's.fw')
 	writer = FigWigWriter(path, {'chr1': 1000, 'chr2': 500}, ['a', 'b', {'name':

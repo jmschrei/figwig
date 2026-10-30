@@ -75,6 +75,8 @@ from ._figwig_kernels import _encode_blocks
 from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_entries
 from ._figwig_kernels import _encode_tiles
+from ._figwig_kernels import _entry_gather
+from ._figwig_kernels import _entry_keys
 from ._figwig_kernels import _inflate_chunks
 from ._figwig_kernels import _bucket_sort
 from ._figwig_kernels import _inflate_chunks_libdeflate
@@ -82,6 +84,8 @@ from ._figwig_kernels import _pread_runs
 from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
+from ._figwig_kernels import _radix_counts
+from ._figwig_kernels import _radix_scatter
 from ._kernels import _libc_pread
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
@@ -138,6 +142,11 @@ _CHUNKS_PER_THREAD = 64
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
 _SCRATCH_BYTES = 1 << 28
+
+# The most bits a pass of write_sparse's radix sort takes from its keys, and
+# the entries from which its passes are cut among the pool's threads.
+_RADIX_BITS = 16
+_RADIX_PARALLEL = 1 << 18
 
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
@@ -1550,13 +1559,22 @@ class FigWigWriter:
 			group_ids = self._group_of[track_ids]
 			values = numpy.asarray(values, dtype=numpy.float64)
 		else:
-			group_ids = self._group_of[track_ids]
-			order = self._entry_order(tids, group_ids, track_ids, positions)
-			tids, positions, track_ids, group_ids = tids[order], positions[order], \
-				track_ids[order], group_ids[order]
-			values = values[order].astype(numpy.float64)
-			same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
-				positions[1:] == positions[:-1])
+			# A key per entry sorts in a radix sort on the pool, and two entries
+			# on one base of one track have equal keys; where the key would not
+			# fit in 63 bits, a numpy sort of two keys.
+			sorted_ = self._radix_entries(tids, single, track_ids, positions,
+				values, high)
+			if sorted_ is not None:
+				order, tids, positions, track_ids, group_ids, values, keys = sorted_
+				same = keys[1:] == keys[:-1]
+			else:
+				group_ids = self._group_of[track_ids]
+				order = self._entry_order(tids, group_ids, track_ids, positions)
+				tids, positions, track_ids, group_ids = tids[order], positions[
+					order], track_ids[order], group_ids[order]
+				values = values[order].astype(numpy.float64)
+				same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
+					positions[1:] == positions[:-1])
 			if same.any():
 				k = int(numpy.argmax(same)) + 1
 				raise ValueError("entries {} and {} both name base {} of {!r} in "
@@ -1628,6 +1646,47 @@ class FigWigWriter:
 		if longest + 25 + high_bits <= 63:
 			return numpy.argsort((high << (longest + 25)) | low, kind='stable')
 		return numpy.lexsort((low, high))
+
+	def _radix_entries(self, tids, single, track_ids, positions, values, top):
+		"""The entries in the order `_entry_order` gives, with each array
+		gathered into it, by a radix sort of one key per entry on the pool:
+		(order, tids, positions, track ids, group ids, values as float64,
+		sorted keys), or None when the key would take more than 63 bits.
+		`top` is the largest position."""
+
+		n = len(positions)
+		shift = self.tile.bit_length() - 1
+		n_groups = len(self._groups)
+		tile_bits = max(1, (top >> shift).bit_length())
+		slot_bits = max(1, int(self._slot_of.max()).bit_length())
+		top_tid = 0 if single else int(tids.max())
+		high_bits = max(1, (top_tid * n_groups + n_groups - 1).bit_length())
+		bits = high_bits + tile_bits + slot_bits + shift
+		if bits > 63:
+			return None
+
+		if not values.dtype.isnative or values.dtype == numpy.float16:
+			values = values.astype(numpy.float64)
+		n_chunks = self.n_jobs if self._pool is not None and n >= \
+			_RADIX_PARALLEL else 1
+		cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
+		keyed = numpy.zeros(1, dtype=numpy.int64) if single else tids
+		keys = numpy.empty(n, dtype=numpy.int64)
+		_each(self._pool, n_chunks, lambda c: _entry_keys(positions, track_ids,
+			keyed, not single, self._group_of, self._slot_of, n_groups, shift,
+			slot_bits, tile_bits, keys, cuts[c], cuts[c + 1]))
+		order, keys = _radix_order(keys, bits, self._pool, n_chunks)
+
+		out = [numpy.empty(n, dtype=numpy.int64), numpy.empty(n,
+			dtype=numpy.int64), numpy.empty(n, dtype=numpy.float64), numpy.empty(n,
+			dtype=numpy.int64), numpy.empty(0 if single else n, dtype=numpy.int64)]
+		_each(self._pool, n_chunks, lambda c: _entry_gather(keys, order,
+			track_ids, values, not single, shift, slot_bits, tile_bits, n_groups,
+			cuts[c], cuts[c + 1], *out))
+		positions, track_ids, values, group_ids, tids_out = out
+		if not single:
+			tids = tids_out
+		return order, tids, positions, track_ids, group_ids, values, keys
 
 	def _write_group(self, g, tid, starts, ends, values, by_base, dtype=None):
 		"""Encode one group's items on one chromosome, in order, into chunks,
@@ -2393,6 +2452,53 @@ def _moved(offsets, sizes, extents):
 	k = numpy.searchsorted(starts, offsets, side='right') - 1
 	moved = dests[numpy.maximum(k, 0)] + offsets - starts[numpy.maximum(k, 0)]
 	return numpy.where(numpy.asarray(sizes) > 0, moved, _HEADER.itemsize)
+
+
+def _each(pool, n, task):
+	"""task(c) for c in range(n), on the pool when there is one."""
+
+	if pool is None or n == 1:
+		for c in range(n):
+			task(c)
+	else:
+		for future in [pool.submit(task, c) for c in range(n)]:
+			future.result()
+
+
+def _radix_order(keys, bits, pool, n_chunks):
+	"""The stable order of non-negative int64 keys below 2**bits, and the
+	keys in it, by a least significant digit radix sort whose passes are
+	cut into `n_chunks` pieces that the pool takes at once. A digit every
+	key shares is skipped. `keys` is overwritten."""
+
+	n = len(keys)
+	cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
+	passes = max(1, -(-bits // _RADIX_BITS))
+	digit = -(-bits // passes)
+	mask = (1 << digit) - 1
+	order = numpy.empty(n, dtype=numpy.int64)
+	keys_out = numpy.empty(n, dtype=numpy.int64)
+	order_out = numpy.empty(n, dtype=numpy.int64)
+	first = True
+	for shift in range(0, bits, digit):
+		counts = numpy.zeros((n_chunks, mask + 1), dtype=numpy.int64)
+		_each(pool, n_chunks, lambda c: _radix_counts(keys, cuts[c], cuts[c + 1],
+			shift, mask, counts[c]))
+		if counts.sum(axis=0).max() == n:
+			continue
+
+		# Each digit's slots start after every smaller digit's, and a chunk's
+		# after the earlier chunks' keys of its digit.
+		flat = counts.T.ravel()
+		starts = (numpy.cumsum(flat) - flat).reshape(mask + 1, n_chunks).T.copy()
+		_each(pool, n_chunks, lambda c: _radix_scatter(keys, order, first,
+			cuts[c], cuts[c + 1], shift, mask, starts[c], keys_out, order_out))
+		keys, keys_out = keys_out, keys
+		order, order_out = order_out, order
+		first = False
+	if first:
+		order = numpy.arange(n, dtype=numpy.int64)
+	return order, keys
 
 
 def _crcs(data, cuts):
