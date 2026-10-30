@@ -1610,6 +1610,7 @@ class FigWigWriter:
 				describe(given(c)), None, entries=self.order == 'positions')
 
 		self._written = True
+		pieces = []
 		for a, b in zip(bounds[:-1], bounds[1:]):
 			g, tid = group_at(a), int(tids[a])
 			if self.order == 'tracks':
@@ -1617,7 +1618,8 @@ class FigWigWriter:
 					positions[a:b], values[a:b], int(positions[b - 1]) + 1)
 			else:
 				self._write_group_entries(g, tid, track_ids[a:b], positions[a:b],
-					values[a:b])
+					values[a:b], pieces)
+		self._submit_pieces(pieces)
 
 		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
 			2 * self.n_jobs)))
@@ -1872,16 +1874,18 @@ class FigWigWriter:
 			self._done[g].add(last[0])
 		self._last[g] = (tid, end)
 
-	def _write_group_entries(self, g, tid, track_ids, positions, values):
-		"""Encode one group's nonzero bases on one chromosome, sorted by
-		tile, track and position, into chunks on the pool. This thread only
-		finds where to cut the entries into batches of whole tiles; each
-		task finds its own tiles and its tracks' slots."""
+	def _write_group_entries(self, g, tid, track_ids, positions, values, pieces):
+		"""Cut one group's nonzero bases on one chromosome, sorted by tile,
+		track and position, into batches of whole tiles, added to `pieces`
+		for `_submit_pieces` to encode on the pool. This thread only finds
+		where to cut; each task finds its own tiles and its tracks' slots."""
 
 		tile = self.tile
 		n_tracks = len(self._groups[g])
 		open_ = self._open[g]
 		if open_ is not None:
+			# The open tile's chunk goes to the file before the pieces after it.
+			self._submit_pieces(pieces)
 			self._encode(g, open_[0], numpy.array([open_[1]]), None, None, None,
 				False)
 			self._open[g] = None
@@ -1896,17 +1900,50 @@ class FigWigWriter:
 			per_batch = max(_ENTRIES_PER_BATCH, min(per_batch, len(positions) // (
 				_BATCHES_PER_THREAD * self.n_jobs)))
 		max_tiles = max(1, _BATCH_BYTES // (4 * n_tracks + 24))
-		cuts = _tile_cuts(positions, tile, per_batch, max_tiles)
-		for e0, e1 in zip(cuts[:-1].tolist(), cuts[1:].tolist()):
-			task = (self._entries_task, g, tid, track_ids[e0:e1], positions[e0:e1],
-				values[e0:e1], n_tracks)
-			if self._pool is None:
-				self._inflight.append((task[0](*task[1:]), g, None))
-			else:
-				self._inflight.append((self._pool.submit(*task), g, None))
+		if len(positions) <= per_batch and int(positions[-1]) // tile - int(
+				positions[0]) // tile < max_tiles:
+			cuts = [0, len(positions)]
+		else:
+			cuts = _tile_cuts(positions, tile, per_batch, max_tiles).tolist()
+		for e0, e1 in zip(cuts[:-1], cuts[1:]):
+			pieces.append((g, tid, track_ids[e0:e1], positions[e0:e1],
+				values[e0:e1], n_tracks))
 
 		self._sealed[g] = (tid, int(positions[-1]) // tile)
 		self._note_written(g, tid, int(positions[-1]) + 1)
+
+	def _submit_pieces(self, pieces):
+		"""Hand batches of entries from `_write_group_entries` to the pool in
+		order, packing consecutive ones into a task until it holds a share
+		of the call's entries, since a task per small group cost this thread
+		its dispatch and bookkeeping. Empties `pieces`."""
+
+		if len(pieces) == 0:
+			return
+		total = sum(len(piece[3]) for piece in pieces)
+		share = total if self._pool is None else max(1, total // (
+			_BATCHES_PER_THREAD * self.n_jobs))
+		task, size = [], 0
+		for k, piece in enumerate(pieces):
+			task.append(piece)
+			size += len(piece[3])
+			if size >= share or k == len(pieces) - 1:
+				if len(task) == 1:
+					args = (self._entries_task,) + task[0]
+					g, kind = task[0][0], None
+				else:
+					args = (self._entries_tasks, task)
+					g, kind = [piece[0] for piece in task], 'pieces'
+				result = args[0](*args[1:]) if self._pool is None else \
+					self._pool.submit(*args)
+				self._inflight.append((result, g, kind))
+				task, size = [], 0
+		pieces.clear()
+
+	def _entries_tasks(self, pieces):
+		"""`_entries_task` of each piece, in order."""
+
+		return [self._entries_task(*piece) for piece in pieces]
 
 	def _entries_task(self, g, tid, track_ids, positions, values, n_tracks):
 		"""Encode and compress one batch of tiles from their entries. The
@@ -2277,53 +2314,63 @@ class FigWigWriter:
 		stats of those encoded on the pool."""
 
 		for result, g, kind in self._inflight[:n_batches]:
-			if not isinstance(result, tuple):
+			if not isinstance(result, (tuple, list)):
 				result = result.result()
-			if len(result) == 8:
-				stats, summary = result[6], result[7]
-				# One pass over the group's rows, where five fancy-indexed
-				# operations over thousands of tracks per batch were most of
-				# what this thread did per batch.
-				flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
-					dtype=numpy.int64), numpy.ascontiguousarray(stats,
-					dtype=numpy.float64))
-				if flagged >= 0:
-					raise ValueError("a value of track {!r} lies beyond float32's "
-						"range; declare the track float64 to keep it.".format(
-						self.tracks[int(flagged)]['name']))
-				if summary is not None:
-					self._sums[g].append(summary)
-
-			compressed, sizes, raw, kinds, where, crcs = result[:6]
-			if len(where) == 0:
-				continue
-
-			offset = self._file.tell()
-			self._file.write(compressed[:sizes.sum()])
-			total = int(sizes.sum())
-
-			if kind == 'blocks':
-				where['offset'] = offset + numpy.cumsum(sizes) - sizes
-				self._blocks[g].append(where)
-				continue
-
-			live = numpy.zeros(len(where), dtype=_LIVE)
-			live['tile'] = where
-			live['kind'] = kinds
-			live['size'] = sizes
-			live['raw'] = raw
-			live['crc'] = crcs
-			self._live[g].append(live)
-
-			runs = self._runs[g]
-			if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
-					runs[-1][1] < where[0] and runs[-1][3] + total < 2 ** 40:
-				runs[-1][1] = int(where[-1])
-				runs[-1][3] += total
+			if kind == 'pieces':
+				for one, g_one in zip(result, g):
+					self._write_result(one, g_one, None)
 			else:
-				runs.append([int(where[0]), int(where[-1]), offset, total])
+				self._write_result(result, g, kind)
 
 		del self._inflight[:n_batches]
+
+	def _write_result(self, result, g, kind):
+		"""Write one batch's chunks or blocks to the file, record them in the
+		index, and fold in its stats when it was encoded on the pool."""
+
+		if len(result) == 8:
+			stats, summary = result[6], result[7]
+			# One pass over the group's rows, where five fancy-indexed
+			# operations over thousands of tracks per batch were most of
+			# what this thread did per batch.
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+				dtype=numpy.int64), numpy.ascontiguousarray(stats,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[g].append(summary)
+
+		compressed, sizes, raw, kinds, where, crcs = result[:6]
+		if len(where) == 0:
+			return
+
+		offset = self._file.tell()
+		self._file.write(compressed[:sizes.sum()])
+		total = int(sizes.sum())
+
+		if kind == 'blocks':
+			where['offset'] = offset + numpy.cumsum(sizes) - sizes
+			self._blocks[g].append(where)
+			return
+
+		live = numpy.zeros(len(where), dtype=_LIVE)
+		live['tile'] = where
+		live['kind'] = kinds
+		live['size'] = sizes
+		live['raw'] = raw
+		live['crc'] = crcs
+		self._live[g].append(live)
+
+		runs = self._runs[g]
+		if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
+				runs[-1][1] < where[0] and runs[-1][3] + total < 2 ** 40:
+			runs[-1][1] = int(where[-1])
+			runs[-1][3] += total
+		else:
+			runs.append([int(where[0]), int(where[-1]), offset, total])
 
 	def close(self):
 		"""Write the open tiles and pending blocks, the tables, the index and
