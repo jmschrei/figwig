@@ -3476,6 +3476,11 @@ class FigWigReader:
 
 		if nan not in ('propagate', 'skip') or len(starts) == 0:
 			return None
+		tile = self.tile
+		first = -(-starts // tile)
+		last = ends // tile
+		if not (last > first).any():
+			return None
 		ids, single = self._select(tracks)
 		if len(ids) == 0 or (self._dtype_codes[ids] >= _DTYPES.index('float32')
 				).any():
@@ -3490,9 +3495,6 @@ class FigWigReader:
 		if peak * float((ends - starts).max()) >= 2.0 ** 53:
 			return None
 
-		tile = self.tile
-		first = -(-starts // tile)
-		last = ends // tile
 		whole = (last > first) & (starts >= 0) & (ends <= lengths)
 		interior = numpy.zeros((len(starts), len(ids)), dtype=numpy.int64)
 		wanted = numpy.unique(codes[whole]).tolist()
