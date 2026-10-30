@@ -1692,7 +1692,8 @@ class FigWigWriter:
 		if bits > 63:
 			return None
 
-		if not values.dtype.isnative or values.dtype == numpy.float16:
+		if not values.dtype.isnative or (values.dtype.kind == 'f' and values.dtype
+				not in (numpy.float32, numpy.float64)):
 			values = values.astype(numpy.float64)
 		n_chunks = self.n_jobs if self._pool is not None and n >= \
 			_RADIX_PARALLEL else 1

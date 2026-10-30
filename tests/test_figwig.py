@@ -1725,6 +1725,7 @@ def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
 	values = {'int32': rng.integers(1, 50, len(key)).astype(numpy.int32),
 		'float16': rng.random(len(key)).astype(numpy.float16) + 1,
 		'>f8': (rng.random(len(key)) - 0.5).astype('>f8'),
+		'longdouble': (rng.random(len(key)) * 3).astype(numpy.longdouble),
 		'uint8': numpy.ones(len(key), dtype=numpy.uint8)}
 
 	def write(use_radix, vals, names=None):
