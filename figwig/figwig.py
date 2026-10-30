@@ -3495,11 +3495,17 @@ class FigWigReader:
 		last = ends // tile
 		whole = (last > first) & (starts >= 0) & (ends <= lengths)
 		interior = numpy.zeros((len(starts), len(ids)), dtype=numpy.int64)
-		for c in numpy.unique(codes[whole]).tolist():
-			try:
-				sums = self.tile_sums(ids, names[c])
-			except ValueError:
-				return None
+		wanted = numpy.unique(codes[whole]).tolist()
+		if len(wanted) == 0:
+			return None
+		# Every tile at once: each call inflates every group's summary whole.
+		try:
+			every = self.tile_sums(ids)
+		except ValueError:
+			return None
+		for c in wanted:
+			at = int(self._tile_offsets[self._tids[names[c]]])
+			sums = every[:, at:at - (-int(self.chrom_sizes[names[c]]) // tile)]
 			# Tiles a sum of 2**24 or more could have rounded in.
 			rounded = numpy.concatenate([[0], numpy.cumsum((numpy.abs(sums) >=
 				2.0 ** 24).any(axis=0))])
