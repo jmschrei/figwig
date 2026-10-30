@@ -9,6 +9,18 @@ Release History
 Unreleased
 ==========
 
+figwig files
+------------
+
+	- ``sums`` over a track stored as runs, such as the coverage ``figwig bam2fw -c`` writes, only decodes the changes of value before each interval, adds a run of integers once rather than base by base, and takes the tiles an interval covers whole from the file's tile sums when the track holds integers whose sums those keep exactly. On one thread of the benchmarks' server, the coverage of ENCODE ATAC-seq BAM ENCFF877LRY sums over 78,733 gene bodies in 0.47 s, where it took 7.9 s, and over 100,548 peaks in 0.41 s, where it took 1.6 s; a fold-change track over the gene bodies in 1.55 s, where it took 6.8 s; 48 count tracks over the gene bodies in 6.8 s, where they took 14.4 s. The sums are the same to the bit.
+
+	- ``write_sparse``, and so ``figwig reorder``, stores a tile as a dense or runs chunk when either takes fewer bytes than a sparse one, as ``write`` does. Reordering the ATAC-seq coverage file gives the same 79 MB of runs chunks, where it gave 119 MB of sparse chunks. Scattered entries, such as cells' cut sites, are stored as before: the 10,246-cell PBMC file is the same to the byte.
+
+Converters and commands
+-----------------------
+
+	- ``figwig bam2fw -c`` on threads writes each 4 Mb of a chromosome's coverage as one dense window, whose tiles the writer encodes on its threads, where it encoded every run on the calling thread, unless the 4 Mb hold fewer runs than one per 1,024 bases, as sparse coverage such as RNA-seq's does, which goes in as runs as before: the 2.4 GB ATAC-seq BAM takes 7.2 s on 8 threads, where it took 14.2 s. The file is the same to the byte, and one thread writes it as before.
+
 Documentation
 -------------
 

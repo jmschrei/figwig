@@ -181,16 +181,23 @@ command                               threads   time      peak RSS  output
 ``figwig bam2bw -c -u``               1         11.9 s    1.6 GB    193 MB
 ``figwig bam2bw -c -u``               8         3.4 s     2.0 GB    193 MB
 ``figwig bam2bw -c -u``               32        3.7 s     2.0 GB    193 MB
-``figwig bam2fw -c -u``               8         14.4 s    2.2 GB    79 MB
+``figwig bam2fw -c -u``               1         22.5 s    1.8 GB    79 MB
+``figwig bam2fw -c -u``               8         7.2 s     2.1 GB    79 MB
+``figwig bam2fw -c -u``               32        7.1 s     2.1 GB    79 MB
 ``bamCoverage --binSize 1``           1         46.2 s    1.3 GB    249 MB
 ``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
 ====================================  ========  ========  ========  ========
 
-The coverage is two events per read on the readers and sorts the end
-counts use, so it costs about what ``-f`` costs; the figwig file is a
-runs chunk per tile, which is why ``bam2fw`` takes longer to write and
-less space. deepTools' time is its own reading of the BAM through pysam,
-a process per thread.
+The ``bam2fw`` rows are medians of three runs, with ``/usr/bin/time``'s
+peak RSS. The coverage is two events per read on the readers and sorts the
+end counts use, so it costs about what ``-f`` costs; the figwig file is a
+runs chunk per tile, which takes less space and, on one thread, longer to
+write. On threads ``bam2fw`` hands the writer each 4 Mb of a chromosome as
+one window, whose tiles it encodes in parallel, or as its runs where it
+holds fewer than one per 1,024 bases, as sparse coverage such as RNA-seq's
+does; ``figwig reorder`` writes the file again as the same 79 MB of runs
+chunks. deepTools' time is its own reading of the BAM through pysam, a
+process per thread.
 
 Ten more experiments of the test-data collection, from 40 MB to 2.4 GB,
 single- and paired-end, two genomes, spliced short and long reads, were
@@ -731,6 +738,26 @@ Over 3,000 single cells as tracks (chr1 to chr5 of the PBMC fragments,
 46 million cut sites, one group), the 58,705 peaks on those chromosomes
 summed in 0.96 s on 8 threads and 1.5 s on one, the same sums as a sparse
 read of the windows gives in 1.2 s.
+
+Dense tracks are stored as runs and dense chunks rather than nonzero
+bases. In a runs chunk the changes of value before an interval are only
+decoded, and a run of integers inside it is added once rather than base
+by base; the tiles an interval covers whole are taken from the file's
+tile sums when the track holds integers whose sums those keep exactly. The
+coverage of ATAC-seq BAM ENCFF877LRY, as ``figwig bam2fw -c -u`` writes it,
+and the fold change of ENCODE's ENCFF932UQM (float32), each one track,
+summed over the 100,548 replicated peaks of K562 ATAC-seq (ENCFF827JWX)
+and the 78,733 gene bodies of GENCODE v50's basic annotation, on tmpfs,
+median of three:
+
+=================================  ==========  ==========
+track, intervals                   1 thread    8 threads
+=================================  ==========  ==========
+ATAC-seq coverage, peaks           0.41 s      0.085 s
+ATAC-seq coverage, gene bodies     0.47 s      0.11 s
+fold change, peaks                 0.33 s      0.070 s
+fold change, gene bodies           1.55 s      0.26 s
+=================================  ==========  ==========
 
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

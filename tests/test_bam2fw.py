@@ -825,6 +825,82 @@ def test_coverage_scaling_and_depth(tmp_path, coverage_bam, sizes):
 		numpy.testing.assert_allclose(y[0, 0], expected[chrom]["+"] * 2 / 8)
 
 
+def chunks_of(path, group):
+	"""A group's kind bytes and chunks, tile by tile, wherever in the file
+	they lie."""
+
+	kinds, sizes, _, offsets, _ = FigWigReader(path)._group_index(group)
+	with open(path, "rb") as handle:
+		data = handle.read()
+	return kinds.tolist(), [data[o:o + n] for o, n in zip(offsets.tolist(),
+		sizes.tolist())]
+
+
+@pytest.mark.parametrize("spacing", [0, 8, 16, 1 << 30])
+@pytest.mark.parametrize("flags, shifts", [((), (0, 0)), (("-u", "-ps", "4",
+	"-ns", "-5"), (4, -5)), (("-sf", "0.5"), (0, 0))])
+def test_coverage_in_pieces_is_the_file_of_one_piece(tmp_path, coverage_bam,
+		sizes, monkeypatch, flags, shifts, spacing):
+	"""bam2fw -c on threads writes a chromosome's coverage a piece at a
+	time, a whole number of tiles each, as a dense window or, for a stretch
+	of pieces of few runs (here every piece, some, or none), as its runs;
+	on one thread as intervals. Pieces of 64 bases over tiles of 16, which runs cross and
+	some of which hold no run, give the file one piece per chromosome
+	gives, byte for byte, every tile the chunk the intervals give, though
+	the two groups' chunks may lie in another order, and the pileup."""
+
+	monkeypatch.setattr(figwig.bam2fw, "_RUN_SPACING", spacing)
+	flags = ("-c", "-t", "16") + flags
+	intervals = bam2fw(tmp_path / "intervals", [coverage_bam], sizes, *flags)
+	whole = bam2fw(tmp_path / "whole", [coverage_bam], sizes, "-p", "2", *flags)
+	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", 64)
+	pieces = bam2fw(tmp_path / "pieces", [coverage_bam], sizes, "-p", "2",
+		*flags)
+	with open(whole, "rb") as a, open(pieces, "rb") as b:
+		assert a.read() == b.read()
+	for g in range(len(FigWigReader(pieces).tracks)):
+		assert chunks_of(intervals, g) == chunks_of(pieces, g)
+
+	expected = pileup(*shifts, stranded="-u" not in flags)
+	scale = 0.5 if "-sf" in flags else 1.0
+	reader = FigWigReader(pieces)
+	for chrom, length in CHROM_SIZES:
+		y = reader.read(chrom, [0], length, dtype="float64")[0]
+		for k, strand in enumerate(["+"] if "-u" in flags else ["+", "-"]):
+			numpy.testing.assert_array_equal(y[k], expected[chrom][strand] * scale)
+
+
+def test_coverage_mixes_runs_and_windows(tmp_path, sizes, monkeypatch):
+	"""On threads, stretches of pieces of few runs between pieces of many go
+	in as runs, each stretch in one call, and the others as windows; the
+	file is the one a single thread writes as intervals, byte for byte."""
+
+	reads = []
+	for piece in range(15):
+		if piece % 4 == 2:
+			reads += [("chr1", 64 * piece + 3 * k, 2, False) for k in range(20)]
+		else:
+			reads.append(("chr1", 64 * piece + 5, 10, False))
+	bam = str(write_bam(tmp_path / "mix.bam", BAM_CHROM_SIZES, reads))
+	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", 64)
+	monkeypatch.setattr(figwig.bam2fw, "_RUN_SPACING", 32)
+	calls = []
+	original = figwig.bam2fw._dense_runs
+
+	def counted(*args):
+		calls.append(1)
+		return original(*args)
+
+	monkeypatch.setattr(figwig.bam2fw, "_dense_runs", counted)
+	one = bam2fw(tmp_path / "one", [bam], sizes, "-c", "-u", "-t", "16")
+	assert calls == []
+	threaded = bam2fw(tmp_path / "threaded", [bam], sizes, "-c", "-u", "-t", "16",
+		"-p", "2")
+	assert len(calls) == 4
+	with open(one, "rb") as a, open(threaded, "rb") as b:
+		assert a.read() == b.read()
+
+
 def test_coverage_reports_the_bases_clipped_away(tmp_path, coverage_bam, sizes,
 		capsys):
 	bam2bw(tmp_path, coverage_bam, sizes, "-c")
