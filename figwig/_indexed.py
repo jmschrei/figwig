@@ -34,18 +34,19 @@ from .bam2bw import _inflate_engine
 
 
 # A region's most bases, a multiple of the 16 kb index windows, and the
-# BAM bytes at which a region is cut sooner.
-_REGION = 1 << 23
+# BAM bytes at which a region is cut sooner. A region in flight holds an
+# int32 of depth per base.
+_REGION = 1 << 22
 _REGION_BYTES = 16 << 20
 
 # The bytes a region reads at a time, and the BGZF blocks its records are
-# walked by: each walk holds the GIL for its calls, so the fewer the better.
-_REGION_READ = 1 << 24
-_REGION_BLOCKS = 256
+# walked by. Each walk holds the GIL for its calls, and each reading thread
+# keeps buffers of these sizes.
+_REGION_READ = 1 << 23
+_REGION_BLOCKS = 128
 
-# The regions in flight per thread: a slow region at the head of the queue
-# leaves the others room to work.
-_AHEAD = 2
+# The regions in flight per reading thread.
+_AHEAD = 1
 
 # The writer's share of the cores while regions are read: one in this many,
 # at least one, the regions taking the rest.
