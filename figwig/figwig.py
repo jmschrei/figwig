@@ -2965,10 +2965,10 @@ class FigWigReader:
 			dtypes = [track['dtype'] for track in tracks]
 			valid = set(map(type, names)) <= {str} and set(map(type, groups)) <= {
 				int, bool} and set(dtypes) <= set(_DTYPES)
-		except (TypeError, KeyError):
+			group_of = numpy.array(groups, dtype=numpy.int64) if valid else None
+		except (TypeError, KeyError, OverflowError):
 			valid = False
 		if valid:
-			group_of = numpy.array(groups, dtype=numpy.int64)
 			track_ids = dict(zip(names, range(n_tracks)))
 			valid = (group_of >= 0).all() and (group_of < n_groups).all() and len(
 				track_ids) == n_tracks
