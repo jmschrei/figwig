@@ -1216,6 +1216,64 @@ def test_sparse_read_matches_dense(fw, ref, read_batching):
 	assert empty.shape == (0, 5, 10) and len(empty.values) == 0
 
 
+@pytest.mark.parametrize('ascending', [True, False])
+def test_sparse_read_sorts_on_threads(fw, read_batching, monkeypatch, ascending):
+	"""A sparse read's entries, sorted from its tasks' parts by a counting
+	sort cut among threads, or by keys where a bucket's offsets would not
+	ascend, are those one thread gives, in the same type."""
+
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(22)
+	chroms, starts = random_windows(rng, 300, 150)
+	picks = (None, ['negative', 'atac_plus', 'signal'])
+	ones = [reader.read(chroms, starts, 150, tracks=tracks, sparse=True,
+		n_jobs=1) for tracks in picks]
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	if not ascending:
+		monkeypatch.setattr(figwig.figwig, '_bucket_ascending', lambda *a: False)
+	for tracks, one in zip(picks, ones):
+		several = reader.read(chroms, starts, 150, tracks=tracks, sparse=True,
+			n_jobs=4)
+		for a, b in zip((one.rows, one.channels, one.offsets, one.values), (
+				several.rows, several.channels, several.offsets, several.values)):
+			assert a.dtype == b.dtype
+			numpy.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize('n_threads', [1, 4])
+def test_sparse_gather_sorts_offsets_that_do_not_ascend(fw, monkeypatch,
+	n_threads):
+	"""Parts whose offsets ascend within each (row, channel) are sorted by
+	the counting sort alone; parts whose offsets do not are still sorted by
+	row, channel and offset."""
+
+	class Task:
+		def __init__(self, rows, channels, offsets, values):
+			self.entries = (numpy.array(rows), numpy.array(channels),
+				numpy.array(offsets), numpy.array(values, dtype=numpy.float32))
+
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	reader = FigWigReader(fw)
+	ascending = [([0, 0, 1], [0, 1, 0], [1, 4, 2], [1, 2, 3]), ([0, 1, 1], [0,
+		0, 1], [5, 3, 0], [4, 5, 6])]
+	descending = [([0, 1], [0, 1], [8, 2], [1, 2]), ([0, 1], [0, 1], [3, 1],
+		[3, 4])]
+	# The one pair out of order straddles the threads' halves of the check.
+	straddling = [([0, 0], [0, 1], [5, 7], [1, 2]), ([0, 1], [1, 1], [3, 1],
+		[3, 4])]
+	for parts in (ascending, descending, straddling):
+		found = reader._gather([Task(*part) for part in parts], [], 2, 2, 10,
+			numpy.dtype('float32'), n_threads)
+		rows, channels, offsets, values = (numpy.concatenate([part[k] for part in
+			parts]) for k in range(4))
+		order = numpy.lexsort((offsets, channels, rows))
+		for a, b in zip((found.rows, found.channels, found.offsets, found.values),
+				(rows[order], channels[order], offsets[order], numpy.array(values,
+				dtype=numpy.float32)[order])):
+			numpy.testing.assert_array_equal(a, b)
+		assert found.values.dtype == numpy.float32 and found.shape == (2, 2, 10)
+
+
 def test_labels_sum_tracks(fw, ref, read_batching):
 	rng = numpy.random.default_rng(21)
 	chroms, starts = random_windows(rng, 100, 150)

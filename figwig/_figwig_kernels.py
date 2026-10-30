@@ -2576,3 +2576,41 @@ def _entry_gather(keys, order, values, multi, shift, slot_bits, tile_bits,
 		if multi:
 			tids_out[i] = high // n_groups
 		values_out[i] = values[order[i]]
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_counts(rows, channels, n_channels, counts):
+	"""How many entries of a sparse read's part fall in each (row,
+	channel)."""
+
+	for i in range(rows.shape[0]):
+		counts[rows[i] * n_channels + channels[i]] += 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_scatter(rows, channels, offsets, values, n_channels, starts,
+	out_rows, out_channels, out_offsets, out_values):
+	"""Moves a part's entries to the slots `starts` gives each (row,
+	channel), in order, so that a bucket keeps the order its parts and
+	their entries came in."""
+
+	for i in range(rows.shape[0]):
+		b = rows[i] * n_channels + channels[i]
+		j = starts[b]
+		starts[b] = j + 1
+		out_rows[j] = rows[i]
+		out_channels[j] = channels[i]
+		out_offsets[j] = offsets[i]
+		out_values[j] = values[i]
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_ascending(rows, channels, offsets, lo, hi):
+	"""Whether entries lo to hi, and the one before lo, have ascending
+	offsets wherever two in a row share a row and channel."""
+
+	for i in range(max(lo, 1), hi):
+		if rows[i] == rows[i - 1] and channels[i] == channels[i - 1] and \
+				offsets[i] <= offsets[i - 1]:
+			return False
+	return True

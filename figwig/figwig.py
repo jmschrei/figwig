@@ -78,6 +78,9 @@ from ._figwig_kernels import _encode_tiles
 from ._figwig_kernels import _entry_gather
 from ._figwig_kernels import _entry_keys
 from ._figwig_kernels import _inflate_chunks
+from ._figwig_kernels import _bucket_ascending
+from ._figwig_kernels import _bucket_counts
+from ._figwig_kernels import _bucket_scatter
 from ._figwig_kernels import _bucket_sort
 from ._figwig_kernels import _inflate_chunks_libdeflate
 from ._figwig_kernels import _pread_runs
@@ -147,6 +150,10 @@ _SCRATCH_BYTES = 1 << 28
 # the entries from which its passes are cut among the pool's threads.
 _RADIX_BITS = 16
 _RADIX_PARALLEL = 1 << 18
+
+# The entries of a sparse read from which its counting sort takes another
+# thread.
+_GATHER_PER_THREAD = 1 << 18
 
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
@@ -3936,7 +3943,8 @@ class FigWigReader:
 		self._run(tasks, n_threads, out3 if mode == 'sum' else None, buffers > 0)
 
 		if sparse:
-			return self._gather(tasks, copies, n, len(ids), width, dtype)
+			return self._gather(tasks, copies, n, len(ids), width, dtype,
+				n_threads)
 
 		if nan_mode == 2:
 			# The kernels count a bin's NaN bases, since the bases that are
@@ -3969,44 +3977,54 @@ class FigWigReader:
 
 		return out
 
-	def _gather(self, tasks, copies, n, n_channels, width, dtype):
+	def _gather(self, tasks, copies, n, n_channels, width, dtype, n_threads):
 		"""The entries of a sparse read's tasks, as one `SparseWindows`
 		sorted by row, channel and offset, with each array built and freed
 		as late as it can be."""
 
 		parts = [task.entries for task in tasks if task.entries is not None]
-		if parts:
-			rows = numpy.concatenate([p[0] for p in parts])
-			channels = numpy.concatenate([p[1] for p in parts])
-			offsets = numpy.concatenate([p[2] for p in parts])
-			values = numpy.concatenate([p[3] for p in parts])
-		else:
-			rows = channels = offsets = numpy.zeros(0, dtype=numpy.int64)
-			values = numpy.zeros(0, dtype=dtype)
+		total = sum(len(p[0]) for p in parts)
 		for task in tasks:
 			task.entries = None
-		del parts
-
-		if copies:
-			extra = [(numpy.full(int((channels == source).sum()), channel,
-				dtype=numpy.int64), source) for channel, source in copies]
-			rows = numpy.concatenate([rows] + [rows[channels == s] for _, s in
-				extra])
-			offsets = numpy.concatenate([offsets] + [offsets[channels == s] for
-				_, s in extra])
-			values = numpy.concatenate([values] + [values[channels == s] for
-				_, s in extra])
-			channels = numpy.concatenate([channels] + [c for c, _ in extra])
-
-		# The tasks list each window's offsets in order, so a stable
-		# counting sort on (row, channel) is enough, in linear time; a key
-		# per entry sorts the rest.
-		if n * n_channels <= 4 * len(rows) + 1024:
-			rows_, channels_, offsets_, values_, ok = _bucket_sort(rows, channels,
-				offsets, values, n_channels, n * n_channels)
+		if parts and not copies and n * n_channels <= 4 * total + 1024:
+			# The tasks list each window's offsets in order, so a stable
+			# counting sort on (row, channel) straight from the tasks' parts,
+			# cut among the threads, is enough in most reads; a key per entry
+			# sorts the rest.
+			rows, channels, offsets, values, ok = self._bucket_gather(parts, n *
+				n_channels, n_channels, n_threads)
+			del parts
 			if ok:
-				return SparseWindows(rows_, channels_, offsets_, values_.astype(
-					dtype, copy=False), (n, n_channels, width))
+				return SparseWindows(rows, channels, offsets, values.astype(dtype,
+					copy=False), (n, n_channels, width))
+		else:
+			if parts:
+				rows = numpy.concatenate([p[0] for p in parts])
+				channels = numpy.concatenate([p[1] for p in parts])
+				offsets = numpy.concatenate([p[2] for p in parts])
+				values = numpy.concatenate([p[3] for p in parts])
+			else:
+				rows = channels = offsets = numpy.zeros(0, dtype=numpy.int64)
+				values = numpy.zeros(0, dtype=dtype)
+			del parts
+
+			if copies:
+				extra = [(numpy.full(int((channels == source).sum()), channel,
+					dtype=numpy.int64), source) for channel, source in copies]
+				rows = numpy.concatenate([rows] + [rows[channels == s] for _, s in
+					extra])
+				offsets = numpy.concatenate([offsets] + [offsets[channels == s] for
+					_, s in extra])
+				values = numpy.concatenate([values] + [values[channels == s] for
+					_, s in extra])
+				channels = numpy.concatenate([channels] + [c for c, _ in extra])
+
+			if n * n_channels <= 4 * len(rows) + 1024:
+				rows_, channels_, offsets_, values_, ok = _bucket_sort(rows,
+					channels, offsets, values, n_channels, n * n_channels)
+				if ok:
+					return SparseWindows(rows_, channels_, offsets_, values_.astype(
+						dtype, copy=False), (n, n_channels, width))
 		key = (rows * n_channels + channels) * width + offsets
 		order = numpy.argsort(key)
 		del key
@@ -4016,6 +4034,48 @@ class FigWigReader:
 		values = values[order].astype(dtype, copy=False)
 		return SparseWindows(rows, channels, offsets, values, (n, n_channels,
 			width))
+
+	def _bucket_gather(self, parts, n_buckets, n_channels, n_threads):
+		"""The parts' entries sorted by (row, channel) by a counting sort,
+		stable over the parts in order, as (rows, channels, offsets, values,
+		whether each bucket's offsets ascend). The parts are cut into runs
+		of about equal entries, a run per thread."""
+
+		sizes = numpy.array([len(p[0]) for p in parts], dtype=numpy.int64)
+		total = int(sizes.sum())
+		n_runs = max(1, min(n_threads, len(parts), total // _GATHER_PER_THREAD))
+		ends = numpy.cumsum(sizes)
+		cuts = numpy.unique(numpy.concatenate([[0], numpy.searchsorted(ends,
+			numpy.arange(1, n_runs) * total // n_runs, side='right'), [len(
+			parts)]]))
+		runs = [parts[a:b] for a, b in zip(cuts[:-1], cuts[1:])]
+		pool = self._pool_for(len(runs)) if len(runs) > 1 else None
+
+		counts = numpy.zeros((len(runs), n_buckets), dtype=numpy.int64)
+
+		def count(r):
+			for p in runs[r]:
+				_bucket_counts(p[0], p[1], n_channels, counts[r])
+
+		_each(pool, len(runs), count)
+		flat = counts.T.ravel()
+		starts = (numpy.cumsum(flat) - flat).reshape(n_buckets, len(runs)).T.copy()
+
+		out = [numpy.empty(total, dtype=numpy.int64) for _ in range(3)] + [
+			numpy.empty(total, dtype=numpy.result_type(*[p[3].dtype for p in
+			parts]))]
+
+		def scatter(r):
+			for p in runs[r]:
+				_bucket_scatter(p[0], p[1], p[2], p[3], n_channels, starts[r], *out)
+
+		_each(pool, len(runs), scatter)
+		bounds = numpy.arange(len(cuts), dtype=numpy.int64) * total // max(1,
+			len(cuts) - 1)
+		ok = []
+		_each(pool, len(cuts) - 1, lambda r: ok.append(_bucket_ascending(out[0],
+			out[1], out[2], bounds[r], bounds[r + 1])))
+		return out[0], out[1], out[2], out[3], all(ok)
 
 	def read_entries(self, tracks: str | int | list | None = None, chroms: str |
 		list[str] | None = None, n_jobs: int = 8) -> SparseEntries:
