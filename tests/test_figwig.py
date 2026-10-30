@@ -1229,6 +1229,7 @@ def test_sparse_read_sorts_on_threads(fw, read_batching, monkeypatch, ascending)
 	ones = [reader.read(chroms, starts, 150, tracks=tracks, sparse=True,
 		n_jobs=1) for tracks in picks]
 	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_GATHER_ROW_BYTES', 1 << 20)
 	if not ascending:
 		monkeypatch.setattr(figwig.figwig, '_bucket_ascending', lambda *a: False)
 	for tracks, one in zip(picks, ones):
@@ -1253,6 +1254,7 @@ def test_sparse_gather_sorts_offsets_that_do_not_ascend(fw, monkeypatch,
 				numpy.array(offsets), numpy.array(values, dtype=numpy.float32))
 
 	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_GATHER_ROW_BYTES', 1 << 20)
 	reader = FigWigReader(fw)
 	ascending = [([0, 0, 1], [0, 1, 0], [1, 4, 2], [1, 2, 3]), ([0, 1, 1], [0,
 		0, 1], [5, 3, 0], [4, 5, 6])]
@@ -1272,6 +1274,46 @@ def test_sparse_gather_sorts_offsets_that_do_not_ascend(fw, monkeypatch,
 				dtype=numpy.float32)[order])):
 			numpy.testing.assert_array_equal(a, b)
 		assert found.values.dtype == numpy.float32 and found.shape == (2, 2, 10)
+
+
+@pytest.mark.parametrize('n_windows', [2, 50, 1000])
+def test_sparse_gather_counts_are_bounded(fw, monkeypatch, n_windows):
+	"""The counting sort's runs, a row of buckets each, take no more than
+	one row and a byte per entry, however many threads there are, and sort
+	as one thread does."""
+
+	shapes = []
+	starts_of = figwig.figwig._bucket_starts
+
+	def spy(counts):
+		shapes.append(counts.shape)
+		return starts_of(counts)
+
+	class Task:
+		def __init__(self, rows, offsets):
+			self.entries = (rows, numpy.zeros(len(rows), dtype=numpy.int64),
+				offsets, numpy.ones(len(rows), dtype=numpy.float32))
+
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_bucket_starts', spy)
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(3)
+	rows = numpy.sort(rng.integers(0, n_windows, 4096))
+
+	def tasks():
+		return [Task(rows[a:a + 64], numpy.arange(a, a + 64)) for a in range(0,
+			4096, 64)]
+
+	n_buckets = n_windows * 4
+	one = reader._gather(tasks(), [], n_windows, 4, 100, numpy.dtype('float32'), 1)
+	found = reader._gather(tasks(), [], n_windows, 4, 100, numpy.dtype('float32'),
+		8)
+	runs, buckets = shapes[-1]
+	assert buckets == n_buckets and (runs - 1) * n_buckets * 8 <= 4096
+	assert runs == {2: 8, 50: 3, 1000: 1}[n_windows]
+	for a, b in zip((one.rows, one.channels, one.offsets, one.values), (
+			found.rows, found.channels, found.offsets, found.values)):
+		numpy.testing.assert_array_equal(a, b)
 
 
 def test_batch_cuts_are_the_planners_loop():

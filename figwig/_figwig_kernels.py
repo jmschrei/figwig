@@ -2588,6 +2588,21 @@ def _bucket_counts(rows, channels, n_channels, counts):
 
 
 @numba.njit(nogil=True, cache=True)
+def _bucket_starts(counts):
+	"""Each run's counts of entries per bucket, (runs, buckets), turned in
+	place into where its entries of each bucket start: bucket by bucket,
+	and run by run within a bucket. Returns `counts`."""
+
+	total = 0
+	for b in range(counts.shape[1]):
+		for r in range(counts.shape[0]):
+			c = counts[r, b]
+			counts[r, b] = total
+			total += c
+	return counts
+
+
+@numba.njit(nogil=True, cache=True)
 def _bucket_scatter(rows, channels, offsets, values, n_channels, starts,
 	out_rows, out_channels, out_offsets, out_values):
 	"""Moves a part's entries to the slots `starts` gives each (row,

@@ -82,6 +82,7 @@ from ._figwig_kernels import _batch_cuts
 from ._figwig_kernels import _bucket_ascending
 from ._figwig_kernels import _bucket_counts
 from ._figwig_kernels import _bucket_scatter
+from ._figwig_kernels import _bucket_starts
 from ._figwig_kernels import _bucket_sort
 from ._figwig_kernels import _inflate_chunks_libdeflate
 from ._figwig_kernels import _pread_runs
@@ -153,8 +154,10 @@ _RADIX_BITS = 16
 _RADIX_PARALLEL = 1 << 18
 
 # The entries of a sparse read from which its counting sort takes another
-# thread.
+# thread, and the bytes per entry its threads' rows of buckets past the
+# first may take.
 _GATHER_PER_THREAD = 1 << 18
+_GATHER_ROW_BYTES = 1
 
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
@@ -4191,7 +4194,10 @@ class FigWigReader:
 
 		sizes = numpy.array([len(p[0]) for p in parts], dtype=numpy.int64)
 		total = int(sizes.sum())
-		n_runs = max(1, min(n_threads, len(parts), total // _GATHER_PER_THREAD))
+		# Each run counts into its own row of buckets, so that a read of many
+		# windows and tracks with few entries sorts in about one row.
+		n_runs = max(1, min(n_threads, len(parts), total // _GATHER_PER_THREAD,
+			1 + _GATHER_ROW_BYTES * total // (8 * n_buckets)))
 		ends = numpy.cumsum(sizes)
 		cuts = numpy.unique(numpy.concatenate([[0], numpy.searchsorted(ends,
 			numpy.arange(1, n_runs) * total // n_runs, side='right'), [len(
@@ -4206,8 +4212,7 @@ class FigWigReader:
 				_bucket_counts(p[0], p[1], n_channels, counts[r])
 
 		_each(pool, len(runs), count)
-		flat = counts.T.ravel()
-		starts = (numpy.cumsum(flat) - flat).reshape(n_buckets, len(runs)).T.copy()
+		starts = _bucket_starts(counts)
 
 		out = [numpy.empty(total, dtype=numpy.int64) for _ in range(3)] + [
 			numpy.empty(total, dtype=numpy.result_type(*[p[3].dtype for p in
