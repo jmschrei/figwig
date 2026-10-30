@@ -2320,9 +2320,22 @@ class FigWigWriter:
 				task, size = [], 0
 
 	def _blocks_tasks(self, jobs):
-		"""`_blocks_task` of each track's blocks, in order."""
+		"""`_blocks_task` of each track's blocks, in order, joined for the
+		writing thread: one buffer of every track's blocks, and per track its
+		block records, with offsets from the buffer's start, its stats and
+		its summary."""
 
-		return [self._blocks_task(*job) for job in jobs]
+		results = [self._blocks_task(*job) for job in jobs]
+		parts, records, at = [], [], 0
+		for compressed, sizes, _, _, where, _, _, _ in results:
+			total = int(sizes.sum())
+			parts.append(compressed[:total])
+			where['offset'] = at + numpy.cumsum(sizes) - sizes
+			records.append(where)
+			at += total
+		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
+			dtype=numpy.uint8), records, [r[6] for r in results], [r[7] for r in
+			results])
 
 	def _blocks_task(self, t, tid, positions, values, first):
 		"""Encode and compress one track's blocks. Returns (compressed bytes,
@@ -2383,8 +2396,7 @@ class FigWigWriter:
 			if kind == 'pieces':
 				self._write_pieces(result, g)
 			elif kind == 'packed blocks':
-				for one, g_one in zip(result, g):
-					self._write_result(one, g_one, 'blocks')
+				self._write_packed_blocks(result, g)
 			else:
 				self._write_result(result, g, kind)
 
@@ -2421,6 +2433,29 @@ class FigWigWriter:
 			else:
 				runs.append([first, last, offset, total])
 			offset += total
+
+	def _write_packed_blocks(self, result, tracks):
+		"""Write a packed task's tracks' blocks, as `_write_result` writes
+		each track's: their bytes in one write, then each track's stats,
+		summary and block records, in order."""
+
+		compressed, records, stats, summaries = result
+		offset = self._file.tell()
+		self._file.write(compressed)
+		for t, where, batch, summary in zip(tracks, records, stats, summaries):
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[t],
+				dtype=numpy.int64), numpy.ascontiguousarray(batch,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[t].append(summary)
+			if len(where) == 0:
+				continue
+			where['offset'] += offset
+			self._blocks[t].append(where)
 
 	def _write_result(self, result, g, kind):
 		"""Write one batch's chunks or blocks to the file, record them in the

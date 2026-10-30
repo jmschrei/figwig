@@ -1763,6 +1763,42 @@ def test_write_sparse_packs_group_batches_into_tasks(tmp_path, monkeypatch):
 				0], values)
 
 
+def test_track_order_packs_block_flushes_into_tasks(tmp_path, monkeypatch):
+	"""Tracks' blocks in track order written inline, packed several to a
+	pool task or one to a task give the same file, byte for byte, with
+	blocks cut where a track's entries pass a block and where its
+	chromosome changes."""
+
+	monkeypatch.setattr(figwig.figwig, '_BLOCK_ENTRIES', 40)
+	rng = numpy.random.default_rng(10)
+	tracks = ['c{}'.format(i) for i in range(25)]
+	calls = []
+	for chrom in ('chr1', 'chr2', 'chrM'):
+		key = numpy.unique(rng.integers(0, 25 * CHROM_SIZES[chrom], 1500))
+		positions, which = key % CHROM_SIZES[chrom], key // CHROM_SIZES[chrom]
+		order = numpy.argsort(positions, kind='stable')
+		cut = len(order) // 2
+		for part in (order[:cut], order[cut:]):
+			calls.append((chrom, positions[part], which[part], rng.integers(1, 9,
+				len(part)).astype(numpy.int32)))
+
+	def write(name, n_jobs, per_thread):
+		monkeypatch.setattr(figwig.figwig, '_BATCHES_PER_THREAD', per_thread)
+		path = str(tmp_path / name)
+		with FigWigWriter(path, CHROM_SIZES, tracks, order='tracks', level=6,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, which, values in calls:
+				writer.write_sparse(chrom, positions, which, values)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	inline = write('inline.fw', 1, 8)
+	assert write('packed.fw', 3, 1) == inline
+	assert write('single.fw', 3, 1 << 40) == inline
+	entries = FigWigReader(str(tmp_path / 'packed.fw')).read_entries()
+	assert len(entries.values) == sum(len(call[1]) for call in calls)
+
+
 def test_write_sparse_arguments(tmp_path):
 	path = str(tmp_path / 's.fw')
 	writer = FigWigWriter(path, {'chr1': 1000, 'chr2': 500}, ['a', 'b', {'name':
