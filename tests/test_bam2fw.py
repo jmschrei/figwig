@@ -1201,7 +1201,7 @@ def test_indexed_coverage_keeps_to_its_cores(tmp_path, indexed_bams, sizes,
 	assert not any(main for _, main in calls)
 
 
-@pytest.mark.parametrize("spacing", [1, 1 << 30])
+@pytest.mark.parametrize("spacing", [1, 8, 16, 1 << 30])
 @pytest.mark.parametrize("flags", [("-u",), ("-ps", "-7", "-ns", "9", "-sf",
 	"2")])
 def test_indexed_depth_goes_to_the_writer_as_runs_or_windows(tmp_path,

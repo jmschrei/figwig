@@ -836,17 +836,30 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 					for name in names]
 				track_of = dict(zip(['+', '-'], group))
 
+				# A strand's sparse regions in a row go to the writer in one call,
+				# before its next window or chromosome.
+				held = {}
+
+				def flush(key):
+					parts = held.pop(key, None)
+					if parts:
+						starts, ends, values = (numpy.concatenate([part[i] for part in
+							parts[1]]) for i in range(3))
+						values = values.astype(numpy.float64)
+						values *= args.scale_factor
+						writer.write(parts[0], starts, values[:, None], ends=ends,
+							tracks=[track_of[key]])
+
 				def emit_depth(chrom, key, beg, depth):
+					if key in held and held[key][0] != chrom:
+						flush(key)
 					if isinstance(depth, tuple):
-						starts, ends, values = depth
-						if len(starts):
-							values = values.astype(numpy.float64)
-							values *= args.scale_factor
-							writer.write(chrom, starts, values[:, None], ends=ends, tracks=[
-								track_of[key]])
+						if len(depth[0]):
+							held.setdefault(key, (chrom, []))[1].append(depth)
 						return
 					if not depth.any():
 						return
+					flush(key)
 					values = depth
 					if args.scale_factor != 1:
 						# Only the covered bases, as the runs are scaled.
@@ -862,6 +875,8 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 				dense = writing > 1
 				_, lost, _ = _indexed_coverage([f], chrom_sizes, args, readers,
 					emit_depth if dense else emit_runs, dense=dense)
+				for key in list(held):
+					flush(key)
 				for chrom in lost:
 					discarded[chrom] += lost[chrom]
 	except _Fallback:
