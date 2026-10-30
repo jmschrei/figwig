@@ -12,6 +12,8 @@ import os
 import sys
 import subprocess
 
+from pathlib import Path
+
 import numpy
 import pytest
 
@@ -1018,6 +1020,605 @@ def test_coverage_runs_from_events():
 	empty = numpy.empty(0, dtype=numpy.int64)
 	assert _coverage_runs(empty, empty, 100)[3] == 0
 	assert len(_coverage_runs(empty, empty, 100)[0]) == 0
+
+
+def fixed_regions(width):
+	"""A stand-in for figwig._indexed._regions: regions of `width` bases,
+	finer than the 16 kb windows the real one cuts on."""
+
+	def regions(files, chrom, size, longest=None):
+		bounds = list(range(0, max(size, 1), width)) + [max(size, 1)]
+		return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
+	return regions
+
+
+@pytest.fixture(autouse=True)
+def indexed_at_any_size(monkeypatch):
+	"""The test files are far smaller than the inputs -c reads through the
+	indexed reader, which takes every size here, as it takes a large file."""
+
+	import figwig._indexed
+
+	monkeypatch.setattr(figwig._indexed, "_MIN_CORES", 1)
+	monkeypatch.setattr(figwig._indexed, "_MIN_MAPPED", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_BYTES", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_FILE_MAPPED", 0)
+
+
+def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
+		monkeypatch, capsys):
+	"""-c reads through the indexed reader on `_MIN_CORES` cores or more:
+	bam2bw from `_MIN_BYTES` and `_MIN_MAPPED` mapped reads in its files'
+	indexes, both summed, and bam2fw when each of its files has `_MIN_BYTES`
+	and `_MIN_FILE_MAPPED` mapped reads; otherwise the whole-file reader
+	gives the output."""
+
+	import pysam
+	import figwig._indexed
+
+	_, indexed = indexed_bams
+	small = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, [("chr1", 10 *
+		i, 30, bool(i % 2)) for i in range(40)])
+	mapped, few = (sum(s.mapped for s in pysam.AlignmentFile(path)
+		.get_index_statistics()) for path in (indexed, small))
+	calls = []
+	original = figwig._indexed._indexed_coverage
+
+	def counted(*args, **kwargs):
+		calls.append(1)
+		return original(*args, **kwargs)
+
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", counted)
+
+	def took(command, files, cores=1, **minimums):
+		for name, value in minimums.items():
+			monkeypatch.setattr(figwig._indexed, name, value)
+		calls.clear()
+		if command == "bam2bw":
+			figwig.bam2bw.main(files + ["-s", sizes, "-n", str(tmp_path / "out"),
+				"-c", "-p", str(cores)])
+		else:
+			bam2fw(tmp_path, files, sizes, "-c", "--force", "-p", str(cores))
+		capsys.readouterr()
+		return len(calls) > 0
+
+	assert took("bam2bw", [indexed], _MIN_MAPPED=mapped)
+	assert not took("bam2bw", [indexed], _MIN_MAPPED=mapped + 1)
+	assert took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped)
+	assert not took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped + 1)
+	size = os.path.getsize(indexed)
+	assert took("bam2bw", [indexed, indexed], _MIN_MAPPED=0, _MIN_BYTES=2 * size)
+	assert not took("bam2bw", [indexed, indexed], _MIN_BYTES=2 * size + 1)
+	monkeypatch.setattr(figwig._indexed, "_MIN_BYTES", 0)
+
+	size, least = os.path.getsize(indexed), os.path.getsize(small)
+	assert took("bam2fw", [indexed], _MIN_BYTES=size)
+	assert not took("bam2fw", [indexed], _MIN_BYTES=size + 1)
+	assert took("bam2fw", [indexed, small], _MIN_BYTES=least)
+	assert not took("bam2fw", [indexed, small], _MIN_BYTES=least + 1)
+	assert took("bam2fw", [indexed, small], _MIN_BYTES=0, _MIN_FILE_MAPPED=few)
+	assert not took("bam2fw", [indexed, small], _MIN_FILE_MAPPED=few + 1)
+
+	monkeypatch.setattr(figwig._indexed, "_MIN_FILE_MAPPED", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_MAPPED", 0)
+	for command in ("bam2bw", "bam2fw"):
+		assert not took(command, [indexed], cores=1, _MIN_CORES=2)
+		assert took(command, [indexed], cores=2)
+
+
+@pytest.fixture(scope="session")
+def indexed_bams(data_dir):
+	"""Random reads of every CIGAR shape and flag, several reaching past a
+	chromosome's end or on a chromosome the sizes leave out, as written (no
+	index, unsorted) and as a coordinate-sorted, indexed copy."""
+
+	import pysam
+
+	rng = numpy.random.default_rng(23)
+	reads = []
+	for i in range(400):
+		chrom, size = BAM_CHROM_SIZES[rng.integers(0, len(BAM_CHROM_SIZES))]
+		start = int(rng.integers(0, size))
+		a, b = int(rng.integers(1, 40)), int(rng.integers(1, 40))
+		shape = rng.integers(0, 4)
+		cigar = [[(0, a)], [(0, a), (3, int(rng.integers(1, 300))), (0, b)],
+			[(0, a), (2, int(rng.integers(1, 20))), (0, b)], [(4, 3), (0, a), (1, 2),
+			(0, b), (4, 5)]][shape]
+		flag = int(rng.choice([0, 0, 0, 1024, 256, 2048, 512]))
+		reads.append((chrom, start, a, bool(rng.integers(0, 2)), cigar, flag, int(
+			rng.integers(0, 61))))
+	unmapped = [("chr1", 500, 30), ("chr2", 10, 20)]
+	written = write_bam(data_dir / "random.bam", BAM_CHROM_SIZES, reads,
+		unmapped=unmapped)
+	indexed = str(data_dir / "random_sorted.bam")
+	pysam.sort("-o", indexed, str(written))
+	pysam.index(indexed)
+	return str(written), indexed
+
+
+def assert_same_figwig_values(a, b):
+	ra, rb = FigWigReader(a), FigWigReader(b)
+	assert len(ra.tracks) == len(rb.tracks)
+	for chrom, length in CHROM_SIZES:
+		numpy.testing.assert_array_equal(ra.read(chrom, [0], length), rb.read(chrom,
+			[0], length))
+
+
+@pytest.mark.parametrize("flags", [(), ("-u",), ("-ps", "3", "-ns", "-2"), ("-ps",
+	"-7", "-ns", "9", "-u"), ("-r",), ("-sf", "0.5", "-p", "4"), ("-u", "-r",
+	"-p", "3"), ("-u", "-p", "8"), ("-ps", "-7", "-ns", "9", "-sf", "2", "-p",
+	"12")])
+def test_indexed_coverage_is_the_whole_file_coverage(tmp_path, indexed_bams,
+		sizes, flags, monkeypatch, capsys):
+	"""-c of a sorted, indexed BAM is read region by region (here regions of
+	64 bases, which most reads cross) and gives the bigWigs and figwig file
+	the whole-file reader gives the same reads unsorted, and the same lines."""
+
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	calls = []
+	original = figwig._indexed._indexed_coverage
+
+	def counted(*args, **kwargs):
+		calls.append(1)
+		return original(*args, **kwargs)
+
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", counted)
+	flags = ("-c",) + flags
+	capsys.readouterr()
+	whole = bam2bw(tmp_path / "whole", unsorted, sizes, *flags)
+	whole_lines = capsys.readouterr().out
+	assert calls == []
+	by_region = bam2bw(tmp_path / "indexed", indexed, sizes, *flags)
+	assert calls and capsys.readouterr().out == whole_lines
+	assert "entries fell outside" in whole_lines
+	for a, b in zip(whole, by_region):
+		with open(a, "rb") as fa, open(b, "rb") as fb:
+			assert fa.read() == fb.read()
+
+	calls.clear()
+	whole = bam2fw(tmp_path / "fw_whole", [unsorted], sizes, *flags)
+	whole_lines = capsys.readouterr().out
+	assert calls == []
+	by_region = bam2fw(tmp_path / "fw_indexed", [indexed], sizes, *flags)
+	assert calls and capsys.readouterr().out == whole_lines
+	assert_same_figwig_values(whole, by_region)
+
+
+@pytest.mark.parametrize("flags", [("-u",), ("-ps", "-40", "-ns", "300"), ("-u",
+	"-ps", "-30000", "-ns", "40000")])
+def test_indexed_coverage_over_index_windows(tmp_path, monkeypatch, flags):
+	"""On chromosomes of many 16 kb index windows and many BGZF blocks, with
+	regions of at most 32 kb cut sooner every 2 kB of the BAM and reads
+	whose splices span tens of kb, each region reads from the index's offset
+	for its first base to the first read of a 16 kb bin past its end, and
+	gives what the whole file does."""
+
+	import pysam
+	import figwig._indexed
+
+	monkeypatch.setattr(figwig._indexed, "_REGION", 1 << 15)
+	monkeypatch.setattr(figwig._indexed, "_REGION_BYTES", 1 << 11)
+	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", 32768)
+	chrom_sizes = [("big", 200000), ("small", 30000)]
+	rng = numpy.random.default_rng(29)
+	reads = []
+	for _ in range(40000):
+		chrom, size = chrom_sizes[int(rng.integers(0, 2))]
+		start = int(rng.integers(0, size - 100))
+		a, b = int(rng.integers(5, 60)), int(rng.integers(5, 60))
+		splice = int(rng.integers(1, 60000)) if rng.random() < 0.05 else 0
+		cigar = [(0, a), (3, splice), (0, b)] if splice else [(0, a + b)]
+		reads.append((chrom, start, a + b, bool(rng.integers(0, 2)), cigar))
+	written = write_bam(tmp_path / "long.bam", chrom_sizes, reads, seed=31)
+	os.makedirs(tmp_path / "sorted")
+	indexed = str(tmp_path / "sorted" / "long.bam")
+	pysam.sort("-o", indexed, str(written))
+	pysam.index(indexed)
+	sizes_path = str(write_chrom_sizes(tmp_path / "long.sizes", chrom_sizes))
+
+	whole = bam2bw(tmp_path / "whole", str(written), sizes_path, "-c", *flags)
+	by_region = bam2bw(tmp_path / "indexed", indexed, sizes_path, "-c", *flags)
+	for a, b in zip(whole, by_region):
+		with open(a, "rb") as fa, open(b, "rb") as fb:
+			assert fa.read() == fb.read()
+
+	# Pieces of 32 kb, which runs of the shifted reads cross, are written
+	# as the whole-file path writes them: the same bytes for one track.
+	whole = bam2fw(tmp_path / "fw_whole", [str(written)], sizes_path, "-c", *flags)
+	by_region = bam2fw(tmp_path / "fw_indexed", [indexed], sizes_path, "-c",
+		*flags)
+	ra, rb = FigWigReader(whole), FigWigReader(by_region)
+	for chrom, length in chrom_sizes:
+		numpy.testing.assert_array_equal(ra.read(chrom, [0], length), rb.read(chrom,
+			[0], length))
+	if "-u" in flags:
+		with open(whole, "rb") as fa, open(by_region, "rb") as fb:
+			assert fa.read() == fb.read()
+
+
+def test_indexed_coverage_keeps_to_its_cores(tmp_path, indexed_bams, sizes,
+		monkeypatch):
+	"""On one core every region is read on the main thread, between writes,
+	and bam2fw writes runs; on two, regions are read on another thread; on
+	eight, bam2fw writes each region's depth."""
+
+	import threading
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	calls = []
+	for name in ("_region_runs", "_region_dense"):
+		original = getattr(figwig._indexed, name)
+
+		def recorded(*args, _name=name, _original=original):
+			calls.append((_name, threading.current_thread() is
+				threading.main_thread()))
+			return _original(*args)
+
+		monkeypatch.setattr(figwig._indexed, name, recorded)
+
+	bam2bw(tmp_path / "bw1", indexed, sizes, "-c")
+	bam2fw(tmp_path / "fw1", [indexed], sizes, "-c")
+	assert calls and set(calls) == {("_region_runs", True)}
+	calls.clear()
+	bam2bw(tmp_path / "bw2", indexed, sizes, "-c", "-p", "2")
+	bam2fw(tmp_path / "fw2", [indexed], sizes, "-c", "-p", "2")
+	assert calls and set(calls) == {("_region_runs", False)}
+	calls.clear()
+	bam2bw(tmp_path / "bw8", indexed, sizes, "-c", "-p", "8")
+	bam2fw(tmp_path / "fw8", [indexed], sizes, "-c", "-p", "8")
+	assert {name for name, _ in calls} == {"_region_runs", "_region_dense"}
+	assert not any(main for _, main in calls)
+
+
+@pytest.mark.parametrize("spacing", [1, 8, 16, 1 << 30])
+@pytest.mark.parametrize("flags", [("-u",), ("-ps", "-7", "-ns", "9", "-sf",
+	"2")])
+def test_indexed_depth_goes_to_the_writer_as_runs_or_windows(tmp_path,
+		indexed_bams, sizes, monkeypatch, spacing, flags):
+	"""On threads, a region's depth goes to the writer as one window or, when
+	it changes value less often than once per `_RUN_SPACING` bases, as runs;
+	either gives the whole file's values, and for one track, with regions of
+	whole tiles as the index's 16 kb windows are of the default tile, the
+	same chunks."""
+
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	monkeypatch.setattr(figwig._indexed, "_RUN_SPACING", spacing)
+	flags = ("-c", "-t", "16") + flags
+	whole = bam2fw(tmp_path / "whole", [unsorted], sizes, *flags)
+	got = bam2fw(tmp_path / "got", [indexed], sizes, "-p", "8", *flags)
+	assert_same_figwig_values(whole, got)
+	if "-u" in flags:
+		assert chunks_of(whole, 0) == chunks_of(got, 0)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_sparse_regions_are_the_runs_of_their_depth(seed):
+	"""The runs of a strand's depth over a region, found without its window,
+	are the window's runs of one nonzero value, and count its changes of
+	value: reads that touch, overlap, start before the chromosome or end
+	past it, with the start events and the coverage lost of the first and
+	last regions."""
+
+	from figwig._indexed import _changes, _dense_kernel, _sparse_kernel
+
+	rng = numpy.random.default_rng(seed)
+	size = 1000
+	starts = rng.integers(-50, size + 20, 60)
+	ends = starts + rng.integers(1, 80, 60)
+	starts[:10] = ends[10:20]
+	bias = 1 << 33
+	keys = numpy.sort(numpy.concatenate([bias + 2 * starts, bias + 2 * ends +
+		1])).astype(numpy.int64)
+	for beg, end in [(0, 300), (250, 700), (650, size), (0, size), (400, 400),
+			(990, size)]:
+		for first in (beg == 0, False):
+			for last in (end == size, False):
+				count_lo, count_hi = 0 if first else beg, size if last else end
+				out = numpy.empty(end - beg, dtype=numpy.int32)
+				counted, lost = _dense_kernel()(keys, 0, len(keys), beg, size, first,
+					last, count_lo, count_hi, out)
+				runs = [numpy.empty(len(keys), dtype=dtype) for dtype in ("int64",
+					"int64", "int32")]
+				n, c, gone = _sparse_kernel()(keys, 0, len(keys), beg, end, size,
+					first, last, count_lo, count_hi, *runs)
+				assert (c, gone) == (counted, lost)
+				if end == beg:
+					assert n == 0
+					continue
+
+				edges = numpy.flatnonzero(out[1:] != out[:-1]) + 1
+				lefts = numpy.concatenate([[0], edges])
+				rights = numpy.concatenate([edges, [len(out)]])
+				kept = out[lefts] != 0
+				assert runs[0][:n].tolist() == (beg + lefts[kept]).tolist()
+				assert runs[1][:n].tolist() == (beg + rights[kept]).tolist()
+				assert runs[2][:n].tolist() == out[lefts[kept]].tolist()
+				assert _changes(runs[0][:n], runs[1][:n], beg, end) == len(edges) + 1
+				assert n > 0
+
+
+def test_mapped_reads_from_the_pseudo_bins(tmp_path, indexed_bams):
+	"""The mapped reads read from the pseudo-bins alone are pysam's; a BAM
+	without a .bai, with one older than it, or with one cut short inside
+	its references has 0 (the full parse then refuses a .bai cut later)."""
+
+	import shutil
+	import pysam
+	from figwig._indexed import _mapped_reads
+
+	unsorted, indexed = indexed_bams
+	small = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, [("chr1", 10 *
+		i, 30, bool(i % 2)) for i in range(40)])
+	for path in (indexed, small):
+		assert _mapped_reads(path) == sum(s.mapped for s in pysam.AlignmentFile(
+			path).get_index_statistics()) > 0
+	assert _mapped_reads(unsorted) == 0
+
+	copy = str(tmp_path / "copy.bam")
+	shutil.copy(indexed, copy)
+	index = Path(indexed + ".bai").read_bytes()
+	for cut in (len(index) - 9, len(index) // 2, 12):
+		with open(copy + ".bai", "wb") as handle:
+			handle.write(index[:cut])
+		assert _mapped_reads(copy) == 0
+	with open(copy + ".bai", "wb") as handle:
+		handle.write(index)
+	assert _mapped_reads(copy) == _mapped_reads(indexed)
+	os.utime(copy + ".bai", (1, 1))
+	assert _mapped_reads(copy) == 0
+
+
+def test_bam2bw_reads_on_every_core(tmp_path, indexed_bams, sizes, monkeypatch):
+	"""bam2bw -c reads regions on all its cores, its bigWig writer taking
+	little of the time; bam2fw -c leaves the figwig writer its share."""
+
+	import figwig._indexed
+
+	_, indexed = indexed_bams
+	threads = []
+	original = figwig._indexed._indexed_coverage
+
+	def recorded(files, chrom_sizes, args, n, *rest, **kwargs):
+		threads.append(n)
+		return original(files, chrom_sizes, args, n, *rest, **kwargs)
+
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", recorded)
+	bam2bw(tmp_path / "bw", indexed, sizes, "-c", "-p", "8")
+	bam2fw(tmp_path / "fw", [indexed], sizes, "-c", "-p", "8")
+	assert threads == [8, figwig._indexed._shares(8)[0]] == [8, 6]
+
+
+def test_reading_and_writing_share_the_cores():
+	"""While regions are read the writer takes a quarter of the cores, at
+	least one, and the regions the rest; one core does both in turn on the
+	main thread."""
+
+	from figwig._indexed import _shares
+
+	assert _shares(1) == (0, 1)
+	for cores in range(2, 70):
+		readers, writer = _shares(cores)
+		assert readers + writer == cores and readers >= 1
+		assert writer == max(1, cores // 4)
+
+
+def test_regions_follow_the_bam_bytes(tmp_path, monkeypatch):
+	"""Regions cover each chromosome from 0 to its end on 16 kb windows,
+	at most _REGION long, and are cut finer where the reads are dense; a
+	chromosome without reads, or not in the BAM, is one region."""
+
+	import pysam
+	import figwig._indexed
+
+	monkeypatch.setattr(figwig._indexed, "_REGION", 1 << 16)
+	monkeypatch.setattr(figwig._indexed, "_REGION_BYTES", 1 << 13)
+	chrom_sizes = [("dense", 300000), ("empty", 200000)]
+	reads = [("dense", int(p), 50, False) for p in numpy.linspace(0, 299900,
+		600).astype(int)]
+	reads += [("dense", int(p), 50, False) for p in numpy.linspace(20000, 40000,
+		6000).astype(int)]
+	written = write_bam(tmp_path / "r.bam", chrom_sizes, reads)
+	indexed = str(tmp_path / "r_sorted.bam")
+	pysam.sort("-o", indexed, str(written))
+	pysam.index(indexed)
+	sizes_path = str(write_chrom_sizes(tmp_path / "r.sizes", chrom_sizes))
+	args = figwig.bam2bw._parser("t").parse_args([indexed, "-s", sizes_path, "-n",
+		"x", "-c"])
+	files = figwig._indexed._open_files([indexed], chrom_sizes, args)
+	dense = figwig._indexed._regions(files, "dense", 300000)
+	assert dense[0][0] == 0 and dense[-1][1] == 300000
+	assert all(b == c for (_, b), (c, _) in zip(dense, dense[1:]))
+	assert all(a % (1 << 14) == 0 and b - a <= 1 << 16 for a, b in dense)
+	within = [b - a for a, b in dense if 16384 <= a < 40000]
+	assert within and max(within) < 1 << 16
+	assert figwig._indexed._regions(files, "empty", 200000) == [(0, 200000)]
+	assert figwig._indexed._regions(files, "absent", 200000) == [(0, 200000)]
+
+
+def sorted_indexed(path, chrom_sizes, reads, **kwargs):
+	"""`write_bam`'s file, coordinate-sorted and indexed beside it; the file
+	as written is unsorted/<its name>, under the same name so that bam2fw
+	names its tracks alike."""
+
+	import pysam
+
+	os.makedirs(path.parent / "unsorted", exist_ok=True)
+	written = write_bam(path.parent / "unsorted" / path.name, chrom_sizes, reads,
+		**kwargs)
+	pysam.sort("-o", str(path), str(written))
+	pysam.index(str(path))
+	return str(path)
+
+
+def test_indexed_coverage_keeps_earlier_output_when_it_fails(tmp_path, sizes):
+	"""bam2bw -c writes its bigWigs beside their paths and moves them there
+	only once done, so a read the indexed path hands back that the
+	whole-file reader then refuses leaves an earlier output as it was."""
+
+	reads = [("chr1", 10 * i, 30, bool(i % 2)) for i in range(40)]
+	good = sorted_indexed(tmp_path / "good.bam", BAM_CHROM_SIZES, reads)
+	bad = sorted_indexed(tmp_path / "bad.bam", BAM_CHROM_SIZES, reads + [("chr1",
+		500, 30, False, [])])
+	name = str(tmp_path / "out")
+	figwig.bam2bw.main([good, "-s", sizes, "-n", name, "-c"])
+	before = [Path(name + suffix).read_bytes() for suffix in (".+.bw", ".-.bw")]
+	with pytest.raises(Exception):
+		figwig.bam2bw.main([bad, "-s", sizes, "-n", name, "-c"])
+	assert [Path(name + suffix).read_bytes() for suffix in (".+.bw", ".-.bw")] == \
+		before
+	assert sorted(os.listdir(tmp_path)) == sorted(["good.bam", "good.bam.bai",
+		"bad.bam", "bad.bam.bai", "unsorted", "out.+.bw", "out.-.bw"])
+
+
+@pytest.mark.parametrize("command", ["bam2bw", "bam2fw"])
+@pytest.mark.parametrize("flags", [(), ("-r",)])
+def test_indexed_coverage_reports_once_when_it_falls_back(tmp_path, sizes,
+		command, flags, capsys):
+	"""With -v, a read the record kernel hands to pysam sends the whole file
+	back to the old reader, which prints the chromosomes missing from the
+	sizes; the indexed path has printed nothing before then."""
+
+	reads = [("chr1", 10 * i, 30, False) for i in range(40)]
+	reads += [("chrUN", 5, 30, False), ("chr2", 50, 30, False, [(4, 30), (3,
+		10)])]
+	path = sorted_indexed(tmp_path / "r.bam", BAM_CHROM_SIZES, reads)
+	unsorted = str(tmp_path / "unsorted" / "r.bam")
+	capsys.readouterr()
+	run = bam2bw if command == "bam2bw" else (lambda t, f, s, *a: bam2fw(t, [f],
+		s, *a))
+	run(tmp_path / "whole", unsorted, sizes, "-c", "-v", *flags)
+	whole = capsys.readouterr().out
+	run(tmp_path / "indexed", path, sizes, "-c", "-v", *flags)
+	indexed = capsys.readouterr().out
+	assert whole.count("chrUN encountered") == 1
+	assert indexed == whole
+
+
+def test_indexed_coverage_takes_indexes_of_empty_references(tmp_path, sizes):
+	"""A reference without reads has no pseudo-bin in a .bai, and counts as
+	none mapped, so -v keeps the indexed path."""
+
+	import figwig._indexed
+	reads = [("chr1", 10 * i, 30, False) for i in range(40)]
+	path = sorted_indexed(tmp_path / "r.bam", BAM_CHROM_SIZES + [("chrEmpty",
+		1000)], reads)
+	args = figwig.bam2bw._parser("t").parse_args([path, "-s", sizes, "-n", "x",
+		"-c", "-v"])
+	files = figwig._indexed._open_files([path], CHROM_SIZES, args)
+	assert files is not None
+	assert [mapped for _, _, mapped, _, _ in files[0].index][-1] == 0
+
+
+def test_indexed_coverage_refuses_another_bams_index(tmp_path, sizes):
+	"""An index made for another BAM of the same header, newer than this
+	one, points past its end, and the coverage is the whole file's."""
+
+	import figwig._indexed
+	import shutil
+	import time
+
+	rng = numpy.random.default_rng(5)
+	big = [("chr1", int(p), 30, bool(p % 2)) for p in rng.integers(0, 960,
+		20000)]
+	small = [("chr2", int(p), 30, bool(p % 2)) for p in rng.integers(0, 460,
+		300)]
+	other = sorted_indexed(tmp_path / "big.bam", BAM_CHROM_SIZES, big, seed=3)
+	path = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, small)
+	time.sleep(0.01)
+	shutil.copy(other + ".bai", path + ".bai")
+	os.utime(path + ".bai", (os.path.getmtime(path) + 1,) * 2)
+	args = figwig.bam2bw._parser("t").parse_args([path, "-s", sizes, "-n", "x",
+		"-c"])
+	assert figwig._indexed._open_files([path], CHROM_SIZES, args) is None
+	whole = bam2bw(tmp_path / "whole", str(tmp_path / "unsorted" / "small.bam"),
+		sizes, "-c", "-u")
+	got = bam2bw(tmp_path / "got", path, sizes, "-c", "-u")
+	assert Path(whole[0]).read_bytes() == Path(got[0]).read_bytes()
+
+
+def test_indexed_coverage_scales_only_covered_bases(tmp_path, indexed_bams,
+		sizes):
+	"""bam2fw -c on threads scales each region's depth where it is nonzero,
+	as the runs are scaled, so -sf nan leaves the uncovered bases 0."""
+
+	unsorted, indexed = indexed_bams
+	whole = bam2fw(tmp_path / "whole", [unsorted], sizes, "-c", "-u", "-sf",
+		"nan")
+	got = bam2fw(tmp_path / "got", [indexed], sizes, "-c", "-u", "-sf", "nan",
+		"-p", "8")
+	assert_same_figwig_values(whole, got)
+
+
+def test_indexed_coverage_falls_back(tmp_path, indexed_bams, sizes, monkeypatch):
+	"""A BAM whose index is older than it, and one the record kernel hands
+	to pysam part of the way through, are read as before, with the same
+	result; an index cut short is refused."""
+
+	import shutil
+	import figwig._indexed
+
+	unsorted, indexed = indexed_bams
+	monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	whole = bam2bw(tmp_path / "whole", unsorted, sizes, "-c")
+
+	stale = str(tmp_path / "stale.bam")
+	shutil.copy(indexed + ".bai", stale + ".bai")
+	shutil.copy(indexed, stale)
+	os.utime(stale + ".bai", (1, 1))
+	assert figwig._indexed._index_path(stale) is None
+
+	# An index cut short is not taken; pysam crashes opening some of them,
+	# so the parser is called alone. The last 8 bytes are optional.
+	with open(indexed + ".bai", "rb") as handle:
+		index = handle.read()
+	cut = str(tmp_path / "cut.bai")
+	for n in range(0, len(index) - 8):
+		with open(cut, "wb") as handle:
+			handle.write(index[:n])
+		assert figwig._indexed._read_index(cut, len(BAM_CHROM_SIZES)) is None
+	assert figwig._indexed._read_index(indexed + ".bai", len(BAM_CHROM_SIZES)
+		) is not None
+	# A negative count of chunks in the first reference's first bin.
+	with open(cut, "wb") as handle:
+		handle.write(index[:16] + (-1).to_bytes(4, "little", signed=True) +
+			index[20:])
+	assert figwig._indexed._read_index(cut, len(BAM_CHROM_SIZES)) is None
+	# A chunk that begins past 2**63, which int64 offsets cannot hold.
+	with open(cut, "wb") as handle:
+		handle.write(index[:20] + (1 << 63).to_bytes(8, "little") + index[28:])
+	assert figwig._indexed._read_index(cut, len(BAM_CHROM_SIZES)) is None
+
+	original = figwig._indexed._region_keys
+	seen = []
+
+	def fails_later(*args):
+		seen.append(1)
+		if len(seen) == 5:
+			raise figwig._indexed._Fallback()
+		return original(*args)
+
+	monkeypatch.setattr(figwig._indexed, "_region_keys", fails_later)
+	for path in (stale, indexed):
+		got = bam2bw(tmp_path / ("out_" + os.path.basename(path)), path, sizes,
+			"-c")
+		for a, b in zip(whole, got):
+			for chrom, length in CHROM_SIZES:
+				numpy.testing.assert_array_equal(bigwig_values(a, chrom, length),
+					bigwig_values(b, chrom, length))
+	assert len(seen) >= 5
+	fw_whole = bam2fw(tmp_path / "fw_whole", [unsorted], sizes, "-c")
+	seen.clear()
+	assert_same_figwig_values(fw_whole, bam2fw(tmp_path / "fw_fallback",
+		[indexed], sizes, "-c"))
+	assert len(seen) >= 5
 
 
 def test_coverage_of_bgzf_and_gzip_beds_and_of_several_files(tmp_path,

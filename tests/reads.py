@@ -3,6 +3,7 @@
 
 import gzip
 
+import numpy
 import pysam
 
 
@@ -78,7 +79,7 @@ def write_fasta(path, chrom_sizes, line_width=60):
 	return path
 
 
-def write_bam(path, chrom_sizes, reads, unmapped=()):
+def write_bam(path, chrom_sizes, reads, unmapped=(), seed=None):
 	"""Write a BAM file containing the given reads.
 
 	Each read is placed with an exact-match CIGAR so that its reference span
@@ -117,6 +118,12 @@ def write_bam(path, chrom_sizes, reads, unmapped=()):
 		unmapped filter ever saw it, which would make the two filters
 		impossible to tell apart. Default is an empty list.
 
+	seed: int or None, optional
+		When given, each mapped read's bases and qualities are drawn at
+		random from this seed, so the records barely compress and a BGZF
+		block holds few of them. Default is None, every base an A of
+		quality I.
+
 	Returns
 	-------
 	path: str or pathlib.Path
@@ -129,6 +136,7 @@ def write_bam(path, chrom_sizes, reads, unmapped=()):
 	}
 
 	tids = {chrom: i for i, (chrom, _) in enumerate(chrom_sizes)}
+	rng = None if seed is None else numpy.random.default_rng(seed)
 
 	with pysam.AlignmentFile(str(path), "wb", header=header) as outfile:
 		for i, record in enumerate(reads):
@@ -144,9 +152,15 @@ def write_bam(path, chrom_sizes, reads, unmapped=()):
 
 			alignment = pysam.AlignedSegment(outfile.header)
 			alignment.query_name = "read{}".format(i)
-			alignment.query_sequence = "A" * query_length
-			alignment.query_qualities = pysam.qualitystring_to_array(
-				"I" * query_length)
+			if rng is None:
+				alignment.query_sequence = "A" * query_length
+				alignment.query_qualities = pysam.qualitystring_to_array(
+					"I" * query_length)
+			else:
+				alignment.query_sequence = "".join(rng.choice(list("ACGT"),
+					query_length))
+				alignment.query_qualities = pysam.qualitystring_to_array(
+					"".join(chr(33 + q) for q in rng.integers(0, 41, query_length)))
 			alignment.flag = flag
 			alignment.reference_id = tids[chrom]
 			alignment.reference_start = start
