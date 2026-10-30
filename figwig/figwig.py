@@ -4136,22 +4136,22 @@ class FigWigReader:
 				if name not in self._tids:
 					raise ValueError(_unknown_chromosome(name, self.chrom_sizes))
 
-		parts = []
-		for name in names:
-			length = self.chrom_sizes[name]
-			found = self.read(name, [0], length, tracks=ids.tolist(), n_jobs=n_jobs,
-				sparse=True)
-			parts.append((numpy.full(len(found.offsets), self._tids[name],
-				dtype=numpy.int64), found.offsets, ids[found.channels],
-				found.values))
-
-		if not parts:
+		if not names:
 			empty = numpy.zeros(0, dtype=numpy.int64)
 			return SparseEntries(empty, empty, empty, numpy.zeros(0,
 				dtype=self._dtype(ids, None)))
 
-		return SparseEntries(*[numpy.concatenate([p[k] for p in parts]) for k
-			in range(4)])
+		# One sparse read of a window per chromosome, each as wide as the
+		# longest, which reads nothing past a chromosome's end: its entries
+		# come sorted by chromosome, track and position, and every
+		# chromosome's tiles share the threads, where a read per chromosome
+		# took them one chromosome at a time.
+		widest = max(self.chrom_sizes[name] for name in names)
+		found = self.read(names, numpy.zeros(len(names), dtype=numpy.int64),
+			widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
+		tids = numpy.array([self._tids[name] for name in names], dtype=numpy.int64)
+		return SparseEntries(tids[found.rows], found.offsets, ids[found.channels],
+			found.values)
 
 	def _select(self, tracks):
 		"""The tracks a call names, as (track ids in channel order, whether a
