@@ -288,6 +288,7 @@ def _region_keys(files, chrom, beg, end, stop):
 	kernel = _bam_kernel()
 	scan = _bgzf_kernel()
 	inflate = _inflate_engine()
+	last_record = _last_record_kernel()
 	keys = _buffer('keys', 1 << 16, 'int64')
 	n_keys = 0
 	capacity = (_REGION_READ + (1 << 16)) // 26 + 1
@@ -386,6 +387,13 @@ def _region_keys(files, chrom, beg, end, stop):
 					n_keys = int(state[0])
 					rest = buf[consumed:].copy()
 
+					# Likewise a batch whose last whole record does, which
+					# spares inflating the next batch.
+					ref, pos = last_record(buf, consumed)
+					if ref != -2 and (ref != tid or pos >= stop):
+						stopped = True
+						break
+
 				if not stopped and (n_read == 0 or remaining <= 0):
 					# The end of the file, or of the bytes the index gives:
 					# whatever is left is records past the region.
@@ -396,6 +404,45 @@ def _region_keys(files, chrom, beg, end, stop):
 
 	# A copy, since the next region on this thread writes over the buffer.
 	return keys[:n_keys].copy()
+
+
+def _last_record(buf, n):
+	"""The reference and position of the last whole BAM record in buf[:n],
+	or (-2, 0) when it holds none."""
+
+	at = 0
+	ref = -2
+	pos = 0
+	while at + 12 <= n:
+		size = 0
+		for k in range(4):
+			size |= numpy.int64(buf[at + k]) << (8 * k)
+		if at + 4 + size > n:
+			break
+		ref = 0
+		pos = 0
+		for k in range(4):
+			ref |= numpy.int64(buf[at + 4 + k]) << (8 * k)
+			pos |= numpy.int64(buf[at + 8 + k]) << (8 * k)
+		if ref >= 1 << 31:
+			ref -= 1 << 32
+		if pos >= 1 << 31:
+			pos -= 1 << 32
+		at += 4 + size
+	return ref, pos
+
+
+def _last_record_kernel():
+	"""`_last_record` compiled, on first use."""
+
+	global _last_compiled
+	if _last_compiled is None:
+		import numba
+		_last_compiled = numba.njit(cache=True, nogil=True)(_last_record)
+	return _last_compiled
+
+
+_last_compiled = None
 
 
 def _runs_kernel():
