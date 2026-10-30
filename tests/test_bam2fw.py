@@ -1032,6 +1032,63 @@ def fixed_regions(width):
 	return regions
 
 
+@pytest.fixture(autouse=True)
+def indexed_at_any_size(monkeypatch):
+	"""The test files are far smaller than the inputs -c reads through the
+	indexed reader, which takes every size here, as it takes a large file."""
+
+	import figwig._indexed
+
+	monkeypatch.setattr(figwig._indexed, "_MIN_MAPPED", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_BYTES", 0)
+
+
+def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
+		monkeypatch, capsys):
+	"""bam2bw -c reads through the indexed reader from `_MIN_MAPPED` mapped
+	reads in its files' indexes, summed, and bam2fw -c when each of its files
+	has `_MIN_BYTES`; below either, the whole-file reader gives the output."""
+
+	import pysam
+	import figwig._indexed
+
+	_, indexed = indexed_bams
+	small = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, [("chr1", 10 *
+		i, 30, bool(i % 2)) for i in range(40)])
+	mapped = sum(s.mapped for s in pysam.AlignmentFile(indexed)
+		.get_index_statistics())
+	calls = []
+	original = figwig._indexed._indexed_coverage
+
+	def counted(*args, **kwargs):
+		calls.append(1)
+		return original(*args, **kwargs)
+
+	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", counted)
+
+	def took(minimum, value, command, files):
+		monkeypatch.setattr(figwig._indexed, minimum, value)
+		calls.clear()
+		if command == "bam2bw":
+			figwig.bam2bw.main(files + ["-s", sizes, "-n", str(tmp_path / "out"),
+				"-c"])
+		else:
+			bam2fw(tmp_path, files, sizes, "-c", "--force")
+		capsys.readouterr()
+		return len(calls) > 0
+
+	assert took("_MIN_MAPPED", mapped, "bam2bw", [indexed])
+	assert not took("_MIN_MAPPED", mapped + 1, "bam2bw", [indexed])
+	assert took("_MIN_MAPPED", 2 * mapped, "bam2bw", [indexed, indexed])
+	assert not took("_MIN_MAPPED", 2 * mapped + 1, "bam2bw", [indexed, indexed])
+
+	size, least = os.path.getsize(indexed), os.path.getsize(small)
+	assert took("_MIN_BYTES", size, "bam2fw", [indexed])
+	assert not took("_MIN_BYTES", size + 1, "bam2fw", [indexed])
+	assert took("_MIN_BYTES", least, "bam2fw", [indexed, small])
+	assert not took("_MIN_BYTES", least + 1, "bam2fw", [indexed, small])
+
+
 @pytest.fixture(scope="session")
 def indexed_bams(data_dir):
 	"""Random reads of every CIGAR shape and flag, several reaching past a
