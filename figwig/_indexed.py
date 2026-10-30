@@ -48,8 +48,12 @@ _REGION_BYTES = 16 << 20
 _REGION_READ = 1 << 23
 _REGION_BLOCKS = 128
 
-# The regions in flight per reading thread.
+# The regions in flight per reading thread: one where each holds a window
+# of depth, more where each holds only runs, so that a region of many reads
+# late in the genome, such as chrM's, or a write on this thread, does not
+# leave the others idle.
 _AHEAD = 1
+_AHEAD_RUNS = 16
 
 # The writer's share of the cores while regions are read: one in this many,
 # at least one, the regions taking the rest.
@@ -987,8 +991,9 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 	discarded = {}
 	read_count = 0
 
-	# Regions in genome order, at most _AHEAD x threads of them read ahead of
-	# the region being put together, so that memory follows that window.
+	# Regions in genome order, at most _AHEAD (_AHEAD_RUNS without windows)
+	# x threads of them read ahead of the region being put together, so that
+	# memory follows that window.
 	regions = []
 	for chrom, size in chrom_sizes:
 		pieces = _regions(files, chrom, size, _REGION if dense else _RUNS_REGION)
@@ -1018,7 +1023,8 @@ def _indexed_coverage(files, chrom_sizes, args, threads, emit=None,
 					future = pool.submit(task, *work)
 				pending.append((region, future))
 
-		for _ in range(_AHEAD * threads if pool is not None else 1):
+		ahead = _AHEAD if dense else _AHEAD_RUNS
+		for _ in range(ahead * threads if pool is not None else 1):
 			submit()
 
 		# A region's last run that its edge cut is held until the next
