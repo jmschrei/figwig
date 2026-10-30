@@ -836,17 +836,20 @@ def chunks_of(path, group):
 		sizes.tolist())]
 
 
+@pytest.mark.parametrize("spacing", [0, 1 << 30])
 @pytest.mark.parametrize("flags, shifts", [((), (0, 0)), (("-u", "-ps", "4",
 	"-ns", "-5"), (4, -5)), (("-sf", "0.5"), (0, 0))])
 def test_coverage_in_pieces_is_the_file_of_one_piece(tmp_path, coverage_bam,
-		sizes, monkeypatch, flags, shifts):
+		sizes, monkeypatch, flags, shifts, spacing):
 	"""bam2fw -c on threads writes a chromosome's coverage a piece at a
-	time, a whole number of tiles each, and on one thread as intervals.
-	Pieces of 64 bases over tiles of 16, which runs cross and some of which
-	hold no run, give the file one piece per chromosome gives, byte for
-	byte, every tile the chunk the intervals give, though the two groups'
-	chunks may lie in another order, and the pileup."""
+	time, a whole number of tiles each, as a dense window or, for a piece
+	of few runs (here every piece, or none), as its runs; on one thread as
+	intervals. Pieces of 64 bases over tiles of 16, which runs cross and
+	some of which hold no run, give the file one piece per chromosome
+	gives, byte for byte, every tile the chunk the intervals give, though
+	the two groups' chunks may lie in another order, and the pileup."""
 
+	monkeypatch.setattr(figwig.bam2fw, "_RUN_SPACING", spacing)
 	flags = ("-c", "-t", "16") + flags
 	intervals = bam2fw(tmp_path / "intervals", [coverage_bam], sizes, *flags)
 	whole = bam2fw(tmp_path / "whole", [coverage_bam], sizes, "-p", "2", *flags)

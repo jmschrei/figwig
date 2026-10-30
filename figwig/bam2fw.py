@@ -190,6 +190,10 @@ def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 # multiple of every tile.
 _COVERAGE_PIECE = 1 << 22
 
+# A piece with fewer runs than one per this many bases goes to the writer as
+# its runs, which cost it less there than every base of the window.
+_RUN_SPACING = 1024
+
 
 def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 		read_depth):
@@ -198,8 +202,8 @@ def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 	`_write_counts` scales counts. With threads, each `_COVERAGE_PIECE` bases
 	of a chromosome go in as one dense window, whose whole tiles the writer
 	encodes on its threads, where intervals are encoded on this one; on one
-	thread the runs go in as intervals, which costs less than the window's
-	every base."""
+	thread, or for a piece of few runs, the runs go in as intervals, which
+	costs less than the window's every base."""
 
 	for name, key in zip(names, ('+', '-')):
 		for chrom, length in chrom_sizes:
@@ -219,6 +223,10 @@ def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 				lo = numpy.searchsorted(ends, a, side='right')
 				hi = numpy.searchsorted(starts, b, side='left')
 				if hi <= lo:
+					continue
+				if (hi - lo) * _RUN_SPACING < b - a:
+					writer.write(chrom, numpy.maximum(starts[lo:hi], a), values[lo:hi,
+						None], ends=numpy.minimum(ends[lo:hi], b), tracks=[name])
 					continue
 				writer.write(chrom, [a], _dense_runs(starts[lo:hi] - a, ends[lo:hi]
 					- a, values[lo:hi], b - a)[None, None], tracks=[name])
