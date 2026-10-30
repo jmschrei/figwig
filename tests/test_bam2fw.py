@@ -1039,15 +1039,19 @@ def indexed_at_any_size(monkeypatch):
 
 	import figwig._indexed
 
+	monkeypatch.setattr(figwig._indexed, "_MIN_CORES", 1)
 	monkeypatch.setattr(figwig._indexed, "_MIN_MAPPED", 0)
 	monkeypatch.setattr(figwig._indexed, "_MIN_BYTES", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_FILE_MAPPED", 0)
 
 
 def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
 		monkeypatch, capsys):
-	"""bam2bw -c reads through the indexed reader from `_MIN_MAPPED` mapped
-	reads in its files' indexes, summed, and bam2fw -c when each of its files
-	has `_MIN_BYTES`; below either, the whole-file reader gives the output."""
+	"""-c reads through the indexed reader on `_MIN_CORES` cores or more:
+	bam2bw from `_MIN_MAPPED` mapped reads in its files' indexes, summed,
+	and bam2fw when each of its files has `_MIN_BYTES` and
+	`_MIN_FILE_MAPPED` mapped reads; otherwise the whole-file reader gives
+	the output."""
 
 	import pysam
 	import figwig._indexed
@@ -1055,8 +1059,8 @@ def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
 	_, indexed = indexed_bams
 	small = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, [("chr1", 10 *
 		i, 30, bool(i % 2)) for i in range(40)])
-	mapped = sum(s.mapped for s in pysam.AlignmentFile(indexed)
-		.get_index_statistics())
+	mapped, few = (sum(s.mapped for s in pysam.AlignmentFile(path)
+		.get_index_statistics()) for path in (indexed, small))
 	calls = []
 	original = figwig._indexed._indexed_coverage
 
@@ -1066,27 +1070,36 @@ def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
 
 	monkeypatch.setattr(figwig._indexed, "_indexed_coverage", counted)
 
-	def took(minimum, value, command, files):
-		monkeypatch.setattr(figwig._indexed, minimum, value)
+	def took(command, files, cores=1, **minimums):
+		for name, value in minimums.items():
+			monkeypatch.setattr(figwig._indexed, name, value)
 		calls.clear()
 		if command == "bam2bw":
 			figwig.bam2bw.main(files + ["-s", sizes, "-n", str(tmp_path / "out"),
-				"-c"])
+				"-c", "-p", str(cores)])
 		else:
-			bam2fw(tmp_path, files, sizes, "-c", "--force")
+			bam2fw(tmp_path, files, sizes, "-c", "--force", "-p", str(cores))
 		capsys.readouterr()
 		return len(calls) > 0
 
-	assert took("_MIN_MAPPED", mapped, "bam2bw", [indexed])
-	assert not took("_MIN_MAPPED", mapped + 1, "bam2bw", [indexed])
-	assert took("_MIN_MAPPED", 2 * mapped, "bam2bw", [indexed, indexed])
-	assert not took("_MIN_MAPPED", 2 * mapped + 1, "bam2bw", [indexed, indexed])
+	assert took("bam2bw", [indexed], _MIN_MAPPED=mapped)
+	assert not took("bam2bw", [indexed], _MIN_MAPPED=mapped + 1)
+	assert took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped)
+	assert not took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped + 1)
 
 	size, least = os.path.getsize(indexed), os.path.getsize(small)
-	assert took("_MIN_BYTES", size, "bam2fw", [indexed])
-	assert not took("_MIN_BYTES", size + 1, "bam2fw", [indexed])
-	assert took("_MIN_BYTES", least, "bam2fw", [indexed, small])
-	assert not took("_MIN_BYTES", least + 1, "bam2fw", [indexed, small])
+	assert took("bam2fw", [indexed], _MIN_BYTES=size)
+	assert not took("bam2fw", [indexed], _MIN_BYTES=size + 1)
+	assert took("bam2fw", [indexed, small], _MIN_BYTES=least)
+	assert not took("bam2fw", [indexed, small], _MIN_BYTES=least + 1)
+	assert took("bam2fw", [indexed, small], _MIN_BYTES=0, _MIN_FILE_MAPPED=few)
+	assert not took("bam2fw", [indexed, small], _MIN_FILE_MAPPED=few + 1)
+
+	monkeypatch.setattr(figwig._indexed, "_MIN_FILE_MAPPED", 0)
+	monkeypatch.setattr(figwig._indexed, "_MIN_MAPPED", 0)
+	for command in ("bam2bw", "bam2fw"):
+		assert not took(command, [indexed], cores=1, _MIN_CORES=2)
+		assert took(command, [indexed], cores=2)
 
 
 @pytest.fixture(scope="session")

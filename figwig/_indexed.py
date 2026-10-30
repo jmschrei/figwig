@@ -59,11 +59,14 @@ _AHEAD_RUNS = 16
 # at least one, the regions taking the rest.
 _WRITER_SHARE = 4
 
-# Smaller inputs go to the whole-file reader, which is as fast on them:
-# bam2bw -c's below this many mapped reads in the indexes, whatever their
-# length, and bam2fw -c's when a file is below this many bytes.
+# Inputs below these, and fewer cores, go to the whole-file reader, which
+# is as fast or faster on them: bam2bw -c below this many mapped reads in
+# the indexes, summed, and bam2fw -c when a file is below this many bytes
+# or mapped reads.
+_MIN_CORES = 2
 _MIN_MAPPED = 5_000_000
-_MIN_BYTES = 100 << 20
+_MIN_BYTES = 128 << 20
+_MIN_FILE_MAPPED = 50_000
 
 # The linear index of a .bai has one offset per 2**14 bases.
 _WINDOW_SHIFT = 14
@@ -806,6 +809,8 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 	from .figwig import _temporary_path
 	from .writer import BigWigWriter
 
+	if cores < _MIN_CORES:
+		return False
 	files = _open_files(args.filename, chrom_sizes, args)
 	if files is None or sum(mapped or 0 for f in files for _, _, mapped, _, _
 			in f.index) < _MIN_MAPPED:
@@ -870,9 +875,12 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	from .bam2fw import _write_runs
 	from .figwig import FigWigWriter
 
+	if cores < _MIN_CORES or not all(os.path.isfile(name) and
+			os.path.getsize(name) >= _MIN_BYTES for name in args.filename):
+		return False
 	files = _open_files(args.filename, chrom_sizes, args)
-	if files is None or min(os.path.getsize(f.filename) for f in files) < \
-			_MIN_BYTES:
+	if files is None or any(sum(mapped or 0 for _, _, mapped, _, _ in f.index) <
+			_MIN_FILE_MAPPED for f in files):
 		return False
 	per_file = len(groups) // len(files)
 
