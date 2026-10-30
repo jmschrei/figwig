@@ -64,7 +64,7 @@ _WRITER_SHARE = 4
 # reads in the indexes, summed, and bam2fw -c when a file is below this
 # many bytes or mapped reads. Below 8 cores the writer has one, and the
 # whole-file reader, which reads and then writes on all of them, was
-# faster. Bytes are checked first, since parsing an index takes tens of ms.
+# faster. These are checked before the index is parsed.
 _MIN_CORES = 8
 _MIN_MAPPED = 5_000_000
 _MIN_BYTES = 128 << 20
@@ -110,6 +110,41 @@ def _index_path(filename):
 				filename):
 			return path
 	return None
+
+
+def _mapped_reads(filename):
+	"""The mapped reads the .bai of a BAM file counts, from the pseudo-bins
+	alone, which takes a few ms where parsing the whole index takes tens; 0
+	for a file without a .bai this reader takes, or a .bai it cannot walk."""
+
+	path = _index_path(filename)
+	if path is None:
+		return 0
+	with open(path, 'rb') as handle:
+		data = handle.read()
+	if data[:4] != b'BAI\x01':
+		return 0
+	unpack = struct.unpack_from
+	try:
+		n_ref, = unpack('<i', data, 4)
+		at, total = 8, 0
+		for _ in range(n_ref):
+			n_bin, = unpack('<i', data, at)
+			at += 4
+			for _ in range(n_bin):
+				bin_id, n_chunk = unpack('<Ii', data, at)
+				if n_chunk < 0:
+					return 0
+				if bin_id == _PSEUDO_BIN and n_chunk == 2:
+					total += unpack('<Q', data, at + 24)[0]
+				at += 8 + 16 * n_chunk
+			n_intv, = unpack('<i', data, at)
+			if n_intv < 0:
+				return 0
+			at += 4 + 8 * n_intv
+	except struct.error:
+		return 0
+	return total if at <= len(data) else 0
 
 
 def _read_index(path, n_ref):
@@ -813,11 +848,11 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 
 	if cores < _MIN_CORES or not all(os.path.isfile(name) for name in
 			args.filename) or sum(os.path.getsize(name) for name in
-			args.filename) < _MIN_BYTES:
+			args.filename) < _MIN_BYTES or sum(_mapped_reads(name) for name in
+			args.filename) < _MIN_MAPPED:
 		return False
 	files = _open_files(args.filename, chrom_sizes, args)
-	if files is None or sum(mapped or 0 for f in files for _, _, mapped, _, _
-			in f.index) < _MIN_MAPPED:
+	if files is None:
 		return False
 	sizes = dict(chrom_sizes)
 	names = dict(zip(['+', '-'], [args.name + ".bw"] if args.unstranded else
@@ -881,11 +916,11 @@ def _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
 	from .figwig import FigWigWriter
 
 	if cores < _MIN_CORES or not all(os.path.isfile(name) and
-			os.path.getsize(name) >= _MIN_BYTES for name in args.filename):
+			os.path.getsize(name) >= _MIN_BYTES and _mapped_reads(name) >=
+			_MIN_FILE_MAPPED for name in args.filename):
 		return False
 	files = _open_files(args.filename, chrom_sizes, args)
-	if files is None or any(sum(mapped or 0 for _, _, mapped, _, _ in f.index) <
-			_MIN_FILE_MAPPED for f in files):
+	if files is None:
 		return False
 	per_file = len(groups) // len(files)
 

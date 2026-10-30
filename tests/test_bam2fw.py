@@ -1345,6 +1345,37 @@ def test_sparse_regions_are_the_runs_of_their_depth(seed):
 				assert n > 0
 
 
+def test_mapped_reads_from_the_pseudo_bins(tmp_path, indexed_bams):
+	"""The mapped reads read from the pseudo-bins alone are pysam's; a BAM
+	without a .bai, with one older than it, or with one cut short inside
+	its references has 0 (the full parse then refuses a .bai cut later)."""
+
+	import shutil
+	import pysam
+	from figwig._indexed import _mapped_reads
+
+	unsorted, indexed = indexed_bams
+	small = sorted_indexed(tmp_path / "small.bam", BAM_CHROM_SIZES, [("chr1", 10 *
+		i, 30, bool(i % 2)) for i in range(40)])
+	for path in (indexed, small):
+		assert _mapped_reads(path) == sum(s.mapped for s in pysam.AlignmentFile(
+			path).get_index_statistics()) > 0
+	assert _mapped_reads(unsorted) == 0
+
+	copy = str(tmp_path / "copy.bam")
+	shutil.copy(indexed, copy)
+	index = Path(indexed + ".bai").read_bytes()
+	for cut in (len(index) - 9, len(index) // 2, 12):
+		with open(copy + ".bai", "wb") as handle:
+			handle.write(index[:cut])
+		assert _mapped_reads(copy) == 0
+	with open(copy + ".bai", "wb") as handle:
+		handle.write(index)
+	assert _mapped_reads(copy) == _mapped_reads(indexed)
+	os.utime(copy + ".bai", (1, 1))
+	assert _mapped_reads(copy) == 0
+
+
 def test_bam2bw_reads_on_every_core(tmp_path, indexed_bams, sizes, monkeypatch):
 	"""bam2bw -c reads regions on all its cores, its bigWig writer taking
 	little of the time; bam2fw -c leaves the figwig writer its share."""
