@@ -8,13 +8,13 @@ description: >-
   bigWigs from numpy arrays, model predictions, intervals or per-base
   counts; to convert BAM, SAM, BED or fragment files to count tracks with
   `figwig bam2bw` or `bam2fw`; and to build a figwig file of many tracks,
-  cells or reads with attributes per track, read in windows from any subset
-  of them, summed per label, per bin or over intervals, or straight onto a
-  GPU. It fires whenever code reads values from or creates a
-  .bw/.bigWig/.fw file, replaces pyBigWig, pybigtools, pybbi or deepTools
-  loops, builds a data loader over genomic tracks, or turns reads into
-  count tracks. This file is a router: read the matching reference file
-  before writing code.
+  cells or reads with attributes per track, or Hi-C contact matrices with a
+  track per bin or per cell, read in windows from any subset of them, summed
+  per label, per bin or over intervals, or straight onto a GPU. It fires
+  whenever code reads values from or creates a .bw/.bigWig/.fw file,
+  replaces pyBigWig, pybigtools, pybbi or deepTools loops, builds a data
+  loader over genomic tracks, or turns reads into count tracks. This file
+  is a router: read the matching reference file before writing code.
 ---
 
 # figwig
@@ -72,6 +72,7 @@ say.
 | read a figwig file: tracks by attribute, dtype, `sparse=`, `labels=` pseudobulks, `bins=`, `sums` over peaks or genes, `tile_sums`, zoom levels, reads or cells as `channels=`/`items=`, GPU output, DataLoader | `references/figwig-reading.md` |
 | write a figwig file: tracks and dtypes, tile, groups and order, `write_sparse` for cells or reads, `append=True`, `add_file`, `verify=True` | `references/figwig-writing.md` |
 | a whole job: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip, Fiber-seq reads as tracks | `references/recipes.md` |
+| Hi-C, Micro-C or single-cell Hi-C contact matrices as tracks: the layout, writing cooler's pixels, windows, rows (virtual 4C), coarser resolutions from one file, pseudobulks over cells | `references/hi-c.md` |
 | choose `n_jobs` or `-p`, estimate memory, the first call's compile time, measure on the target machine | `references/threads-and-memory.md` |
 
 ## Symptom → reference
@@ -85,3 +86,4 @@ say.
 | threads not making a read faster; a first call that takes 30 s | `references/threads-and-memory.md` |
 | a figwig read slower than expected, or decoding more tracks than asked | `references/threads-and-memory.md` for threads and batches, then `references/figwig-writing.md`: tile, groups and order |
 | "has been replaced or rewritten since this reader opened it" | `references/errors.md`: open the reader again |
+| a coarse contact matrix from `labels=` whose diagonal is near twice cooler's; `entries ... both name base` on an `.mcool`'s pixels | `references/hi-c.md` |
