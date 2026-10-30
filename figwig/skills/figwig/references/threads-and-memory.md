@@ -34,7 +34,11 @@ stable, and the last section measures the numbers where they matter.
   calls of a few hundred MB. `bw2fw` stops gaining near `-p 8`; the
   track-order writer does not gain.
 - `figwig bam2bw`: gains end near `-p 8`; peak memory is a few GB for a
-  10 GB BAM, nearly double with `-u -f`.
+  10 GB BAM, nearly double with `-u -f`. `-c` on a sorted, indexed BAM of
+  128 MiB and 5 M mapped reads or more (`bam2fw -c`: 128 MiB and 50,000
+  reads per file) is read region by region at `-p 8` or more and keeps
+  gaining to `-p 32`, holding only the regions in flight, which grow with
+  `-p`.
 
 ## Memory
 
