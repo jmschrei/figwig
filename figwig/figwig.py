@@ -2825,17 +2825,37 @@ class FigWigReader:
 			raise ValueError(error + ": its metadata does not describe its {} "
 				"tracks.".format(n_tracks))
 
-		names = set()
-		for track in tracks:
-			if not isinstance(track, dict) or not isinstance(track.get('name'),
-					str) or track.get('dtype') not in _DTYPES or not isinstance(
-					track.get('group'), int) or not 0 <= track['group'] < n_groups:
-				raise ValueError(error + ": a track's record is missing its name, "
-					"dtype or group.")
-			if track['name'] in names:
-				raise ValueError(error + ": two tracks are named {!r}.".format(
-					track['name']))
-			names.add(track['name'])
+		# The records are checked a column at a time; where a check fails,
+		# the loop over them finds the first one at fault, as it says.
+		try:
+			names = [track['name'] for track in tracks]
+			groups = [track['group'] for track in tracks]
+			dtypes = [track['dtype'] for track in tracks]
+			valid = set(map(type, names)) <= {str} and set(map(type, groups)) <= {
+				int, bool} and set(dtypes) <= set(_DTYPES)
+		except (TypeError, KeyError):
+			valid = False
+		if valid:
+			group_of = numpy.array(groups, dtype=numpy.int64)
+			track_ids = dict(zip(names, range(n_tracks)))
+			valid = (group_of >= 0).all() and (group_of < n_groups).all() and len(
+				track_ids) == n_tracks
+		if not valid:
+			seen = set()
+			for track in tracks:
+				if not isinstance(track, dict) or not isinstance(track.get('name'),
+						str) or track.get('dtype') not in _DTYPES or not isinstance(
+						track.get('group'), int) or not 0 <= track['group'] < n_groups:
+					raise ValueError(error + ": a track's record is missing its name, "
+						"dtype or group.")
+				if track['name'] in seen:
+					raise ValueError(error + ": two tracks are named {!r}.".format(
+						track['name']))
+				seen.add(track['name'])
+			dtypes = [track['dtype'] for track in tracks]
+			group_of = numpy.array([track['group'] for track in tracks],
+				dtype=numpy.int64)
+			track_ids = {track['name']: i for i, track in enumerate(tracks)}
 
 		self.tracks = tracks
 		self.genome = metadata.get('genome')
@@ -2854,9 +2874,8 @@ class FigWigReader:
 		self._identity = (stat.st_ino, stat.st_dev, header_bytes)
 		self._directory = numpy.frombuffer(directory, dtype='<u8').astype(
 			numpy.int64)
-		self._track_ids = {track['name']: i for i, track in enumerate(tracks)}
-		self._group_of = numpy.array([track['group'] for track in tracks],
-			dtype=numpy.int64)
+		self._track_ids = track_ids
+		self._group_of = group_of
 		by_group = numpy.argsort(self._group_of, kind='stable')
 		counts = numpy.bincount(self._group_of, minlength=n_groups)
 		if (counts == 0).any():
@@ -2865,8 +2884,9 @@ class FigWigReader:
 		self._slot_of = numpy.zeros(n_tracks, dtype=numpy.int64)
 		for group in self._groups:
 			self._slot_of[group] = numpy.arange(len(group))
-		self._dtype_codes = numpy.array([_DTYPES.index(track['dtype']) for
-			track in tracks], dtype=numpy.int64)
+		codes = {dtype: i for i, dtype in enumerate(_DTYPES)}
+		self._dtype_codes = numpy.fromiter(map(codes.__getitem__, dtypes),
+			dtype=numpy.int64, count=n_tracks)
 
 		self._tids = {name: i for i, (name, _) in enumerate(chroms)}
 		self._lengths = numpy.array([length for _, length in chroms],
