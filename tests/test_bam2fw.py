@@ -1048,10 +1048,10 @@ def indexed_at_any_size(monkeypatch):
 def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
 		monkeypatch, capsys):
 	"""-c reads through the indexed reader on `_MIN_CORES` cores or more:
-	bam2bw from `_MIN_MAPPED` mapped reads in its files' indexes, summed,
-	and bam2fw when each of its files has `_MIN_BYTES` and
-	`_MIN_FILE_MAPPED` mapped reads; otherwise the whole-file reader gives
-	the output."""
+	bam2bw from `_MIN_BYTES` and `_MIN_MAPPED` mapped reads in its files'
+	indexes, both summed, and bam2fw when each of its files has `_MIN_BYTES`
+	and `_MIN_FILE_MAPPED` mapped reads; otherwise the whole-file reader
+	gives the output."""
 
 	import pysam
 	import figwig._indexed
@@ -1086,6 +1086,10 @@ def test_indexed_coverage_only_from_its_sizes(tmp_path, indexed_bams, sizes,
 	assert not took("bam2bw", [indexed], _MIN_MAPPED=mapped + 1)
 	assert took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped)
 	assert not took("bam2bw", [indexed, indexed], _MIN_MAPPED=2 * mapped + 1)
+	size = os.path.getsize(indexed)
+	assert took("bam2bw", [indexed, indexed], _MIN_MAPPED=0, _MIN_BYTES=2 * size)
+	assert not took("bam2bw", [indexed, indexed], _MIN_BYTES=2 * size + 1)
+	monkeypatch.setattr(figwig._indexed, "_MIN_BYTES", 0)
 
 	size, least = os.path.getsize(indexed), os.path.getsize(small)
 	assert took("bam2fw", [indexed], _MIN_BYTES=size)

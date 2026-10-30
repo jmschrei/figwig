@@ -60,10 +60,11 @@ _AHEAD_RUNS = 16
 _WRITER_SHARE = 4
 
 # Inputs below these, and fewer cores, go to the whole-file reader, which
-# is as fast or faster on them: bam2bw -c below this many mapped reads in
-# the indexes, summed, and bam2fw -c when a file is below this many bytes
-# or mapped reads. Below 8 cores the writer has one, and the whole-file
-# reader, which reads and then writes on all of them, was faster.
+# is as fast or faster on them: bam2bw -c below this many bytes or mapped
+# reads in the indexes, summed, and bam2fw -c when a file is below this
+# many bytes or mapped reads. Below 8 cores the writer has one, and the
+# whole-file reader, which reads and then writes on all of them, was
+# faster. Bytes are checked first, since parsing an index takes tens of ms.
 _MIN_CORES = 8
 _MIN_MAPPED = 5_000_000
 _MIN_BYTES = 128 << 20
@@ -810,7 +811,9 @@ def _bam2bw_coverage(args, chrom_sizes, cores):
 	from .figwig import _temporary_path
 	from .writer import BigWigWriter
 
-	if cores < _MIN_CORES:
+	if cores < _MIN_CORES or not all(os.path.isfile(name) for name in
+			args.filename) or sum(os.path.getsize(name) for name in
+			args.filename) < _MIN_BYTES:
 		return False
 	files = _open_files(args.filename, chrom_sizes, args)
 	if files is None or sum(mapped or 0 for f in files for _, _, mapped, _, _
