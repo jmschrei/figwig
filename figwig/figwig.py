@@ -856,6 +856,7 @@ class FigWigWriter:
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
+		self._block_jobs = []
 		self._copies = True
 		self._sorted_entries = False
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
@@ -1020,7 +1021,7 @@ class FigWigWriter:
 		# A file appended to keeps its chunks where they are; another file's
 		# are copied whole, and its runs and blocks keep their layout, moved
 		# to where the copy landed.
-		self._write(len(self._inflight))
+		self._drain()
 		extents = None if first else self._copy_chunks(source)
 
 		n_groups, n_tracks = len(source._groups), len(source.tracks)
@@ -1374,8 +1375,7 @@ class FigWigWriter:
 						ends[a:b], values[a:b, channel])
 					self._write_track_entries(i, int(tids[a]), positions,
 						entry_values, int(ends[b - 1]))
-			self._write(max(0, len(self._inflight) - (0 if self._pool is None
-				else 2 * self.n_jobs)))
+			self._drain(0 if self._pool is None else 2 * self.n_jobs)
 			return
 
 		# The encoders take float32 and integers as they are, and other types
@@ -1417,8 +1417,7 @@ class FigWigWriter:
 		# Batches are written as they finish compressing, keeping a few in
 		# flight per thread, so that a long call does not hold every chunk
 		# of its values in memory at once.
-		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
-			2 * self.n_jobs)))
+		self._drain(0 if self._pool is None else 2 * self.n_jobs)
 
 	def write_sparse(self, chroms: str | list[str] | numpy.ndarray,
 		positions: list[int] | numpy.ndarray, tracks: str | int | list |
@@ -1633,8 +1632,7 @@ class FigWigWriter:
 					values[a:b], pieces)
 		self._submit_pieces(pieces)
 
-		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
-			2 * self.n_jobs)))
+		self._drain(0 if self._pool is None else 2 * self.n_jobs)
 
 	def _entry_order(self, tids, group_ids, track_ids, positions):
 		"""The order that sorts entries by chromosome, group, tile, track
@@ -2273,11 +2271,41 @@ class FigWigWriter:
 		first = numpy.arange(0, cut + 1, _BLOCK_ENTRIES)
 		if first[-1] != cut:
 			first = numpy.append(first, cut)
-		task = (self._blocks_task, t, tid, positions[:cut], values[:cut], first)
-		if self._pool is None:
-			self._inflight.append((task[0](*task[1:]), t, 'blocks'))
-		else:
-			self._inflight.append((self._pool.submit(*task), t, 'blocks'))
+		self._block_jobs.append((t, tid, positions[:cut], values[:cut], first))
+
+	def _submit_blocks(self):
+		"""Hand the tracks' blocks from `_flush_track` to the pool in order,
+		packing consecutive tracks' into a task until it holds a share of
+		their entries, since a task per track and chromosome cost this
+		thread its dispatch and bookkeeping."""
+
+		jobs = self._block_jobs
+		if len(jobs) == 0:
+			return
+		self._block_jobs = []
+		total = sum(len(job[2]) for job in jobs)
+		share = total if self._pool is None else max(1, total // (
+			_BATCHES_PER_THREAD * self.n_jobs))
+		task, size = [], 0
+		for k, job in enumerate(jobs):
+			task.append(job)
+			size += len(job[2])
+			if size >= share or k == len(jobs) - 1:
+				if len(task) == 1:
+					args = (self._blocks_task,) + task[0]
+					t, kind = task[0][0], 'blocks'
+				else:
+					args = (self._blocks_tasks, task)
+					t, kind = [job[0] for job in task], 'packed blocks'
+				result = args[0](*args[1:]) if self._pool is None else \
+					self._pool.submit(*args)
+				self._inflight.append((result, t, kind))
+				task, size = [], 0
+
+	def _blocks_tasks(self, jobs):
+		"""`_blocks_task` of each track's blocks, in order."""
+
+		return [self._blocks_task(*job) for job in jobs]
 
 	def _blocks_task(self, t, tid, positions, values, first):
 		"""Encode and compress one track's blocks. Returns (compressed bytes,
@@ -2320,6 +2348,13 @@ class FigWigWriter:
 				numpy.float32)[:, None])
 		return compressed, sizes, raw, kinds, records, None, stats, summary
 
+	def _drain(self, keep=0):
+		"""Hand the pool the tracks' blocks waiting for it, then write every
+		batch in flight but the last `keep`."""
+
+		self._submit_blocks()
+		self._write(max(0, len(self._inflight) - keep))
+
 	def _write(self, n_batches):
 		"""Write the first `n_batches` batches in flight to the file, in
 		order, record their chunks or blocks in the index, and fold in the
@@ -2328,9 +2363,10 @@ class FigWigWriter:
 		for result, g, kind in self._inflight[:n_batches]:
 			if not isinstance(result, (tuple, list)):
 				result = result.result()
-			if kind == 'pieces':
+			if kind in ('pieces', 'packed blocks'):
 				for one, g_one in zip(result, g):
-					self._write_result(one, g_one, None)
+					self._write_result(one, g_one, None if kind == 'pieces' else
+						'blocks')
 			else:
 				self._write_result(result, g, kind)
 
@@ -2404,7 +2440,7 @@ class FigWigWriter:
 			for t in range(len(self._pending)):
 				if self._pending[t] is not None:
 					self._flush_track(t)
-			self._write(len(self._inflight))
+			self._drain()
 
 			for i, track in enumerate(self.tracks):
 				if track['dtype'] is None:
