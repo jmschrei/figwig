@@ -1951,9 +1951,26 @@ class FigWigWriter:
 		pieces.clear()
 
 	def _entries_tasks(self, pieces):
-		"""`_entries_task` of each piece, in order."""
+		"""`_entries_task` of each piece, in order, joined for the writing
+		thread: one buffer of every piece's chunks, then per piece its live
+		tile records, its bytes in the buffer, its stats and its summary."""
 
-		return [self._entries_task(*piece) for piece in pieces]
+		results = [self._entries_task(*piece) for piece in pieces]
+		parts, lives, totals = [], [], []
+		for compressed, sizes, raw, kinds, where, crcs, _, _ in results:
+			total = int(sizes.sum())
+			parts.append(compressed[:total])
+			live = numpy.zeros(len(where), dtype=_LIVE)
+			live['tile'] = where
+			live['kind'] = kinds
+			live['size'] = sizes
+			live['raw'] = raw
+			live['crc'] = crcs
+			lives.append(live)
+			totals.append(total)
+		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
+			dtype=numpy.uint8), lives, totals, [r[6] for r in results], [r[7] for r
+			in results])
 
 	def _entries_task(self, g, tid, slots, positions, values, n_tracks):
 		"""Encode and compress one batch of tiles from their entries, each
@@ -2363,14 +2380,47 @@ class FigWigWriter:
 		for result, g, kind in self._inflight[:n_batches]:
 			if not isinstance(result, (tuple, list)):
 				result = result.result()
-			if kind in ('pieces', 'packed blocks'):
+			if kind == 'pieces':
+				self._write_pieces(result, g)
+			elif kind == 'packed blocks':
 				for one, g_one in zip(result, g):
-					self._write_result(one, g_one, None if kind == 'pieces' else
-						'blocks')
+					self._write_result(one, g_one, 'blocks')
 			else:
 				self._write_result(result, g, kind)
 
 		del self._inflight[:n_batches]
+
+	def _write_pieces(self, result, groups):
+		"""Write a packed task's pieces, as `_write_result` writes each: its
+		chunks in one write, then each piece's stats, summary, live records
+		and run of the file, in order."""
+
+		compressed, lives, totals, stats, summaries = result
+		offset = self._file.tell()
+		self._file.write(compressed)
+		for g, live, total, batch, summary in zip(groups, lives, totals, stats,
+				summaries):
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+				dtype=numpy.int64), numpy.ascontiguousarray(batch,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[g].append(summary)
+			if len(live) == 0:
+				continue
+			self._live[g].append(live)
+			first, last = int(live['tile'][0]), int(live['tile'][-1])
+			runs = self._runs[g]
+			if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
+					runs[-1][1] < first and runs[-1][3] + total < 2 ** 40:
+				runs[-1][1] = last
+				runs[-1][3] += total
+			else:
+				runs.append([first, last, offset, total])
+			offset += total
 
 	def _write_result(self, result, g, kind):
 		"""Write one batch's chunks or blocks to the file, record them in the

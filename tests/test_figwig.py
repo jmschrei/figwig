@@ -1720,6 +1720,49 @@ def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
 	assert used.count(True) == len(values) + 3 + 1
 
 
+def test_write_sparse_packs_group_batches_into_tasks(tmp_path, monkeypatch):
+	"""A call's group batches written inline, packed several to a pool task
+	or one to a task give the same file, byte for byte, over calls that
+	continue a group's runs of the file and calls that do not."""
+
+	rng = numpy.random.default_rng(9)
+	tracks = ['t{}'.format(i) for i in range(30)]
+	groups = [tracks[i:i + 3] for i in range(0, 30, 3)]
+	calls = []
+	for chrom in ('chr1', 'chr2'):
+		for lo, hi in ((0, 1600), (1600, 2432), (2432, CHROM_SIZES[chrom])):
+			key = numpy.unique(rng.integers(0, 30 * (hi - lo), 900))
+			calls.append((chrom, lo + key % (hi - lo), key // (hi - lo), rng.integers(
+				1, 9, len(key)).astype(numpy.int32)))
+
+	def write(name, n_jobs, per_thread):
+		monkeypatch.setattr(figwig.figwig, '_BATCHES_PER_THREAD', per_thread)
+		path = str(tmp_path / name)
+		with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=layout,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, which, values in calls:
+				order = numpy.argsort(positions, kind='stable')
+				writer.write_sparse(chrom, positions[order], which[order], values[
+					order])
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	# Ten groups, whose batches interleave in the file, and one group cut
+	# into batches of a few tiles, whose chunks follow one another.
+	for layout, per_batch in ((groups, 1 << 20), ([tracks], 64)):
+		monkeypatch.setattr(figwig.figwig, '_ENTRIES_PER_BATCH', per_batch)
+		monkeypatch.setattr(figwig.figwig, '_BATCH_BYTES', 1 << 25 if per_batch >
+			64 else 8 * per_batch)
+		inline = write('inline.fw', 1, 8)
+		assert write('packed.fw', 3, 1) == inline
+		assert write('single.fw', 3, 1 << 40) == inline
+		reader = FigWigReader(str(tmp_path / 'packed.fw'))
+		for chrom, positions, which, values in calls:
+			y = reader.read([chrom] * len(positions), positions, 1, dtype='int64')
+			numpy.testing.assert_array_equal(y[numpy.arange(len(positions)), which,
+				0], values)
+
+
 def test_write_sparse_arguments(tmp_path):
 	path = str(tmp_path / 's.fw')
 	writer = FigWigWriter(path, {'chr1': 1000, 'chr2': 500}, ['a', 'b', {'name':
