@@ -556,9 +556,9 @@ def main(argv=None, prog='figwig bam2fw'):
 		import multiprocessing
 		tqdm.set_lock(multiprocessing.RLock())
 
-	# Coverage of indexed, sorted BAM files is read region by region on every
-	# core and written a chromosome at a time; other files go through
-	# read_files.
+	# Coverage of large indexed, sorted BAM files on 8 cores or more is read
+	# region by region on every core and written a chromosome at a time; other
+	# files go through read_files.
 	if args.coverage:
 		from ._indexed import _bam2fw_coverage
 		try:
