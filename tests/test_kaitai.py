@@ -104,7 +104,7 @@ def decode(parsed, kind_byte, n_tracks, tile, data):
 
 
 @pytest.mark.parametrize('name', ['zlib', 'stored', 'tracks', 'tracks_zlib',
-	'appended', 'merged', 'blocks'])
+	'appended', 'merged', 'blocks', 'entries'])
 def test_kaitai_parser_agrees_with_the_reference_reader(files, name):
 	path = files[name]
 	file = spec.File(path)

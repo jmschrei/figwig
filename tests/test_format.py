@@ -59,7 +59,7 @@ def test_header_layout_matches_the_specification():
 
 
 @pytest.mark.parametrize('name', ['zlib', 'stored', 'tracks', 'tracks_zlib',
-	'appended', 'merged', 'blocks'])
+	'appended', 'merged', 'blocks', 'entries'])
 def test_reference_reader_agrees_with_figwig(files, name):
 	"""Every table, index record, summary, zoom level and value the
 	specification's reader finds is what FigWigReader finds."""
@@ -113,7 +113,8 @@ def test_reference_reader_agrees_with_figwig(files, name):
 def test_every_kind_and_element_type_is_covered(files):
 	"""The fixtures exercise every chunk kind, every element code, chunks
 	stored as they are inside a compressed file, several runs per group,
-	and track-order blocks of more than one per chromosome."""
+	track-order blocks of more than one per chromosome, and dense, sparse
+	and runs chunks written from entries."""
 
 	seen = set()
 	stored = set()
@@ -150,6 +151,10 @@ def test_every_kind_and_element_type_is_covered(files):
 	codes = {int((k >> 3) & 15) for group in blocks.groups for k in
 		group.blocks['kind']}
 	assert len(codes) > 1 and spec.CODE_ONE in codes
+
+	entries = spec.File(files['entries'])
+	assert {spec.KIND_DENSE, spec.KIND_SPARSE, spec.KIND_RUNS} <= {int(k & 7)
+		for group in entries.groups for k in group.live['kind']}
 
 
 def test_live_tiles_are_the_nonzero_tiles(files):
