@@ -2556,23 +2556,23 @@ def _radix_scatter(keys, order, first, lo, hi, shift, mask, starts, keys_out,
 
 
 @numba.njit(nogil=True, cache=True)
-def _entry_gather(keys, order, track_ids, values, multi, shift, slot_bits,
-	tile_bits, n_groups, lo, hi, positions_out, tracks_out, values_out,
-	groups_out, tids_out):
-	"""Entries lo to hi in sorted order: the position, group and chromosome
-	from each sorted key, the track and the value (as float64) from the
+def _entry_gather(keys, order, values, multi, shift, slot_bits, tile_bits,
+	n_groups, lo, hi, positions_out, slots_out, values_out, groups_out,
+	tids_out):
+	"""Entries lo to hi in sorted order: the position, slot, group and
+	chromosome from each sorted key, and the value (as float64) from the
 	entry it came from."""
 
 	mask = (numpy.int64(1) << shift) - 1
+	slot_mask = (numpy.int64(1) << slot_bits) - 1
 	tile_mask = (numpy.int64(1) << tile_bits) - 1
 	for i in range(lo, hi):
 		k = keys[i]
 		positions_out[i] = (((k >> (shift + slot_bits)) & tile_mask) << shift) | (
 			k & mask)
+		slots_out[i] = (k >> shift) & slot_mask
 		high = k >> (shift + slot_bits + tile_bits)
 		groups_out[i] = high % n_groups
 		if multi:
 			tids_out[i] = high // n_groups
-		j = order[i]
-		tracks_out[i] = track_ids[j]
-		values_out[i] = values[j]
+		values_out[i] = values[order[i]]
