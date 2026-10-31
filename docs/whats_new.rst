@@ -12,7 +12,7 @@ Unreleased
 figwig files
 ------------
 
-	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` to write an experimental optional index and restart points for readers that fetch regional summaries. Existing v1 readers still read the same raw values and summary payloads. The flag defaults to ``False`` and is unavailable with ``append=True``; normal append invalidates the accelerator while retaining foreign metadata.
+	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` to write an optional index and restart points for readers that fetch regional summaries. Existing v1 readers still read the same raw values and summary payloads. The flag defaults to ``False`` and is unavailable with ``append=True``; normal append invalidates the accelerator while retaining foreign metadata.
 
 	- ``FigWigReader`` uses the optional summary index automatically for selected-chromosome ``tile_sums`` and exact integer interval ``sums``, reading only the needed windows without a genome-sized summary array. Distant intervals read their union, wholly aligned exact intervals need no raw chunks, and whole-genome reads retain complete-stream checks. Ordinary and stale-index files keep the existing fallback; precision and NaN semantics are unchanged.
 

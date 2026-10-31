@@ -336,7 +336,7 @@ without them ignores.
 
 For readers that fetch small regions over HTTP, new files can opt into
 ``FigWigWriter(..., summary_index=True)`` (or the same ``write_figwig`` keyword).
-This writes an experimental :doc:`regional summary index <summary_restarts>`
+This writes a :doc:`regional summary index <summary_restarts>`
 and restartable compressed summaries. Python uses the index automatically for
 ``tile_sums(chroms=..., level=...)`` and the exact integer ``sums`` optimization,
 reading the requested ranges without the whole genome's summaries or a

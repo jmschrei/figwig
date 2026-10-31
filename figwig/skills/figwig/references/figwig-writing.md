@@ -6,7 +6,7 @@ with `write(chroms, starts, values, ends=None, tracks=None)` and
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
 
-`summary_index=True` opts into the experimental regional summary accelerator,
+`summary_index=True` opts into the regional summary accelerator,
 used automatically by Python's selected-chromosome `tile_sums` and exact integer
 `sums`, and by figwig-js over HTTP. It preserves v1 values and old-reader access;
 the default is off. Tiny levels or a full index budget retain ordinary streams.

@@ -14,7 +14,7 @@ the same layout, from which parsers in other languages can be compiled,
 whose compiled Python parser ``tests/test_kaitai.py`` runs over the same
 files.
 
-The separate experimental :doc:`regional summary index <summary_restarts>`
+The separate :doc:`regional summary index <summary_restarts>`
 uses v1's optional metadata and unused data-region bytes while keeping this
 core layout and its summary streams unchanged.
 

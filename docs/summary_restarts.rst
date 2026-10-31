@@ -1,7 +1,7 @@
 Optional regional summary index
 ===============================
 
-``FigWigWriter(..., summary_index=True)`` opts into an experimental accelerator
+``FigWigWriter(..., summary_index=True)`` opts into an accelerator
 for regional summary reads. The default is ``False``. The same flag is accepted
 by ``write_figwig``. This profile preserves the :doc:`frozen v1 format <format>`:
 raw data, summary bin grids, decoded summary values and whole-level reader APIs
@@ -10,15 +10,15 @@ ordinary summary streams. Figwig-js uses it for bounded regional HTTP reads;
 Python uses it for selected-chromosome summaries and exact integer interval sums
 from regular files.
 
-The profile uses experimental optional bit 1 (``0x2``) and the top-level JSON key
+The profile uses optional bit 1 (``0x2``) and the top-level JSON key
 ``org.figwig.summary-restarts``. The bit is not a claim of an independently
 registered upstream feature assignment. Literal BGZF and concatenated zlib
 streams are not v1 summaries; this profile instead places full-flush restart
 points inside each existing single zlib stream.
 
-This experimental profile is version 2, with a 32 KiB decoded window target
+This profile is version 2, with a 32 KiB decoded window target
 and a 2,048-bin cap. Readers that do not recognize a profile use the ordinary
-v1 summaries, including the earlier 16 KiB experimental profile 1. The root's
+v1 summaries, including the earlier 16 KiB profile 1. The root's
 ``FWRSUM1`` magic identifies the directory family; its separate version field
 identifies this profile. The core file format remains version 1.
 

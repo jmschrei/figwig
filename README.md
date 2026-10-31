@@ -359,7 +359,7 @@ copy. A base no track wrote is 0, as is a bigWig's no-data unless
 `bw2fw --missing nan` keeps them apart.
 
 For regional summary access, `FigWigWriter(..., summary_index=True)` writes an
-experimental optional index, default off. Python uses it automatically for
+optional index, default off. Python uses it automatically for
 selected-chromosome `tile_sums` and exact integer interval `sums`, and figwig-js
 uses it for regional HTTP reads. Existing v1 readers return the same values.
 See the [summary index guide](docs/summary_restarts.rst) and

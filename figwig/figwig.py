@@ -172,7 +172,7 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 # Feature bits a reader must know to read the file (`required`) or may
 # ignore (`optional`). No required bit is defined, so a reader refuses any
 # set. Optional bit 0 announces each group's zoom section, bit 1 the
-# experimental summary restart directory; other optional bits are ignored.
+# summary restart directory; other optional bits are ignored.
 _KNOWN_REQUIRED = 0
 _OPTIONAL_ZOOMS = 1
 _MAX_ZOOMS = 12  # levels, each 4 times coarser than the last
@@ -727,7 +727,7 @@ class FigWigWriter:
 		with `append=True` and 0 otherwise. Default is None.
 
 	summary_index: bool, optional
-		Write the experimental optional regional summary index for readers
+		Write the optional regional summary index for readers
 		that support it, preserving the ordinary v1 summary streams and
 		values. Small levels and levels beyond its allocation budget stay
 		ordinary. Not supported with `append=True`; ordinary append clears
@@ -4851,7 +4851,7 @@ def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,
 		'positions' or 'tracks'; see `FigWigWriter`. Default is 'positions'.
 
 	summary_index: bool, optional
-		Write the experimental regional summary index; see `FigWigWriter`.
+		Write the regional summary index; see `FigWigWriter`.
 		Default is False.
 	"""
 

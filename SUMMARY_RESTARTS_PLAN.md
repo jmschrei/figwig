@@ -21,12 +21,12 @@ bounded raw inflater appends an empty final block (`03 00`) for decoding. Keep
 whole-stream CRC/Adler checks for existing readers and whole-level APIs.
 
 Publish a namespaced metadata locator to a checksummed root in the unused data
-region and use experimental optional bit 1 (`0x2`). Bind the accelerator to the
-exact final 128-byte header. This is a branch-local experimental convention,
+region and use optional bit 1 (`0x2`). Bind the accelerator to the
+exact final 128-byte header. This is a branch-local convention,
 not a claim of an upstream-assigned official feature. Do not change reserved
 fields or the frozen core record layout.
 
-The 32 KiB / 2,048-bin design is experimental profile 2 in both the metadata
+The 32 KiB / 2,048-bin design is profile 2 in both the metadata
 locator and root. Unsupported profiles, including the earlier 16 KiB profile 1,
 fall back to ordinary v1 summaries. Keep the existing magic as a family marker.
 
