@@ -151,7 +151,9 @@ file's tracks hold the coverage of its reads' aligned bases, as
 :doc:`figwig bam2bw -c <bam2bw>` counts it, written as runs, each track its
 own group, since a stretch of one value costs a runs chunk a few bytes
 where entries would cost one per base; ``-c`` is not taken with
-``--barcode-column``.
+``--barcode-column``. Sorted, indexed BAM files of 128 MiB and 50,000
+mapped reads or more are read a region at a time on every core when ``-p``
+is 8 or more, as :doc:`bam2bw` describes, into tracks of the same values.
 
 ``--barcode-column N`` writes a fragments file as one track per cell
 instead: column ``N`` (from 1; 4 in a Cell Ranger fragments file) holds

@@ -103,6 +103,7 @@ _DEFLATED_COUNTS = 64
 _SCRATCH_PAIRS = 4
 
 _EXACT = 16777216.0
+_EXACT_SUM = 9007199254740992.0
 
 
 @numba.njit(nogil=True, cache=True, inline='always')
@@ -992,10 +993,12 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	The entries of tile t are first[t] to first[t + 1] - 1, sorted by track
 	then position, with no two on one (track, position): entry e is base
 	positions[e] of the chromosome in track tracks[e], a position in the
-	group, with the value values[e]. Tiles are stored sparsely or as a
-	matrix, never densely. The chunks, `bounds`, `kinds` and `stats` are as
-	in `_encode_tiles`. Encoding stops before a tile whose chunk might not
-	fit the rest of `out`; returns the number of tiles encoded.
+	group, with the value values[e]. A tile is stored as the kind
+	`_encode_block` would pick for the rows the entries fill, but with a
+	runs chunk weighed by the changes it would hold, where `_encode_block`
+	counts each NaN base as one. The chunks, `bounds`, `kinds` and `stats`
+	are as in `_encode_tiles`. Encoding stops before a tile whose chunk
+	might not fit the rest of `out`; returns the number of tiles encoded.
 
 	Only the tracks a tile touches are visited per tile: their statistics
 	are reset after the tile and folded into `stats`, where a group of
@@ -1015,6 +1018,12 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		most = max(most, first[t + 1] - first[t])
 	offs = numpy.empty(most, dtype=numpy.int64)
 	vals = numpy.empty(most, dtype=numpy.float64)
+	npts = numpy.zeros(n_tracks, dtype=numpy.int64)
+	roffs = numpy.empty(2 * most, dtype=numpy.int64)
+	rvals = numpy.empty(2 * most, dtype=numpy.float64)
+	counts = 4 * n_tracks
+	if compressed:
+		counts = counts // _DEFLATED_COUNTS + 4
 	position = bounds[0]
 
 	for t in range(tiles.shape[0]):
@@ -1029,6 +1038,7 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		# the bytes of their offsets.
 		total = 0
 		delta_bytes = 0
+		adjacent = 0
 		n_present = 0
 		n_touched = 0
 		last_track = -1
@@ -1064,6 +1074,7 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			if v != numpy.floor(v):
 				flags[g] |= _FLAG_FRACTION
 			delta_bytes += _varint_bytes(p - last)
+			adjacent += (p == last + 1) & (nnz[g] > 1)
 			last = p
 
 		for k in range(n_touched):
@@ -1089,11 +1100,34 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 		code, total = _chunk_code_of(touched, n_touched, classes, nnz, mins,
 			maxs, sums, flags)
 		w = _WIDTHS[code]
+
+		# A stretch of consecutive bases starts with a change of value and,
+		# unless it reaches the tile's end, which one per track may, ends with
+		# one, each a byte at least; only when that many changes take fewer
+		# bytes than the smallest of the other kinds are its changes found.
+		_, least = _pick_kind(n_tracks, n_present, total, delta_bytes, w, tile,
+			int(0), int(0), bool(True), allow_matrix, bool(False), compressed)
+		changes = 2 * (total - adjacent) - n_present
+		allow_runs = 4 + counts + changes * (1 + max(w, 1)) < least
+		n_points, run_bytes = 0, 0
+		if allow_runs:
+			n_points, run_bytes = _entry_runs(tile, touched, n_touched, nnz, offs,
+				vals, npts, roffs, rvals)
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, tile,
-			int(0), int(0), bool(False), allow_matrix, bool(False), compressed)
+			n_points, run_bytes, bool(True), allow_matrix, allow_runs, compressed)
+		if kind == _DENSE or kind == _RUNS:
+			if code == _ONE:
+				code = _U8
 		kinds[t] = kind | (code << _CODE_SHIFT)
-		end = _write_entries_of(out, position, kind, code, n_tracks, touched,
-			n_touched, n_present, total, nnz, offs, vals)
+		if kind == _DENSE:
+			end = _dense_of_entries(out, position, code, n_tracks, tile, touched,
+				n_touched, nnz, offs, vals)
+		elif kind == _RUNS:
+			end = _write_entries_of(out, position, kind, code, n_tracks, touched,
+				n_touched, n_present, n_points, npts, roffs, rvals)
+		else:
+			end = _write_entries_of(out, position, kind, code, n_tracks, touched,
+				n_touched, n_present, total, nnz, offs, vals)
 		position = _finish_chunk(out, end)
 		bounds[t + 1] = position
 		for k in range(n_touched):
@@ -1108,6 +1142,107 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			flags[g] = 0
 
 	return tiles.shape[0]
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_runs(tile, touched, n_touched, nnz, offs, vals, npts, roffs,
+	rvals):
+	"""The changes of value `_collect_runs` finds in the rows of a tile
+	that its entries fill, every other base 0: for each track the tile
+	touches, in order, the offsets where the value changes go to `roffs`,
+	the new values to `rvals` and their count to npts[g]. Returns the
+	changes and the bytes their varints take."""
+
+	d = 0
+	r = 0
+	run_bytes = 0
+	for k in range(n_touched):
+		g = touched[k]
+		r0 = r
+		last = 0
+		prev = 0.0
+		after = -1
+		for i in range(nnz[g]):
+			p = offs[d]
+			v = vals[d]
+			d += 1
+			# The bases between the last entry and this one are 0.
+			if after >= 0 and p != after:
+				roffs[r] = after
+				rvals[r] = 0.0
+				r += 1
+				run_bytes += _varint_bytes(after - last)
+				last = after
+				prev = 0.0
+			# Written whether or not the value changes, and kept only if it
+			# does, which saves a branch on each entry.
+			change = (v != prev) & ((v == v) | (prev == prev))
+			roffs[r] = p
+			rvals[r] = v
+			r += change
+			run_bytes += change * _varint_bytes(p - last)
+			last = p if change else last
+			prev = v
+			after = p + 1
+		if after >= 0 and after < tile:
+			roffs[r] = after
+			rvals[r] = 0.0
+			r += 1
+			run_bytes += _varint_bytes(after - last)
+		npts[g] = r - r0
+	return r, run_bytes
+
+
+@numba.njit(nogil=True, cache=True)
+def _dense_of_entries(out, position, code, n_tracks, tile, touched,
+	n_touched, nnz, offs, vals):
+	"""Write a dense chunk of a tile at `position` of `out` from the
+	entries of the tracks it touches, every other base 0, as
+	`_dense_payload` writes the rows they fill; returns where it ends."""
+
+	w = _WIDTHS[code]
+	end = position + n_tracks * tile * w
+	for p in range(position, end):
+		out[p] = 0
+	d = 0
+	for k in range(n_touched):
+		g = touched[k]
+		at = position + g * tile * w
+		n = nnz[g]
+		if code == _U8:
+			view = out[at:at + tile]
+			for i in range(n):
+				view[offs[d + i]] = numpy.uint8(vals[d + i])
+		elif code == _U16:
+			view = out[at:at + 2 * tile].view(numpy.uint16)
+			for i in range(n):
+				view[offs[d + i]] = numpy.uint16(vals[d + i])
+		elif code == _U32:
+			view = out[at:at + 4 * tile].view(numpy.uint32)
+			for i in range(n):
+				view[offs[d + i]] = numpy.uint32(vals[d + i])
+		elif code == _I8:
+			view = out[at:at + tile].view(numpy.int8)
+			for i in range(n):
+				view[offs[d + i]] = numpy.int8(vals[d + i])
+		elif code == _I16:
+			view = out[at:at + 2 * tile].view(numpy.int16)
+			for i in range(n):
+				view[offs[d + i]] = numpy.int16(vals[d + i])
+		elif code == _I32:
+			view = out[at:at + 4 * tile].view(numpy.int32)
+			for i in range(n):
+				view[offs[d + i]] = numpy.int32(vals[d + i])
+		elif code == _F32:
+			view = out[at:at + 4 * tile].view(numpy.float32)
+			for i in range(n):
+				view[offs[d + i]] = numpy.float32(vals[d + i])
+		else:
+			view = out[at:at + 8 * tile].view(numpy.float64)
+			for i in range(n):
+				view[offs[d + i]] = vals[d + i]
+		d += n
+	return end
 
 
 @numba.njit(nogil=True, cache=True, inline='always')
@@ -1734,6 +1869,30 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 	return k_out
 
 
+@numba.njit(nogil=True, cache=True, inline='always')
+def _add_run_binned(dst, value, lo, hi, bins, nan_mode, integral):
+	"""Bases lo to hi - 1 of a window, all of `value`, added into the bins
+	of `bins` bases of the window's binned row `dst`. An integer value is
+	added once per bin as value x bases, which is the sum base by base
+	gives while the bin stays below 2**53; otherwise base by base."""
+
+	if nan_mode != 0:
+		value = _pick(value, nan_mode)
+	k = lo // bins
+	edge = (k + 1) * bins
+	while lo < hi:
+		stop = min(hi, edge)
+		n = stop - lo
+		if integral and abs(dst[k]) + abs(value) * n < _EXACT_SUM:
+			dst[k] += value * n
+		else:
+			for q in range(n):
+				dst[k] += value
+		lo = stop
+		k += 1
+		edge += bins
+
+
 # The decoders below take a chunk's values as a typed view, so that numba
 # compiles one copy of each for every element type and the type is chosen
 # once per chunk rather than once per value; `ones` marks a chunk whose
@@ -1742,7 +1901,8 @@ def _put_run(value, s, e, start, channels, slot, accumulate, listing, fill,
 @numba.njit(nogil=True, cache=True)
 def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	selected, values, ones, base, a, b, start, channels, accumulate, fill, row,
-	k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode):
+	k_out, out_rows, out_channels, out_offsets, out_values, bins, nan_mode,
+	integral):
 	"""One window's bases of one sparse, runs or matrix chunk: set or added
 	into the window's `channels`, (channels, width) of the output, when
 	`channels` has a row, or listed as entries from k_out on when `fill`,
@@ -1753,9 +1913,9 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 	uint16 `offsets` are as its header gives them, and each present track's
 	first base in the window is found by binary search. `selected` lists
 	the group's tracks with a slot, ascending. `values` is the typed view of
-	the chunk's values. With `bins` above 1, which comes with `accumulate`,
-	`channels` is the window's binned row and each base is added into its
-	bin.
+	the chunk's values, `integral` true when they are integers. With `bins`
+	above 1, which comes with `accumulate`, `channels` is the window's binned
+	row and each base is added into its bin.
 	"""
 
 	listing = channels.shape[0] == 0
@@ -1816,6 +1976,28 @@ def _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 					else:
 						for q in range(lo, hi):
 							dst[q] = current
+			elif kind == _RUNS and not listing and bins > 1:
+				# Binned, as sums are: changes before the window are only
+				# decoded, and each run inside it is added per bin it covers.
+				dst = channels[slot]
+				current = 0.0
+				since = base
+				while at < end:
+					delta, at = _get_varint(data, at)
+					p += delta
+					here = base + p
+					if here >= b:
+						d += 1
+						break
+					if here > a and here > since:
+						_add_run_binned(dst, current, max(since, a) - start, here - start,
+							bins, nan_mode, integral)
+					current = _value(values, d, ones)
+					since = here
+					d += 1
+				if since < b:
+					_add_run_binned(dst, current, max(since, a) - start, b - start, bins,
+						nan_mode, integral)
 			elif kind == _RUNS:
 				# The value from each change up to the next, clipped to the
 				# window; 0 before the first change.
@@ -1992,46 +2174,53 @@ def _window_of_chunk(tile, data, position, kind, code, n_tracks, slots,
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total], bool(False), base, a, b, start,
 			channels, accumulate, fill, row, k_out, out_rows, out_channels,
-			out_offsets, out_values, bins, nan_mode)
+			out_offsets, out_values, bins, nan_mode, bool(True))
 	elif code == _U16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.uint16), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _U32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.uint32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I8:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + total].view(numpy.int8), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I16:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 2 * total].view(numpy.int16), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _I32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.int32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(True))
 	elif code == _F32:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 4 * total].view(numpy.float32), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(False))
 	elif code == _F64:
 		return _window_entries(kind, data, at, counts, tracks, ptr, offsets,
 			slots, selected, data[v0:v0 + 8 * total].view(numpy.float64), bool(False),
 			base, a, b, start, channels, accumulate, fill, row, k_out, out_rows,
-			out_channels, out_offsets, out_values, bins, nan_mode)
+			out_channels, out_offsets, out_values, bins, nan_mode,
+			bool(False))
 	return _window_entries(kind, data, at, counts, tracks, ptr, offsets, slots,
 		selected, data[v0:v0], bool(True), base, a, b, start, channels,
 		accumulate, fill, row, k_out, out_rows, out_channels, out_offsets,
-		out_values, bins, nan_mode)
+		out_values, bins, nan_mode, bool(True))
 
 
 @numba.njit(nogil=True, cache=True)

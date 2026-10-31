@@ -169,35 +169,45 @@ Coverage of every aligned base
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``figwig bam2bw -c -u`` and deepTools 4.0.0's ``bamCoverage --binSize 1``
-each wrote the coverage of the same BAM's reads to one bigWig, on tmpfs,
-one run each at a load of 38 to 40, with the peak memory of the process
-tree sampled every 50 ms; ``figwig bam2fw -c -u`` wrote it as a figwig
-file. The two bigWigs hold the same value at every one of hg38's
-3,099,750,718 bases.
+each wrote the coverage of the same BAM's reads to one bigWig, on tmpfs;
+``figwig bam2fw -c -u`` wrote it as a figwig file. The two bigWigs hold the
+same value at every one of hg38's 3,099,750,718 bases.
 
 ====================================  ========  ========  ========  ========
 command                               threads   time      peak RSS  output
 ====================================  ========  ========  ========  ========
-``figwig bam2bw -c -u``               1         11.9 s    1.6 GB    193 MB
-``figwig bam2bw -c -u``               8         3.4 s     2.0 GB    193 MB
-``figwig bam2bw -c -u``               32        3.7 s     2.0 GB    193 MB
-``figwig bam2fw -c -u``               8         14.4 s    2.2 GB    79 MB
+``figwig bam2bw -c -u``               1         11.3 s    1.5 GB    193 MB
+``figwig bam2bw -c -u``               8         1.6 s     0.54 GB   193 MB
+``figwig bam2bw -c -u``               32        1.05 s    2.4 GB    193 MB
+``figwig bam2fw -c -u``               1         22.7 s    1.7 GB    79 MB
+``figwig bam2fw -c -u``               8         4.9 s     0.63 GB   79 MB
+``figwig bam2fw -c -u``               32        2.3 s     1.7 GB    79 MB
 ``bamCoverage --binSize 1``           1         46.2 s    1.3 GB    249 MB
 ``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
 ====================================  ========  ========  ========  ========
 
-The coverage is two events per read on the readers and sorts the end
-counts use, so it costs about what ``-f`` costs; the figwig file is a
-runs chunk per tile, which is why ``bam2fw`` takes longer to write and
-less space. deepTools' time is its own reading of the BAM through pysam,
-a process per thread.
+figwig's rows are medians of three runs with ``/usr/bin/time``'s peak RSS,
+with about a tenth of the server's cores in use by other jobs; deepTools'
+are one run each at a load of 38 to 40, with the peak memory of the process
+tree sampled every 50 ms. On one thread figwig keeps two events per aligned
+block of every read and sorts them, as for ``-f``; from ``-p 8`` it reads
+this sorted, indexed BAM a region at a time on every core (:doc:`bam2bw`),
+so that its peak is the regions in flight rather than the whole file's
+events, and grows with ``-p``. The figwig file is a runs chunk per tile,
+which takes less space and, on one thread, longer to write; on threads each
+4 Mb of a chromosome goes to the writer as one window, whose tiles it
+encodes in parallel, or as its runs where it changes value less often than
+once per 1,024 bases, as sparse coverage such as RNA-seq's does; ``figwig
+reorder`` writes the file again as the same 79 MB of runs chunks. deepTools'
+time is its own reading of the BAM through pysam, a process per thread.
 
 Ten more experiments of the test-data collection, from 40 MB to 2.4 GB,
 single- and paired-end, two genomes, spliced short and long reads, were
-converted the same way (tmpfs, one run each, load 35 to 45). In every one
-the two bigWigs hold the same value at every base of every chromosome of
-the BAM's header, 3.1 billion for hg38 and 2.7 billion for mm10, and the
-same total. Seconds and peak RSS at 1 / 8 threads or processes:
+converted the same way (tmpfs; deepTools one run each at a load of 35 to
+45). In every one the two bigWigs hold the same value at every base of every
+chromosome of the BAM's header, 3.1 billion for hg38 and 2.7 billion for
+mm10, and the same total. Seconds and peak RSS at 1 / 8 threads or
+processes:
 
 .. list-table::
    :header-rows: 1
@@ -208,50 +218,55 @@ same total. Seconds and peak RSS at 1 / 8 threads or processes:
      - ``bamCoverage --binSize 1``, 1 / 8 processes
    * - ChIP-seq SE, K562 CTCF, hg38
      - 948 MB
-     - 6.5 s, 1.2 GB / 2.7 s, 1.5 GB
+     - 5.9 s, 1.1 GB / 1.0 s, 0.85 GB
      - 25.4 s, 1.1 GB / 11.1 s, 5.2 GB
    * - ChIP-seq PE, SK-N-SH H3K4me3, hg38
      - 2.3 GB
-     - 11.1 s, 1.5 GB / 3.1 s, 1.8 GB
+     - 10.2 s, 1.4 GB / 1.4 s, 0.57 GB
      - 36.4 s, 1.2 GB / 14.1 s, 4.7 GB
    * - ATAC-seq PE, HCT116, hg38
      - 2.4 GB
-     - 12.1 s, 1.6 GB / 3.5 s, 2.0 GB
+     - 11.4 s, 1.5 GB / 1.6 s, 0.54 GB
      - 46.2 s, 1.3 GB / 14.9 s, 4.5 GB
    * - DNase-seq PE, K562, hg38
      - 46 MB
-     - 1.1 s, 0.25 GB / 1.0 s, 0.28 GB
+     - 0.47 s, 0.24 GB / 0.33 s, 0.25 GB
      - 8.5 s, 1.0 GB / 4.4 s, 4.4 GB
    * - PRO-cap PE, K562, hg38
      - 1.4 GB
-     - 6.9 s, 0.55 GB / 2.0 s, 0.67 GB
+     - 6.2 s, 0.47 GB / 1.2 s, 0.57 GB
      - 27.3 s, 1.2 GB / 8.0 s, 2.8 GB
    * - RNA-seq PE, K562, hg38
      - 67 MB
-     - 1.2 s, 0.18 GB / 0.9 s, 0.17 GB
+     - 0.50 s, 0.16 GB / 0.29 s, 0.22 GB
      - 8.3 s, 1.0 GB / 4.3 s, 3.4 GB
    * - CUT&RUN PE, K562 CTCF, hg38
      - 40 MB
-     - 1.2 s, 0.23 GB / 1.0 s, 0.22 GB
+     - 0.45 s, 0.21 GB / 0.39 s, 0.24 GB
      - 8.5 s, 1.0 GB / 4.3 s, 4.5 GB
    * - MNase-seq PE, K562, hg38
      - 118 MB
-     - 1.6 s, 0.34 GB / 1.1 s, 0.26 GB
+     - 0.86 s, 0.30 GB / 0.38 s, 0.36 GB
      - 9.9 s, 1.1 GB / 4.7 s, 4.0 GB
    * - ChIP-nexus SE, mESC Nanog, mm10
      - 1.1 GB
-     - 7.2 s, 1.4 GB / 2.7 s, 1.7 GB
+     - 6.3 s, 1.3 GB / 1.0 s, 0.85 GB
      - 26.6 s, 0.9 GB / 11.3 s, 3.7 GB
    * - PacBio RNA long reads, K562, hg38
      - 71 MB
-     - 1.3 s, 0.17 GB / 1.0 s, 0.22 GB
+     - 0.59 s, 0.14 GB / 0.32 s, 0.21 GB
      - 9.5 s, 1.0 GB / 4.3 s, 3.7 GB
 
-figwig is 3 to 4 times faster than deepTools on one thread and 4 to 8
-times on eight, where deepTools' processes each hold their own copy of
-the work and the small files are bound by its start-up; figwig's peak
-grows with the file (the keys of every read end, 8 bytes each) and
-deepTools' with the processes.
+figwig's times were measured again once ``-c`` read large indexed BAMs a
+region at a time: medians of three runs with GNU time's peak RSS, with about
+a tenth of the server's cores in use by other jobs; deepTools' are the
+single runs above. On the five BAMs of 0.9 GB or more figwig was 3.6 to 4.4
+times faster than deepTools on one thread and 7 to 11 times on eight, which
+read these five a region at a time (:doc:`bam2bw`); deepTools' processes
+each hold their own copy of the work and the small files are bound by its
+start-up. On one thread figwig's peak grows with the file (the keys of every
+read end, 8 bytes each); on eight, with the regions in flight; deepTools'
+grows with the processes.
 
 Every file of a test-data collection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -731,6 +746,26 @@ Over 3,000 single cells as tracks (chr1 to chr5 of the PBMC fragments,
 46 million cut sites, one group), the 58,705 peaks on those chromosomes
 summed in 0.96 s on 8 threads and 1.5 s on one, the same sums as a sparse
 read of the windows gives in 1.2 s.
+
+Dense tracks are stored as runs and dense chunks rather than nonzero
+bases. In a runs chunk the changes of value before an interval are only
+decoded, and a run of integers inside it is added once rather than base
+by base; the tiles an interval covers whole are taken from the file's
+tile sums when the track holds integers whose sums those keep exactly. The
+coverage of ATAC-seq BAM ENCFF877LRY, as ``figwig bam2fw -c -u`` writes it,
+and the fold change of ENCODE's ENCFF932UQM (float32), each one track,
+summed over the 100,548 replicated peaks of K562 ATAC-seq (ENCFF827JWX)
+and the 78,733 gene bodies of GENCODE v50's basic annotation, on tmpfs,
+median of three:
+
+=================================  ==========  ==========
+track, intervals                   1 thread    8 threads
+=================================  ==========  ==========
+ATAC-seq coverage, peaks           0.41 s      0.085 s
+ATAC-seq coverage, gene bodies     0.47 s      0.11 s
+fold change, peaks                 0.33 s      0.070 s
+fold change, gene bodies           1.55 s      0.26 s
+=================================  ==========  ==========
 
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

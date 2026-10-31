@@ -14,8 +14,26 @@ Reading
 
 	- ``oob=`` on ``BigWigReader.read`` and ``read_bigwig`` sets the value of bases past the end of a chromosome, as in pybigtools' ``values()``. The default stays NaN. Thanks @casblaauw!
 
+figwig files
+------------
+
+	- ``sums`` over a track stored as runs, such as the coverage ``figwig bam2fw -c`` writes, only decodes the changes of value before each interval, adds a run of integers once rather than base by base, and takes the tiles an interval covers whole from the file's tile sums when the track holds integers whose sums those keep exactly. On one thread of the benchmarks' server, the coverage of ENCODE ATAC-seq BAM ENCFF877LRY sums over 78,733 gene bodies in 0.47 s, where it took 7.9 s, and over 100,548 peaks in 0.41 s, where it took 1.6 s; a fold-change track over the gene bodies in 1.55 s, where it took 6.8 s; 48 count tracks over the gene bodies in 6.8 s, where they took 14.4 s. The sums are the same to the bit.
+
+	- ``write_sparse``, and so ``figwig reorder``, stores a tile as a dense or runs chunk when either takes fewer bytes than a sparse one, as ``write`` does. Reordering the ATAC-seq coverage file gives the same 79 MB of runs chunks, where it gave 119 MB of sparse chunks. Scattered entries, such as cells' cut sites, are stored as before: the 10,246-cell PBMC file is the same to the byte.
+
+	- ``is_figwig(path)`` tells whether a path is a figwig file from the magic number in its first four bytes, without opening it as a reader, so that code taking either a figwig file or bigWigs can choose its reader: it is False for a bigWig, a missing path or a directory. Thanks @casblaauw!
+
+Converters and commands
+-----------------------
+
+	- ``figwig bam2fw -c`` on threads writes each 4 Mb of a chromosome's coverage as one dense window, whose tiles the writer encodes on its threads, where it encoded every run on the calling thread, unless the 4 Mb hold fewer runs than one per 1,024 bases, as sparse coverage such as RNA-seq's does, which goes in as runs as before: the 2.4 GB ATAC-seq BAM takes 7.2 s on 8 threads, where it took 14.2 s. The file is the same to the byte, and one thread writes it as before.
+
+	- ``figwig bam2bw -c`` and ``figwig bam2fw -c`` read a coordinate-sorted BAM file with a ``.bai`` no older than it a region at a time on every core, from the index's offset for each region's first base, and write each chromosome while the next is read, rather than keeping two events per aligned block of every read until the file ends. They do so at ``-p 8`` or more, for ``bam2bw`` from 128 MiB and 5 million mapped reads in its files, for ``bam2fw`` from 128 MiB and 50,000 mapped reads in each file; below these, set from timings on 25 BAMs of the test-data collection with a margin on the whole-file reader's side, and for a file the region reader cannot read exactly as the whole-file reader would, the whole-file reader runs as before. The 2.4 GB ATAC-seq BAM takes 1.6 s with ``bam2bw -c -u -p 8``, where it took 2.5 s, and 1.05 s at ``-p 32``, where it took 2.5 s; 4.9 s with ``bam2fw -c -u -p 8``, where it took 7.2 s, and 2.3 s at ``-p 32``, where it took 7.1 s. At ``-p 8`` the peak memory falls from 2.0 to 0.54 GB (``bam2bw``) and from 1.9 to 0.63 GB (``bam2fw``); at ``-p 32`` it is the regions in flight, 2.4 GB against 2.0 GB for ``bam2bw``. The bigWigs and unstranded figwig files are the same to the byte; a stranded figwig file holds the same values and the same bytes of chunks, the two strands' interleaved, so its index holds more runs: 0.14% more bytes in all on 8 million ChIP-seq reads.
+
 Documentation
 -------------
+
+	- The bundled Claude Code skill has a reference for Hi-C contact matrices, ``references/hi-c.md``: one track per bin with chromosomes measured in bins, since in bp a tile stops at 65,536 bases and a bp file took twice the bytes; both triangles and a ``diagonal`` track, so that ``labels=`` over rows and ``bins=`` over columns read a coarser resolution in one call with the diagonal counted once, as cooler counts it, where summing both triangles counts it twice; writing cooler's row-major pixels by the column's chromosome, after summing the pixels published ``.mcool`` files repeat, which ``write_sparse`` refuses; single-cell layouts; and the limits Hi-C sizes reach (``tile_sums``, track counts, a pseudo-chromosome's length). The reading reference also says that ``bins=`` sums count bases past a chromosome's end as 0, where the general rule read as NaN.
 
 	- The benchmarks page's count-track tables have a row for zarrs 0.2.3, the Rust codec pipeline for zarr-python, on the same arrays as the zarr row: it writes them 1.1 to 3.5 times faster than zarr-python and reads one window per call at zarr-python's one-thread speed, without gaining from the Python threads, with its chunk concurrency pinned to one chunk (its default read twice as slowly on these calls).
 

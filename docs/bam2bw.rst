@@ -125,6 +125,23 @@ over lines, would read it is read by bam2bw's pysam or line loop instead, so
 that its result, or its error, is bam2bw's: a SAM file, ``--mate_pairs``, a
 remote file, or a malformed record or line.
 
+With ``-c``, a coordinate-sorted BAM file whose ``.bai`` is no older than it
+is read a region of a chromosome at a time instead, on every core, and each
+chromosome's coverage goes to the writer while the next is read. A region
+is read from the block the index gives for its first base, through the same
+kernels, until the reads start past it, so every read that covers its bases
+is counted; the index cuts the regions at 16 MiB of the file at most. Nothing
+holds the whole file's keys, so the peak memory is that of the regions in
+flight, which grows with ``-p``. This takes ``-p`` of 8 or more, and for
+``figwig bam2bw`` 128 MiB and 5 million mapped reads in its files, summed,
+from their indexes, for ``figwig bam2fw`` 128 MiB and 50,000 mapped reads
+in each file: on fewer cores, and below these sizes, the
+whole-file reader was as fast or faster (:doc:`benchmarks`). Those inputs,
+a file without an index or not sorted by coordinate, and one the region
+reader cannot read exactly as the whole-file reader would (a malformed
+record or block) go through the whole-file reader. The bigWigs are the
+same to the byte either way.
+
 ``-p`` is a number of cores, where bam2bw takes it as a number of processes,
 one per file at most. Files the fast readers take are read one after another,
 each on every core: three BAMs of 2.4, 1.8 and 0.45 GB took 7.1 s at ``-p 3``,

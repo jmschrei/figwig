@@ -9,6 +9,20 @@ arguments as `reader.read`. The byte layout is specified on the docs'
 `format` page, with a Kaitai Struct definition, for reading from another
 language.
 
+`is_figwig(path)` tells a figwig file from a bigWig by the magic number in
+its first four bytes, so code that takes either can pick its reader without
+guessing from the extension. It does not open the file as a reader: a file
+that starts like a figwig file but is damaged or of a later version is True
+here and raises in `FigWigReader`.
+
+```python
+from figwig import FigWigReader
+from figwig import is_figwig
+from figwig import BigWigReader
+
+reader = FigWigReader if is_figwig(path) else BigWigReader
+```
+
 ```python
 import numpy
 from figwig import FigWigReader
@@ -48,8 +62,11 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 - Sums come back float64 for integer tracks (counts pass 2**24) and
   float32 for float32 tracks; an integer `dtype=` is checked for overflow.
 - A base never written is 0. Past a chromosome's end is NaN in a float
-  output and 0 in an integer one. An unknown chromosome raises; the file
-  holds every chromosome it was written with, so there is no warning.
+  output and 0 in an integer one, except in `bins=` sums, which count those
+  bases as 0 as `sums` does, so a chromosome's last, partial bin is its
+  sum; `labels=` alone gives float64 per base, NaN there. An unknown
+  chromosome raises; the file holds every chromosome it was written with,
+  so there is no warning.
 - `select(**attributes)` matches equality on `name`, `dtype`, `group` and
   the attributes the file was written with; look at `fw.tracks` for them.
   Attributes from a metadata table are strings: `select(units=1)` matches
