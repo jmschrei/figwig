@@ -869,8 +869,8 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - scipy CSR (16.3 GB, in memory)
      - one bigWig per cell (1.4 GB)
    * - write
-     - 68 / 37 / 36
-     - 71 / 72 / 91
+     - 48 / 10.9 / 9.0
+     - 33 / 19.5 / 24
      - 10.6 / 11.4
      - 116 / 78 / 82
    * - 10 pseudobulks over the windows (``labels=``)
@@ -884,7 +884,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - 6.6 / 4.9
      - 0.79 / 0.28 / 0.26
    * - every cell's cut sites in 1,024 windows (``sparse=True``)
-     - 0.39 / 0.16 / 0.14
+     - 0.42 / 0.12 / 0.095
      - 7.1 / 5.4 / 5.0
      - 4.3 / 4.7
      - not run
@@ -915,15 +915,15 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - figwig, track order
      - scipy CSR
    * - write
-     - 4.0 / 2.6 / 2.7
-     - 6.5 / 9.1 / 10.6
+     - 3.3 / 1.6 / 1.8
+     - 4.5 / 7.1 / 8.4
      - 6.8
    * - sum over all reads, 8,192 windows (``labels=``)
-     - 0.42 / 0.43 / 0.42
+     - 0.22 / 0.30 / 0.78
      - 15.7 / 15.8 / 16.0
      - 3.8 / 4.0
    * - calls of every read in 1,024 windows (``sparse=True``)
-     - 0.17 / 0.16 / 0.17
+     - 0.14 / 0.18 / 0.24
      - 7.1 / 7.2 / 7.2
      - 27 / 3.5
    * - each read over its own span (``sums(paired=True)``)
