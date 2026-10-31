@@ -358,6 +358,13 @@ of these in GPU memory, where `torch.from_dlpack` takes them without a
 copy. A base no track wrote is 0, as is a bigWig's no-data unless
 `bw2fw --missing nan` keeps them apart.
 
+For regional summary access, `FigWigWriter(..., summary_index=True)` writes an
+experimental optional index, default off. Python uses it automatically for
+selected-chromosome `tile_sums` and exact integer interval `sums`, and figwig-js
+uses it for regional HTTP reads. Existing v1 readers return the same values.
+See the [summary index guide](docs/summary_restarts.rst) and
+`benchmarks/compare_summaries.py` for usage, limits and reproducible comparisons.
+
 A file is written in position order, tiles across tracks, for reading
 windows across many tracks, or in track order for reading a few tracks over
 the genome, and `figwig reorder` rewrites it in the other; `write_sparse`

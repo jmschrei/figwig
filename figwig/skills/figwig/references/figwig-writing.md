@@ -1,10 +1,18 @@
 # Writing figwig files
 
-`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None)`
+`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None, summary_index=False)`
 with `write(chroms, starts, values, ends=None, tracks=None)` and
 `write_sparse(chroms, positions, tracks, values)`; `write_figwig` writes one
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
+
+`summary_index=True` opts into the experimental regional summary accelerator,
+used automatically by Python's selected-chromosome `tile_sums` and exact integer
+`sums`, and by figwig-js over HTTP. It preserves v1 values and old-reader access;
+the default is off. Tiny levels or a full index budget retain ordinary streams.
+It cannot be combined with `append=True`; ordinary append invalidates the index,
+and merge/reorder do not propagate it. See `docs/summary_restarts.rst` and
+`benchmarks/compare_summaries.py` in the source checkout.
 
 ```python
 import numpy

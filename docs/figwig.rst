@@ -334,6 +334,19 @@ tile sums are, and the default is none; they cost a few hundred kilobytes
 per level for six tracks and are announced by a header bit that a reader
 without them ignores.
 
+For readers that fetch small regions over HTTP, new files can opt into
+``FigWigWriter(..., summary_index=True)`` (or the same ``write_figwig`` keyword).
+This writes an experimental :doc:`regional summary index <summary_restarts>`
+and restartable compressed summaries. Python uses the index automatically for
+``tile_sums(chroms=..., level=...)`` and the exact integer ``sums`` optimization,
+reading the requested ranges without the whole genome's summaries or a
+genome-sized temporary array. Broad queries use complete streams; whole-genome
+queries retain their existing checks. Existing v1 readers return the same
+values. The default is ``False``; the flag
+cannot be combined with ``append=True``. Tiny levels and levels beyond the
+directory budget retain ordinary streams, and normal append, merge and reorder
+do not preserve the accelerator.
+
 Writing
 -------
 

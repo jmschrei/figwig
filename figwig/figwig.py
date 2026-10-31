@@ -93,6 +93,13 @@ from .bigwig import _Windows
 from .writer import _check_chrom_sizes
 from .writer import _check_engine
 from .writer import _compress_blocks
+from ._summary_index import METADATA_KEY as _SUMMARY_INDEX_KEY
+from ._summary_index import OPTIONAL_BIT as _OPTIONAL_SUMMARY_INDEX
+from ._summary_index import PROFILE_VERSION as _SUMMARY_INDEX_VERSION
+from ._summary_index import SummaryIndex
+from ._summary_index import SummaryIndexReader
+from ._summary_index import SummaryIndexError
+from ._summary_index import merge_ranges as _summary_ranges
 
 
 _FIGWIG_MAGIC = int.from_bytes(b'FIGW', 'little')
@@ -164,9 +171,8 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 	('header_crc', '<u4'), ('padding', 'V20')])
 # Feature bits a reader must know to read the file (`required`) or may
 # ignore (`optional`). No required bit is defined, so a reader refuses any
-# set; the one optional bit says each group's index record ends with a zoom
-# section (written by every file since the first release), and any other
-# optional bit is ignored.
+# set. Optional bit 0 announces each group's zoom section, bit 1 the
+# experimental summary restart directory; other optional bits are ignored.
 _KNOWN_REQUIRED = 0
 _OPTIONAL_ZOOMS = 1
 _MAX_ZOOMS = 12  # levels, each 4 times coarser than the last
@@ -719,14 +725,29 @@ class FigWigWriter:
 		for coarse genome-wide profiles. Levels are kept while the tile sums
 		are (tracks x tiles x 4 bytes at most 256 MB). None is the file's
 		with `append=True` and 0 otherwise. Default is None.
+
+	summary_index: bool, optional
+		Write the experimental optional regional summary index for readers
+		that support it, preserving the ordinary v1 summary streams and
+		values. Small levels and levels beyond its allocation budget stay
+		ordinary. Not supported with `append=True`; ordinary append clears
+		the feature bit and preserves the stale metadata locator. Default
+		is False. See docs/summary_restarts.rst for the extension contract.
 	"""
 
 	def __init__(self, path: str | os.PathLike, chrom_sizes: dict | list | None,
 		tracks: list | None, genome: str | None = None, attributes: dict | None =
 		None, tile: int | None = None, groups: int | list = _DEFAULT_GROUPS,
 		level: int | None = None, engine: str = 'auto', n_jobs: int = 8,
-		order: str | None = None, append: bool = False, zooms: int | None = None):
+		order: str | None = None, append: bool = False, zooms: int | None = None,
+		summary_index: bool = False):
 		self._file = None
+		if not isinstance(summary_index, bool):
+			raise TypeError('summary_index must be a bool.')
+		if append and summary_index:
+			raise ValueError('summary_index=True is not supported with append=True.')
+		self.summary_index = summary_index
+		self._summary_index = None
 		self._pool = None
 		self._partial = None
 		self._length = None
@@ -2009,21 +2030,26 @@ class FigWigWriter:
 		sums = numpy.concatenate([v for _, v in self._sums[g]] + [numpy.zeros((0,
 			n_tracks), dtype=numpy.float32)]).astype(numpy.float64)
 		if len(tiles) == 0:
-			stream = zlib.compress(b'', 6)
+			stream = self._summary_stream(g, 0, tiles, sums)
 			return struct.pack('<III', 0, len(stream), zlib.crc32(stream)) + \
-				stream + self._zoom_section(tiles, sums)
+				stream + self._zoom_section(tiles, sums, g)
 		order = numpy.argsort(tiles, kind='stable')
 		tiles, sums = tiles[order], sums[order]
 		first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
 		starts = numpy.flatnonzero(first)
 		sums = numpy.add.reduceat(sums, starts, axis=0)
 		tiles = tiles[starts]
-		stream = zlib.compress(tiles.astype('<u4').tobytes() + sums.astype(
-			'<f4').tobytes(), 6)
+		stream = self._summary_stream(g, 0, tiles, sums)
 		return struct.pack('<III', len(tiles), len(stream), zlib.crc32(stream)) \
-			+ stream + self._zoom_section(tiles, sums)
+			+ stream + self._zoom_section(tiles, sums, g)
 
-	def _zoom_section(self, tiles, sums):
+	def _summary_stream(self, g, level, bins, sums):
+		if self._summary_index is not None:
+			return self._summary_index.compress(g, level, bins, sums)
+		return zlib.compress(bins.astype('<u4').tobytes() + sums.astype(
+			'<f4' if level == 0 else '<f8').tobytes(), 6)
+
+	def _zoom_section(self, tiles, sums, g):
 		"""The zoom levels of a group, from its tile sums (file tiles
 		ascending, sums (tiles, tracks) float64): the level count, then per
 		level its factor, bin count, stream length and CRC-32, and a zlib
@@ -2043,8 +2069,7 @@ class FigWigWriter:
 				bins = bins[first]
 			else:
 				bins, zsums = tiles, sums
-			stream = zlib.compress(bins.astype('<u4').tobytes() + zsums.astype(
-				'<f8').tobytes(), 6)
+			stream = self._summary_stream(g, k + 1, bins, zsums)
 			parts.append(struct.pack('<IIII', factor, len(bins), len(stream),
 				zlib.crc32(stream)) + stream)
 		return b''.join(parts)
@@ -2282,6 +2307,44 @@ class FigWigWriter:
 					sum_, nonzero, low, high, flags, _ = self._stats[i]
 					track['dtype'] = _infer_dtype(nonzero, low, high, flags)
 
+			if self.summary_index and self._summaries:
+				self._summary_index = SummaryIndex([len(g) for g in self._groups],
+					[self._n_tiles] + [grid[1] for grid in self._zoom_grids])
+
+			def record_of(g):
+				if self.order == 'tracks':
+					blocks = numpy.concatenate(self._blocks[g]) if self._blocks[g] \
+						else numpy.zeros(0, dtype=_BLOCK)
+					body = blocks.tobytes()
+					record = struct.pack('<II', len(blocks), zlib.crc32(body)) + body
+				else:
+					runs = numpy.zeros(len(self._runs[g]), dtype=_RUN)
+					for r, run in enumerate(self._runs[g]):
+						runs[r] = tuple(run)
+					live = numpy.concatenate(self._live[g]) if self._live[g] else \
+						numpy.zeros(0, dtype=_LIVE)
+					live = live[numpy.argsort(live['tile'], kind='stable')]
+					stream = zlib.compress(b''.join(live[field].tobytes() for field
+						in _LIVE_FIELDS), 6)
+					body = runs.tobytes() + struct.pack('<II', len(live), len(stream)) \
+						+ stream
+					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
+				if self._summary_index is not None:
+					self._summary_index.raw_sizes[g] = len(record)
+				return record + self._summary_record(g)
+
+			# Each group's record deflates its live tiles and summary, which
+			# for thousands of groups is seconds on one thread.
+			if self._pool is None:
+				records = [record_of(g) for g in range(len(self._groups))]
+			else:
+				records = list(self._pool.map(record_of, range(len(self._groups))))
+			index_size = self._summary_index.size() if self._summary_index else 0
+			index_at = self._file.tell()
+			if index_size:
+				self._metadata[_SUMMARY_INDEX_KEY] = {'version': _SUMMARY_INDEX_VERSION, 'offset':
+					index_at, 'length': 256}
+				self._file.seek(index_at + index_size)
 			chroms_offset = self._file.tell()
 			chrom_table = b''.join(struct.pack('<H', len(name.encode())) +
 				name.encode() + struct.pack('<Q', length) for name, length in
@@ -2305,32 +2368,6 @@ class FigWigWriter:
 			# reader refuses a damaged table rather than reading by it.
 			index_offset = metadata_offset + len(metadata)
 
-			def record_of(g):
-				if self.order == 'tracks':
-					blocks = numpy.concatenate(self._blocks[g]) if self._blocks[g] \
-						else numpy.zeros(0, dtype=_BLOCK)
-					body = blocks.tobytes()
-					record = struct.pack('<II', len(blocks), zlib.crc32(body)) + body
-				else:
-					runs = numpy.zeros(len(self._runs[g]), dtype=_RUN)
-					for r, run in enumerate(self._runs[g]):
-						runs[r] = tuple(run)
-					live = numpy.concatenate(self._live[g]) if self._live[g] else \
-						numpy.zeros(0, dtype=_LIVE)
-					live = live[numpy.argsort(live['tile'], kind='stable')]
-					stream = zlib.compress(b''.join(live[field].tobytes() for field
-						in _LIVE_FIELDS), 6)
-					body = runs.tobytes() + struct.pack('<II', len(live), len(stream)) \
-						+ stream
-					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
-				return record + self._summary_record(g)
-
-			# Each group's record deflates its live tiles and summary, which
-			# for thousands of groups is seconds on one thread.
-			if self._pool is None:
-				records = [record_of(g) for g in range(len(self._groups))]
-			else:
-				records = list(self._pool.map(record_of, range(len(self._groups))))
 			directory = numpy.zeros(len(self._groups), dtype='<u8')
 			position = index_offset + directory.nbytes
 			for g, record in enumerate(records):
@@ -2347,7 +2384,8 @@ class FigWigWriter:
 			header['magic'] = _FIGWIG_MAGIC
 			header['version'] = _VERSION
 			header['flags'] = _FLAG_TRACKS if self.order == 'tracks' else 0
-			header['optional'] = _OPTIONAL_ZOOMS
+			header['optional'] = _OPTIONAL_ZOOMS | (
+				_OPTIONAL_SUMMARY_INDEX if index_size else 0)
 			header['tile'] = self.tile
 			header['codec'] = _CODEC_NONE if self.level == 0 else _CODEC_ZLIB
 			header['level'] = self.level
@@ -2363,6 +2401,10 @@ class FigWigWriter:
 			header['metadata_length'] = len(metadata)
 			header['length'] = length
 			header['header_crc'] = _header_crc(header.tobytes())
+			if index_size:
+				self._file.seek(index_at)
+				self._file.write(self._summary_index.serialize(index_at, directory,
+					header.tobytes()))
 			if self._length is not None:
 				# The header is the one write over the file as it was, so
 				# everything it points to is on disk before it.
@@ -2377,6 +2419,7 @@ class FigWigWriter:
 			if self._partial is not None:
 				os.replace(self._partial, self.path)
 				self._partial = None
+			self._summary_index = None
 		finally:
 			self._abandon()
 
@@ -2704,6 +2747,7 @@ class FigWigReader:
 		self._summary_at = [None] * n_groups
 		self._zoom_levels = [None] * n_groups
 		self._zoom_factors = None
+		self._summary_restart = None
 		self._runs = [None] * n_groups
 		self._index_lock = threading.Lock()
 		self._pool = None
@@ -2745,6 +2789,7 @@ class FigWigReader:
 		state['_index'] = [None] * len(self._index)
 		state['_summary_at'] = [None] * len(self._index)
 		state['_zoom_levels'] = [None] * len(self._index)
+		state['_summary_restart'] = None
 		state['_runs'] = [None] * len(self._index)
 		state['_pool'] = None
 		state.pop('_pinned', None)
@@ -2752,6 +2797,7 @@ class FigWigReader:
 
 	def __setstate__(self, state):
 		self.__dict__.update(state)
+		self._summary_restart = None
 		self._index_lock = threading.Lock()
 
 	def _check_file(self):
@@ -3056,6 +3102,82 @@ class FigWigReader:
 		self._zoom_levels[g] = levels
 		return levels
 
+	def _summary_parts(self, g, level, ranges, total):
+		"""Yield a group's stored sums for bin ranges, or its ordinary full level.
+
+		Whole-genome reads keep the legacy whole-stream checks. A valid
+		accelerator locates other reads without inflating the raw index or
+		unrequested zoom levels. The caller has checked the file identity.
+		"""
+
+		if self._optional & _OPTIONAL_SUMMARY_INDEX and ranges != [(0, total)] \
+				and self._summary_restart is not False:
+			fd = _open_read(self.path)
+			try:
+				def read(offset, size):
+					if not 128 <= offset <= self._file_size - size or size < 0:
+						raise SummaryIndexError('The summary restart index reads outside the file.')
+					data = _pread(fd, size, offset)
+					if len(data) != size:
+						raise SummaryIndexError('The summary restart index is truncated.')
+					return data
+
+				if self._summary_restart is None:
+					index = SummaryIndexReader.open(read, self._metadata.get(
+						_SUMMARY_INDEX_KEY), self._identity[2], self._tables_at,
+						self._directory, [len(group) for group in self._groups],
+						(self._lengths + self.tile - 1) // self.tile, self.order)
+					with self._index_lock:
+						if self._summary_restart is None:
+							self._summary_restart = index if index is not None else False
+				index = self._summary_restart
+				if index is not False:
+					levels = index.levels(read, g)
+					if level < len(levels) and levels[level].size:
+						yield from index.rows(read, g, level, ranges)
+						return
+			finally:
+				os.close(fd)
+		if level == 0:
+			summary = self._tile_sums_of(g)
+		else:
+			levels = self._zoom_levels_of(g)
+			summary = None if len(levels) < level else levels[level - 1][1:]
+		if summary is None:
+			raise ValueError("{} keeps no {} of the group of {!r}; it was "
+				"written with more tracks than the summaries hold{}.".format(
+				self.path, "summary" if level == 0 else "zoom level {}".format(
+				level), self.tracks[int(self._groups[g][0])]['name'], "" if level
+				== 0 else ", or with fewer zoom levels"))
+		yield summary
+
+	def _summary_bins(self, ids, level, ranges, total):
+		"""Dense requested bins in caller order; no genome-sized intermediate."""
+
+		lengths = [b - a for a, b in ranges]
+		width = sum(lengths)
+		if len(ids) * width * (8 if level else 4) > _MAX_DENSE_BYTES:
+			raise ValueError('The requested tile sums exceed the dense allocation limit.')
+		out = numpy.zeros((len(ids), width), dtype=numpy.float64 if level else numpy.float32)
+		wanted = _summary_ranges(ranges)
+		positions = numpy.concatenate([[0], numpy.cumsum(lengths)])
+		parts = sorted((a, b, int(at)) for (a, b), at in zip(ranges, positions))
+		firsts = numpy.array([a for a, _, _ in parts])
+		ends = numpy.maximum.accumulate([b for _, b, _ in parts])
+		for g in numpy.unique(self._group_of[ids]).tolist():
+			channels = numpy.flatnonzero(self._group_of[ids] == g)
+			slots = self._slot_of[ids[channels]]
+			for bins, sums in self._summary_parts(g, level, wanted, total):
+				if not len(bins):
+					continue
+				lo = numpy.searchsorted(ends, bins[0], side='right')
+				hi = numpy.searchsorted(firsts, bins[-1], side='right')
+				for first, end, at in parts[lo:hi]:
+					a, b = numpy.searchsorted(bins, [first, end])
+					out[numpy.ix_(channels, bins[a:b].astype(numpy.int64) - first + at)] = \
+						sums[a:b, slots].T
+		return out
+
 	def tile_sums(self, tracks: str | int | list | None = None, chroms: str |
 		list[str] | None = None, level: int = 0) -> numpy.ndarray:
 		"""Each track's sum over every tile of the genome, or over every bin
@@ -3066,6 +3188,11 @@ class FigWigReader:
 		genome-wide plot, a per-chromosome total or a coarser binning by a
 		reshape; it stands in for a bigWig's zoom levels. The file keeps the
 		sums when every track's take at most 256 MB together.
+
+		When the file keeps a regional summary index, selected chromosomes
+		use its bounded pages and restart fragments automatically. Broad
+		reads use complete streams. The output contains only the requested
+		chromosomes, in their given order, with no genome-sized temporary.
 
 		Parameters
 		----------
@@ -3114,34 +3241,15 @@ class FigWigReader:
 
 		if level == 0:
 			offsets, n_bins = self._tile_offsets, self._n_tiles
-			out = numpy.zeros((len(ids), n_bins), dtype=numpy.float32)
 		else:
 			offsets, n_bins = _zoom_grid(self._lengths, self.tile, 4 ** level)
-			out = numpy.zeros((len(ids), n_bins), dtype=numpy.float64)
-		for g in numpy.unique(self._group_of[ids]).tolist():
-			if level == 0:
-				summary = self._tile_sums_of(g)
-			else:
-				levels = self._zoom_levels_of(g)
-				summary = None if len(levels) < level else levels[level - 1][1:]
-			if summary is None:
-				raise ValueError("{} keeps no {} of the group of {!r}; it was "
-					"written with more tracks than the summaries hold{}.".format(
-					self.path, "summary" if level == 0 else "zoom level {}".format(
-					level), self.tracks[int(self._groups[g][0])]['name'], "" if level
-					== 0 else ", or with fewer zoom levels"))
-			bins, sums = summary
-			channels = numpy.flatnonzero(self._group_of[ids] == g)
-			out[numpy.ix_(channels, bins)] = sums[:, self._slot_of[ids[
-				channels]]].T
-
-		pieces = []
+		ranges = []
 		span = self.tile * 4 ** level
 		for name in names:
 			tid = self._tids[name]
 			first = int(offsets[tid])
-			pieces.append(out[:, first:first + -(-int(self._lengths[tid]) // span)])
-		out = numpy.concatenate(pieces, axis=1)
+			ranges.append((first, first + -(-int(self._lengths[tid]) // span)))
+		out = self._summary_bins(ids, level, ranges, n_bins)
 		return out[0] if single else out
 
 	def _read_track_index(self, t):
@@ -3497,27 +3605,37 @@ class FigWigReader:
 
 		whole = (last > first) & (starts >= 0) & (ends <= lengths)
 		interior = numpy.zeros((len(starts), len(ids)), dtype=numpy.int64)
-		wanted = numpy.unique(codes[whole]).tolist()
-		if len(wanted) == 0:
+		if not whole.any():
 			return None
-		# Every tile at once: each call inflates every group's summary whole.
+		n_jobs = _check_n_jobs(n_jobs)
+		self._check_file()
+		offsets = self._tile_offsets[numpy.array([self._tids[name] for name in names])][codes]
+		lo, hi = offsets + first, offsets + last
+		ranges = _summary_ranges(zip(lo[whole], hi[whole]))
+		# Read the union, including each whole tile once, without the gaps
+		# between distant intervals. Ordinary files retain the full-level path.
 		try:
-			every = self.tile_sums(ids)
+			every = self._summary_bins(ids, 0, ranges, self._n_tiles)
+		except SummaryIndexError:
+			raise
 		except ValueError:
 			return None
-		for c in wanted:
-			at = int(self._tile_offsets[self._tids[names[c]]])
-			sums = every[:, at:at - (-int(self.chrom_sizes[names[c]]) // tile)]
-			# Tiles a sum of 2**24 or more could have rounded in.
-			rounded = numpy.concatenate([[0], numpy.cumsum((numpy.abs(sums) >=
-				2.0 ** 24).any(axis=0))])
-			totals = numpy.zeros((len(ids), sums.shape[1] + 1), dtype=numpy.int64)
-			numpy.cumsum(sums.astype(numpy.int64), axis=1, out=totals[:, 1:])
-			rows = numpy.flatnonzero(whole & (codes == c))
-			kept = rounded[last[rows]] == rounded[first[rows]]
-			whole[rows[~kept]] = False
-			rows = rows[kept]
-			interior[rows] = (totals[:, last[rows]] - totals[:, first[rows]]).T
+		begins = numpy.array([a for a, _ in ranges])
+		packed = numpy.concatenate([[0], numpy.cumsum([b - a for a, b in ranges])])
+		rows = numpy.flatnonzero(whole)
+		parts = numpy.searchsorted(begins, lo[rows], side='right') - 1
+		left = packed[parts] + lo[rows] - begins[parts]
+		right = left + hi[rows] - lo[rows]
+		# Tiles a sum of 2**24 or more could have rounded in. Keep the
+		# existing exact-integer guard, falling back for just those intervals.
+		rounded = numpy.concatenate([[0], numpy.cumsum((numpy.abs(every) >=
+			2.0 ** 24).any(axis=0))])
+		kept = rounded[right] == rounded[left]
+		whole[rows[~kept]] = False
+		rows, left, right = rows[kept], left[kept], right[kept]
+		totals = numpy.zeros((len(ids), every.shape[1] + 1), dtype=numpy.int64)
+		numpy.cumsum(every.astype(numpy.int64), axis=1, out=totals[:, 1:])
+		interior[rows] = (totals[:, right] - totals[:, left]).T
 		if not whole.any():
 			return None
 
@@ -3532,14 +3650,13 @@ class FigWigReader:
 			starts[rest]])
 		piece_ends = numpy.concatenate([first[heads] * tile, ends[tails],
 			ends[rest]])
-		if len(owner) == 0:
-			return None
-		width = max(int((piece_ends - piece_starts).max()), 1)
-		piece_chroms = numpy.array(names)[codes[owner]]
-		pieces = self._read(piece_chroms, piece_starts, width, tracks, None,
-			numpy.float64, n_jobs, False, None, width, piece_ends, nan)[..., 0]
 		total = interior.astype(numpy.float64)
-		numpy.add.at(total, owner, pieces.reshape(len(owner), len(ids)))
+		if len(owner):
+			width = max(int((piece_ends - piece_starts).max()), 1)
+			piece_chroms = numpy.array(names)[codes[owner]]
+			pieces = self._read(piece_chroms, piece_starts, width, tracks, None,
+				numpy.float64, n_jobs, False, None, width, piece_ends, nan)[..., 0]
+			numpy.add.at(total, owner, pieces.reshape(len(owner), len(ids)))
 
 		dtype = self._dtype(ids, dtype, True)
 		if dtype.kind in 'iu':
@@ -4665,7 +4782,7 @@ def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,
 	genome: str | None = None, attributes: dict | None = None,
 	tile: int = _DEFAULT_TILE, groups: int | list = _DEFAULT_GROUPS,
 	level: int | None = None, engine: str = 'auto', n_jobs: int = 8,
-	order: str = 'positions', zooms: int = 0):
+	order: str = 'positions', zooms: int = 0, summary_index: bool = False):
 	"""Write the values of windows, or of intervals, for every track to one
 	figwig file.
 
@@ -4732,9 +4849,14 @@ def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,
 
 	order: str, optional
 		'positions' or 'tracks'; see `FigWigWriter`. Default is 'positions'.
+
+	summary_index: bool, optional
+		Write the experimental regional summary index; see `FigWigWriter`.
+		Default is False.
 	"""
 
 	with FigWigWriter(path, chrom_sizes, tracks, genome=genome,
 			attributes=attributes, tile=tile, groups=groups, level=level,
-			engine=engine, n_jobs=n_jobs, order=order, zooms=zooms) as writer:
+			engine=engine, n_jobs=n_jobs, order=order, zooms=zooms,
+			summary_index=summary_index) as writer:
 		writer.write(chroms, starts, values, ends=ends)

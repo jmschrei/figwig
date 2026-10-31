@@ -34,9 +34,19 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 | `labels=` one int per track read, -1 skips | `(n, labels, width)` sums: pseudobulks in the read |
 | `bins=` a divisor of `width` | `(n, tracks, width // bins)` sums; `bins=width` is each window's total |
 | `sums(chroms, starts, ends)` | `(n, tracks)` totals over intervals of any lengths |
-| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64 |
+| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no raw chunk decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64 |
 | `read_entries(tracks, chroms)` | every nonzero base of tracks over chromosomes, `SparseEntries` |
 | `channels="channel", items="read"` on `read`, `bins=` and `sums` | `(n, items, channels, width)`, the tracks arranged by two attributes, each item needing every channel once |
+
+Files written with `summary_index=True` use the optional index automatically
+for selected-chromosome `tile_sums` and exact integer `sums`. Distant intervals
+read their union, with raw boundary pieces; integer summaries are used only
+below the existing 2**24/2**53 exactness limits. Whole-genome reads keep complete
+streams; float sums, general binned reads and NaN counting keep raw semantics.
+Only requested summary bins are allocated, with the given selection order and
+duplicates preserved. Missing/unknown/stale indices use ordinary v1 reads;
+recognized corrupt indices raise. The Python reader accepts local files, not
+HTTP URLs.
 
 - Mixed tracks come back in the narrowest type holding every one exactly
   (float32 for uint8 + float32, float64 for uint32 + float32). `dtype=`

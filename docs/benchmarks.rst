@@ -767,6 +767,53 @@ fold change, peaks                 0.33 s      0.070 s
 fold change, gene bodies           1.55 s      0.26 s
 =================================  ==========  ==========
 
+Regional stored summaries
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``benchmarks/compare_summaries.py`` compares files written with and without the
+optional :doc:`summary index <summary_restarts>`, on the same inputs in both
+storage orders. Its defaults are 8 and 48 tracks of deterministic sparse integer
+counts and float32 signals, five repetitions, and one thread. It reads one or
+every track: a selected chromosome's base and zoom summaries, nearby and distant
+interval sums (aligned and with raw boundary pieces), whole-genome summaries,
+raw windows and a sequence of repeated queries, pans and resolution changes.
+
+.. code-block:: bash
+
+    python benchmarks/compare_summaries.py \
+        --workdir benchmarks/results/summaries --repeats 5
+
+Real source tracks can be supplied as repeated ``--bigwig`` arguments. As in
+``compare_formats.py``, tracks beyond the supplied sources are cyclic shifts
+within each source chromosome, and off/on files receive identical values.
+``--dtype int32`` requires exact nonnegative integer counts; ``float32`` accepts
+signals. For example, using the reading benchmark's ATAC-seq input:
+
+.. code-block:: bash
+
+    python benchmarks/compare_summaries.py --bigwig ENCFF830RWF.bigWig \
+        --dtype float32 --tracks 8 --chroms chr1 chr21 chr22 --tile 1024 \
+        --repeats 3 --workdir benchmarks/results/encode-summaries
+
+Each file/mode/repetition runs in a fresh process after imports, kernel warmup
+and a linear file read. The OS page cache is warm, rather than disk-cold; each
+query opens a fresh reader, except that navigation keeps one across its steps.
+Configurations alternate and rotate. Output hashes must agree across layouts,
+flag settings and a same-indexed-file control that ignores the optional index.
+``--baseline-reader`` also accepts a previous revision of ``figwig.py``;
+``--baseline-revision`` checks its bytes against git. That module uses the
+snapshotted current helper kernels, a choice recorded in the manifest.
+
+The script keeps individual JSONL samples, medians and ranges, exact source and
+input hashes, source snapshots, environment and commands under ignored
+``benchmarks/results/``. Writer time includes open/write/close; a separate
+pipeline time includes source streaming and input hashing. Logical read calls,
+bytes and decoded bytes are counted in a separate, untimed pass and are not
+physical disk I/O. Peak RSS is the worker's cumulative high water, including
+all workload warmups, rather than an individual query's allocation. Run one
+``--workloads`` and one ``--selections`` setting for an isolated memory comparison.
+These local-file measurements are separate from HTTP latency measurements.
+
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

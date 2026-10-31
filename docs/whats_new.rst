@@ -12,6 +12,10 @@ Unreleased
 figwig files
 ------------
 
+	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` to write an experimental optional index and restart points for readers that fetch regional summaries. Existing v1 readers still read the same raw values and summary payloads. The flag defaults to ``False`` and is unavailable with ``append=True``; normal append invalidates the accelerator while retaining foreign metadata.
+
+	- ``FigWigReader`` uses the optional summary index automatically for selected-chromosome ``tile_sums`` and exact integer interval ``sums``, reading only the needed windows without a genome-sized summary array. Distant intervals read their union, wholly aligned exact intervals need no raw chunks, and whole-genome reads retain complete-stream checks. Ordinary and stale-index files keep the existing fallback; precision and NaN semantics are unchanged.
+
 	- ``sums`` over a track stored as runs, such as the coverage ``figwig bam2fw -c`` writes, only decodes the changes of value before each interval, adds a run of integers once rather than base by base, and takes the tiles an interval covers whole from the file's tile sums when the track holds integers whose sums those keep exactly. On one thread of the benchmarks' server, the coverage of ENCODE ATAC-seq BAM ENCFF877LRY sums over 78,733 gene bodies in 0.47 s, where it took 7.9 s, and over 100,548 peaks in 0.41 s, where it took 1.6 s; a fold-change track over the gene bodies in 1.55 s, where it took 6.8 s; 48 count tracks over the gene bodies in 6.8 s, where they took 14.4 s. The sums are the same to the bit.
 
 	- ``write_sparse``, and so ``figwig reorder``, stores a tile as a dense or runs chunk when either takes fewer bytes than a sparse one, as ``write`` does. Reordering the ATAC-seq coverage file gives the same 79 MB of runs chunks, where it gave 119 MB of sparse chunks. Scattered entries, such as cells' cut sites, are stored as before: the 10,246-cell PBMC file is the same to the byte.
