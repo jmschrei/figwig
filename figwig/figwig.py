@@ -1958,12 +1958,14 @@ class FigWigWriter:
 		"""Hand batches of entries from `_write_group_entries` to the pool in
 		order, packing consecutive ones into a task until it holds a share
 		of the call's entries, since a task per small group cost this thread
-		its dispatch and bookkeeping. Empties `pieces`."""
+		its dispatch and bookkeeping. Without a pool each batch is a task of
+		its own, run here, where packing would only copy their bytes.
+		Empties `pieces`."""
 
 		if len(pieces) == 0:
 			return
 		total = sum(len(piece[3]) for piece in pieces)
-		share = total if self._pool is None else max(1, total // (
+		share = 1 if self._pool is None else max(1, total // (
 			_BATCHES_PER_THREAD * self.n_jobs))
 		task, size = [], 0
 		for k, piece in enumerate(pieces):
@@ -2323,21 +2325,25 @@ class FigWigWriter:
 		first = numpy.arange(0, cut + 1, _BLOCK_ENTRIES)
 		if first[-1] != cut:
 			first = numpy.append(first, cut)
-		self._block_jobs.append((t, tid, positions[:cut], values[:cut], first))
+		job = (t, tid, positions[:cut], values[:cut], first)
+		if self._pool is None:
+			self._inflight.append((self._blocks_task(*job), t, 'blocks'))
+		else:
+			self._block_jobs.append(job)
 
 	def _submit_blocks(self):
 		"""Hand the tracks' blocks from `_flush_track` to the pool in order,
 		packing consecutive tracks' into a task until it holds a share of
 		their entries, since a task per track and chromosome cost this
-		thread its dispatch and bookkeeping."""
+		thread its dispatch and bookkeeping. Without a pool `_flush_track`
+		encodes them itself."""
 
 		jobs = self._block_jobs
 		if len(jobs) == 0:
 			return
 		self._block_jobs = []
 		total = sum(len(job[2]) for job in jobs)
-		share = total if self._pool is None else max(1, total // (
-			_BATCHES_PER_THREAD * self.n_jobs))
+		share = max(1, total // (_BATCHES_PER_THREAD * self.n_jobs))
 		task, size = [], 0
 		for k, job in enumerate(jobs):
 			task.append(job)
