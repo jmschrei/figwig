@@ -160,6 +160,10 @@ _MERGE_RUNS = 8
 _MERGE_REACH = 4096
 _MERGE_FAR = 16
 
+# A read's planner cuts a group's chunks into batches in Python up to this
+# many chunks, where the kernel's call costs more than the loop.
+_PLAN_LOOP_CHUNKS = 8
+
 # The entries of a sparse read from which its counting sort takes another
 # thread, and the bytes per entry its threads' rows of buckets past the
 # first may take.
@@ -4439,10 +4443,14 @@ class FigWigReader:
 		tasks = []
 		continues = _continuing_windows(rows, inverse, len(unique)) if bins > 1 \
 			else numpy.zeros(0, dtype=bool)
-		firsts, totals, cut_inside = _batch_cuts(bounds, live.astype(numpy.int64),
-			int(cap), int(most), continues, bins > 1)
-		for a, b, total_bytes in zip(firsts[:-1].tolist(), firsts[1:].tolist(),
-				totals.tolist()):
+		if len(unique) <= _PLAN_LOOP_CHUNKS:
+			batches, cut_inside = _batch_cuts_loop(bounds, live, cap, most,
+				continues, bins > 1)
+		else:
+			firsts, totals, cut_inside = _batch_cuts(bounds, live.astype(
+				numpy.int64), int(cap), int(most), continues, bins > 1)
+			batches = zip(firsts[:-1].tolist(), firsts[1:].tolist(), totals.tolist())
+		for a, b, total_bytes in batches:
 			p0, p1 = int(first[a]), int(first[b]) if b < len(unique) else total
 			chunk = numpy.where(live[inverse[p0:p1]], inverse[p0:p1] - a, -1)
 			tasks.append(_Task(self, g, slots, unique[a:b][live[a:b]],
@@ -4688,6 +4696,32 @@ def _split_tasks(tasks, n_threads, by_window=False):
 		out.extend(pieces)
 		cut_inside |= cut
 	return out, cut_inside
+
+
+def _batch_cuts_loop(bounds, live, cap, most, continues, binned):
+	"""`_batch_cuts` in Python, for a group of a few chunks: a list of each
+	batch's (first chunk, end, bytes), and whether a window was cut inside a
+	batch."""
+
+	batches, cut_inside, a = [], False, 0
+	while a < len(bounds):
+		total_bytes, n_live, b = 0, 0, a
+		while b < len(bounds) and (b == a or (total_bytes + bounds[b] <= cap and
+				n_live < most)):
+			total_bytes += int(bounds[b])
+			n_live += int(live[b])
+			b += 1
+		if binned:
+			while b < len(bounds) and continues[b - 1]:
+				if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+					cut_inside = True
+					break
+				total_bytes += int(bounds[b])
+				n_live += int(live[b])
+				b += 1
+		batches.append((a, b, total_bytes))
+		a = b
+	return batches, cut_inside
 
 
 def _compact(chunk, live):

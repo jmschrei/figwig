@@ -1358,8 +1358,35 @@ def test_batch_cuts_are_the_planners_loop():
 				continues if binned else numpy.zeros(0, dtype=bool), binned)
 			expected = loop(bounds, live, cap, most, continues, binned)
 			assert (firsts.tolist(), totals.tolist(), bool(cut_inside)) == expected
+			batches, cut = figwig.figwig._batch_cuts_loop(bounds, live, cap, most,
+				continues if binned else numpy.zeros(0, dtype=bool), binned)
+			assert [a for a, _, _ in batches] == expected[0][:-1]
+			assert ([0] + [b for _, b, _ in batches], [t for _, _, t in batches],
+				cut) == expected
 			seen.add(bool(cut_inside))
 	assert seen == {False, True}
+
+
+@pytest.mark.parametrize('bins', [None, 7])
+def test_reads_plan_alike_by_loop_and_kernel(fw, read_batching, monkeypatch,
+	bins):
+	"""A read whose groups' chunks are cut into batches by the planner's
+	loop or by its kernel gives the same values, dense, sparse or binned."""
+
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(31)
+	chroms, starts = random_windows(rng, 120, 147)
+	found = []
+	for limit in (0, 10 ** 9):
+		monkeypatch.setattr(figwig.figwig, '_PLAN_LOOP_CHUNKS', limit)
+		dense = reader.read(chroms, starts, 147, bins=bins, n_jobs=3)
+		listed = reader.read(chroms, starts, 147, sparse=True, n_jobs=3)
+		found.append((dense, listed))
+	(a, s), (b, t) = found
+	numpy.testing.assert_array_equal(a, b)
+	for x, y in zip((s.rows, s.channels, s.offsets, s.values), (t.rows,
+			t.channels, t.offsets, t.values)):
+		numpy.testing.assert_array_equal(x, y)
 
 
 def test_labels_sum_tracks(fw, ref, read_batching):
