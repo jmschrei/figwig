@@ -23,7 +23,7 @@ A multithreaded bigWig reader and writer, into and out of numpy, and the
 figwig file (`.fw`): many tracks in one file, a JSON record per track.
 Depends on numpy and numba only; docs at <https://figwig.readthedocs.io>.
 Public API: `BigWigReader`/`read_bigwig`, `BigWigWriter`/`write_bigwig`,
-`FigWigReader`/`read_figwig`, `FigWigWriter`/`write_figwig`; commands
+`FigWigReader`/`read_figwig`, `is_figwig`, `FigWigWriter`/`write_figwig`; commands
 `figwig bam2bw`, `bam2fw`, `bw2fw`, `fw2bw`, `reorder`, `merge`, `info`.
 Read signatures from the code; the files here hold what the code does not
 say.
