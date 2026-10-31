@@ -26,6 +26,8 @@ Converters and commands
 Documentation
 -------------
 
+	- The bundled Claude Code skill has a reference for Hi-C contact matrices, ``references/hi-c.md``: one track per bin with chromosomes measured in bins, since in bp a tile stops at 65,536 bases and a bp file took twice the bytes; both triangles and a ``diagonal`` track, so that ``labels=`` over rows and ``bins=`` over columns read a coarser resolution in one call with the diagonal counted once, as cooler counts it, where summing both triangles counts it twice; writing cooler's row-major pixels by the column's chromosome, after summing the pixels published ``.mcool`` files repeat, which ``write_sparse`` refuses; single-cell layouts; and the limits Hi-C sizes reach (``tile_sums``, track counts, a pseudo-chromosome's length). The reading reference also says that ``bins=`` sums count bases past a chromosome's end as 0, where the general rule read as NaN.
+
 	- The benchmarks page's count-track tables have a row for zarrs 0.2.3, the Rust codec pipeline for zarr-python, on the same arrays as the zarr row: it writes them 1.1 to 3.5 times faster than zarr-python and reads one window per call at zarr-python's one-thread speed, without gaining from the Python threads, with its chunk concurrency pinned to one chunk (its default read twice as slowly on these calls).
 
 
