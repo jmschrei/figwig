@@ -780,7 +780,41 @@ or all tracks.
 .. code-block:: bash
 
     python benchmarks/compare_summaries.py \
-        --workdir benchmarks/results/summaries --repeats 5
+        --tracks 8 48 --dtype int32 float32 --tile 16384 --tiles 65536 \
+        --threads 1 --repeats 3 --selections all \
+        --workloads chrom_base sums_local_aligned whole_base raw_windows \
+        --workdir benchmarks/results/summary-index-m5-32k
+
+**Apple M5 example.** At revision
+`4eb3ecd <https://github.com/tuner/figwig/commit/4eb3ecdd252fb17b134ed034f78b0aaff07d01a7>`_,
+with Python 3.12.13, NumPy 2.5.4, numba 0.68.0, deflate 0.9.0 and zlib 1.2.12,
+the command above gave these median milliseconds over three repetitions for
+all 48 int32 tracks. The seeded synthetic genome has three chromosomes; the
+selected chromosome has 2,048 of 100,352 tiles. Times include fresh reader
+construction with a warm OS page cache. Columns show ordinary → indexed:
+
+.. list-table::
+    :header-rows: 1
+
+    * - Query
+      - Position order, ms
+      - Track order, ms
+    * - Selected-chromosome ``tile_sums``
+      - 29.54 → 2.12
+      - 41.80 → 4.96
+    * - Four nearby aligned integer ``sums``
+      - 29.17 → 0.96
+      - 40.65 → 4.57
+    * - Whole-genome ``tile_sums``
+      - 38.83 → 43.45
+      - 52.66 → 59.22
+    * - Eight raw 2,048-base windows
+      - 9.40 → 9.37
+      - 31.16 → 30.23
+
+All 336 samples matched across layouts and index settings, including the
+same-file index-ignored control. Whole-genome reads still inflate complete
+streams and can be slower with restart boundaries.
 
 Supply real inputs with repeated ``--bigwig`` arguments. Additional tracks are
 cyclic shifts within source chromosomes; on/off files receive identical values.
@@ -801,7 +835,8 @@ control that ignores the index. ``--baseline-reader`` accepts an older
 shares current helper kernels, recorded in the manifest.
 
 Raw samples, medians, ranges, source/input hashes, source snapshots, environment
-and commands go under ignored ``benchmarks/results/``. Writer time includes
+and commands go under ignored ``benchmarks/results/``; choose an empty workdir
+for each run. Writer time includes
 open/write/close; pipeline time also includes source streaming and hashing.
 Logical read/decode counters are collected separately, untimed, and do not
 measure physical I/O. Peak RSS is the worker's cumulative high water, including
