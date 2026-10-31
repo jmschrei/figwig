@@ -34,7 +34,7 @@ and messages, with faster readers.
 | Write 15.9 million per-base counts | **0.18 s** on 8 threads | 4.20 s, pyBigWig |
 | Write 21.2 million intervals, with zoom levels | **0.55 s** on 8 threads | 5.47 s, pybigtools |
 | Convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs | **4.65 s**, 910 MB peak, at `-p 2` | 58.48 s, 3,039 MB peak, bam2bw 0.5.1 |
-| The same BAM's per-base coverage, like deepTools | **3.4 s** at `-p 8` | 14.9 s on 8 processes, `bamCoverage --binSize 1`, the same value at every base |
+| The same BAM's per-base coverage, like deepTools | **1.6 s** at `-p 8` | 14.9 s on 8 processes, `bamCoverage --binSize 1`, the same value at every base |
 | Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.085 s** on 8 threads, **0.044 s** on 32, from one figwig file | 0.27 s and 0.11 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
 | A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
 | 10 pseudobulks of 10,246 cells over 8,192 windows | **0.30 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |

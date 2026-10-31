@@ -603,8 +603,12 @@ present, or an integer of an integer track lies beyond 2**24, which ``f4``
 would round. A reader must accept any kind and any element type that
 holds the values, whatever a writer's policy.
 
-A tile written through ``write_sparse`` is stored sparse or as a matrix,
-never dense or as runs, since its bases arrive as entries.
+A tile written through ``write_sparse`` is stored as the kind ``write``
+would choose for the rows its entries fill, but for how a runs chunk is
+weighed: ``write`` counts the changes of the values it is given, before
+they are rounded as the track keeps them, and each NaN base as one;
+``write_sparse`` counts the changes the chunk would hold, so it may choose
+runs where ``write`` does not.
 
 Blocks
 ------

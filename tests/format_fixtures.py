@@ -4,7 +4,8 @@
 """The files tests/test_format.py and tests/test_kaitai.py read: small
 figwig files written by `FigWigWriter` so that every chunk kind, every
 element type, both orders, both codecs, zoom levels, chromosome edges,
-several runs per group, an append and a merge are among them."""
+several runs per group, an append, a merge and chunks written from entries
+are among them."""
 
 import numpy
 
@@ -117,6 +118,24 @@ def write_all(root):
 		v[0, 2, ::3] = 1                                 # a block of the one code
 		writer.write('chrA', [0], v)
 	paths['blocks'] = root / 'blocks.fw'
+
+	# Entries dense enough that write_sparse stores dense and runs chunks.
+	tracks = ['steps', 'random', {'name': 'gaps', 'dtype': 'float32'},
+		'scattered']
+	with FigWigWriter(root / 'entries.fw', CHROMS, tracks, tile=TILE,
+			groups=[[t] for t in ['steps', 'random', 'gaps', 'scattered']], level=6,
+			zooms=1) as writer:
+		rng = numpy.random.default_rng(2)
+		for chrom, length in CHROMS.items():
+			v = numpy.zeros((4, length))
+			v[0] = numpy.repeat(rng.integers(0, 4, -(-length // 8)), 8)[:length]
+			v[1] = rng.integers(1, 200, length)
+			v[2] = numpy.repeat(rng.integers(0, 3, -(-length // 16)), 16)[:length]
+			v[2, 20:45] = numpy.nan
+			v[3, ::11] = 3
+			which, positions = numpy.nonzero(v)
+			writer.write_sparse(chrom, positions, which, v[which, positions])
+	paths['entries'] = root / 'entries.fw'
 	return paths
 
 

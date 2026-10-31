@@ -186,22 +186,86 @@ def _trim_counts(reads, chrom_sizes, unstranded, coverage=False):
 	return trimmed, discarded
 
 
+# The bases of a chromosome `_write_coverage` writes as one dense window: a
+# multiple of every tile.
+_COVERAGE_PIECE = 1 << 22
+
+# A piece with fewer runs than one per this many bases goes to the writer as
+# its runs, which cost it less there than every base of the window.
+_RUN_SPACING = 1024
+
+
 def _write_coverage(writer, names, strands, chrom_sizes, scale_factor,
 		read_depth):
 	"""Write one file's runs of coverage, strands['+'][chrom] = (starts,
-	ends, values), as intervals of the tracks `names`, each its own group,
-	scaled as `_write_counts` scales counts."""
+	ends, values), into the tracks `names`, each its own group, scaled as
+	`_write_counts` scales counts, through `_write_runs`."""
 
 	for name, key in zip(names, ('+', '-')):
-		for chrom, _ in chrom_sizes:
-			starts, ends, values = strands[key][chrom]
-			if len(starts) == 0:
-				continue
-			values = values.astype(numpy.float64)
-			values *= scale_factor
-			if read_depth is not None:
-				values /= read_depth
-			writer.write(chrom, starts, values[:, None], ends=ends, tracks=[name])
+		for chrom, length in chrom_sizes:
+			_write_runs(writer, name, chrom, length, *strands[key][chrom],
+				scale_factor, read_depth)
+
+
+def _write_runs(writer, name, chrom, length, starts, ends, values, scale_factor,
+		read_depth):
+	"""Write one chromosome's runs of coverage into track `name`. With
+	threads, each `_COVERAGE_PIECE` bases go in as one dense window, whose
+	whole tiles the writer encodes on its threads, where intervals are
+	encoded on this one; each stretch of pieces with fewer runs than one per
+	`_RUN_SPACING` bases, and on one thread every run, goes in as intervals
+	in one call, which costs less than every base of a window."""
+
+	if len(starts) == 0:
+		return
+	values = values.astype(numpy.float64)
+	values *= scale_factor
+	if read_depth is not None:
+		values /= read_depth
+	if writer.n_jobs == 1:
+		writer.write(chrom, starts, values[:, None], ends=ends, tracks=[name])
+		return
+
+	def put(a, b):
+		lo = numpy.searchsorted(ends, a, side='right')
+		hi = numpy.searchsorted(starts, b, side='left')
+		if hi > lo:
+			writer.write(chrom, numpy.maximum(starts[lo:hi], a), values[lo:hi,
+				None], ends=numpy.minimum(ends[lo:hi], b), tracks=[name])
+
+	span = None
+	first = starts[0] // _COVERAGE_PIECE * _COVERAGE_PIECE
+	for a in range(first, int(ends[-1]), _COVERAGE_PIECE):
+		b = min(a + _COVERAGE_PIECE, length)
+		lo = numpy.searchsorted(ends, a, side='right')
+		hi = numpy.searchsorted(starts, b, side='left')
+		if (hi - lo) * _RUN_SPACING < b - a:
+			span = (a if span is None else span[0], b)
+			continue
+		if span is not None:
+			put(*span)
+			span = None
+		writer.write(chrom, [a], _dense_runs(starts[lo:hi] - a, ends[lo:hi] - a,
+			values[lo:hi], b - a)[None, None], tracks=[name])
+	if span is not None:
+		put(*span)
+
+
+def _dense_runs(starts, ends, values, width):
+	"""The `width` bases of a piece holding sorted, disjoint runs, which
+	may run past either end of it: each run's value, 0 between runs."""
+
+	starts = numpy.clip(starts, 0, width)
+	ends = numpy.clip(ends, 0, width)
+	bounds = numpy.empty(2 * len(starts) + 1, dtype=numpy.int64)
+	bounds[0:-1:2] = starts
+	bounds[1:-1:2] = ends
+	bounds[-1] = width
+	fills = numpy.zeros(2 * len(starts), dtype=numpy.float64)
+	fills[0::2] = values
+	out = numpy.zeros(width, dtype=numpy.float64)
+	out[bounds[0]:] = numpy.repeat(fills, numpy.diff(bounds))
+	return out
 
 
 def _write_counts(writer, names, strands, chrom_sizes, scale_factor, read_depth):
@@ -491,6 +555,17 @@ def main(argv=None, prog='figwig bam2fw'):
 	if args.verbose:
 		import multiprocessing
 		tqdm.set_lock(multiprocessing.RLock())
+
+	# Coverage of large indexed, sorted BAM files on 8 cores or more is read
+	# region by region on every core and written a chromosome at a time; other
+	# files go through read_files.
+	if args.coverage:
+		from ._indexed import _bam2fw_coverage
+		try:
+			if _bam2fw_coverage(args, chrom_sizes, cores, tracks, groups):
+				return
+		except (ValueError, TypeError, OSError) as e:
+			raise _exit(prog, e)
 
 	# pysam raises for a file that is not a BAM, or is cut short, as the
 	# scanners do for a bad fragments file: a message, not a traceback.

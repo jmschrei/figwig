@@ -3447,6 +3447,11 @@ class FigWigReader:
 				from ._cuda import _cupy
 				return _cupy().asarray(sums)
 			return sums
+		if device is None:
+			split = self._tile_split_sums(chroms, starts, ends, tracks, dtype,
+				n_jobs, nan)
+			if split is not None:
+				return split
 		width = int((ends - starts).max()) if len(starts) else 1
 		if device is not None:
 			from ._cuda import _read_on_device
@@ -3456,6 +3461,94 @@ class FigWigReader:
 		out = self._read(chroms, starts, max(width, 1), tracks, None, dtype,
 			n_jobs, False, None, max(width, 1), ends, nan)
 		return out[..., 0]
+
+	def _tile_split_sums(self, chroms, starts, ends, tracks, dtype, n_jobs,
+		nan):
+		"""`sums` of integer tracks with each whole tile inside an interval
+		taken from the file's tile sums, so that only the parts of tiles at
+		the interval's two ends are decoded. A tile sum is kept as float32
+		of the sum the writer took in float64, so it is used only below
+		2**24, where it is exact; the tracks' largest value times the longest
+		interval stays below 2**53, so every sum is exact and equal to the
+		one `_read` adds up base by base. Returns None where any of this
+		does not hold, or nothing spans a whole tile, for `_read` to sum
+		every interval whole."""
+
+		if nan not in ('propagate', 'skip') or len(starts) == 0:
+			return None
+		tile = self.tile
+		first = -(-starts // tile)
+		last = ends // tile
+		if not (last > first).any():
+			return None
+		ids, single = self._select(tracks)
+		if len(ids) == 0 or (self._dtype_codes[ids] >= _DTYPES.index('float32')
+				).any():
+			return None
+		names, codes = _chrom_codes(chroms, len(starts))
+		if any(name not in self._tids for name in names):
+			return None
+		lengths = numpy.array([self.chrom_sizes[name] for name in names],
+			dtype=numpy.int64)[codes]
+		peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]), numpy.abs(
+			self.stats['max'][ids])).max())
+		if peak * float((ends - starts).max()) >= 2.0 ** 53:
+			return None
+
+		whole = (last > first) & (starts >= 0) & (ends <= lengths)
+		interior = numpy.zeros((len(starts), len(ids)), dtype=numpy.int64)
+		wanted = numpy.unique(codes[whole]).tolist()
+		if len(wanted) == 0:
+			return None
+		# Every tile at once: each call inflates every group's summary whole.
+		try:
+			every = self.tile_sums(ids)
+		except ValueError:
+			return None
+		for c in wanted:
+			at = int(self._tile_offsets[self._tids[names[c]]])
+			sums = every[:, at:at - (-int(self.chrom_sizes[names[c]]) // tile)]
+			# Tiles a sum of 2**24 or more could have rounded in.
+			rounded = numpy.concatenate([[0], numpy.cumsum((numpy.abs(sums) >=
+				2.0 ** 24).any(axis=0))])
+			totals = numpy.zeros((len(ids), sums.shape[1] + 1), dtype=numpy.int64)
+			numpy.cumsum(sums.astype(numpy.int64), axis=1, out=totals[:, 1:])
+			rows = numpy.flatnonzero(whole & (codes == c))
+			kept = rounded[last[rows]] == rounded[first[rows]]
+			whole[rows[~kept]] = False
+			rows = rows[kept]
+			interior[rows] = (totals[:, last[rows]] - totals[:, first[rows]]).T
+		if not whole.any():
+			return None
+
+		# Each interval whole, or the parts before its first whole tile and
+		# after its last.
+		heads = whole & (first * tile > starts)
+		tails = whole & (ends > last * tile)
+		rest = ~whole
+		owner = numpy.concatenate([numpy.flatnonzero(heads), numpy.flatnonzero(
+			tails), numpy.flatnonzero(rest)])
+		piece_starts = numpy.concatenate([starts[heads], last[tails] * tile,
+			starts[rest]])
+		piece_ends = numpy.concatenate([first[heads] * tile, ends[tails],
+			ends[rest]])
+		if len(owner) == 0:
+			return None
+		width = max(int((piece_ends - piece_starts).max()), 1)
+		piece_chroms = numpy.array(names)[codes[owner]]
+		pieces = self._read(piece_chroms, piece_starts, width, tracks, None,
+			numpy.float64, n_jobs, False, None, width, piece_ends, nan)[..., 0]
+		total = interior.astype(numpy.float64)
+		numpy.add.at(total, owner, pieces.reshape(len(owner), len(ids)))
+
+		dtype = self._dtype(ids, dtype, True)
+		if dtype.kind in 'iu':
+			info = numpy.iinfo(dtype)
+			if (total < info.min).any() or (total > info.max).any():
+				raise ValueError("a sum lies outside what {} holds; read the "
+					"sums as a wider type.".format(dtype))
+		total = total.astype(dtype)
+		return total[:, 0] if single else total
 
 	def _paired_sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan):
 		"""`sums` with a track per interval: the intervals are sorted by
