@@ -9,6 +9,20 @@ arguments as `reader.read`. The byte layout is specified on the docs'
 `format` page, with a Kaitai Struct definition, for reading from another
 language.
 
+`is_figwig(path)` tells a figwig file from a bigWig by the magic number in
+its first four bytes, so code that takes either can pick its reader without
+guessing from the extension. It does not open the file as a reader: a file
+that starts like a figwig file but is damaged or of a later version is True
+here and raises in `FigWigReader`.
+
+```python
+from figwig import FigWigReader
+from figwig import is_figwig
+from figwig import BigWigReader
+
+reader = FigWigReader if is_figwig(path) else BigWigReader
+```
+
 ```python
 import numpy
 from figwig import FigWigReader

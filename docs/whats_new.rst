@@ -16,6 +16,8 @@ figwig files
 
 	- ``write_sparse``, and so ``figwig reorder``, stores a tile as a dense or runs chunk when either takes fewer bytes than a sparse one, as ``write`` does. Reordering the ATAC-seq coverage file gives the same 79 MB of runs chunks, where it gave 119 MB of sparse chunks. Scattered entries, such as cells' cut sites, are stored as before: the 10,246-cell PBMC file is the same to the byte.
 
+	- ``is_figwig(path)`` tells whether a path is a figwig file from the magic number in its first four bytes, without opening it as a reader, so that code taking either a figwig file or bigWigs can choose its reader: it is False for a bigWig, a missing path or a directory. Thanks @casblaauw!
+
 Converters and commands
 -----------------------
 
