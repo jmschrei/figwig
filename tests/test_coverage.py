@@ -360,6 +360,17 @@ def test_forged_metadata_is_refused(tmp_path, small):
 	refuses(save(tmp_path, 'garbage.fw', copy), "not a JSON document")
 
 
+@pytest.mark.parametrize('group', [2 ** 63, 2 ** 64, -2 ** 64])
+def test_forged_group_beyond_int64_is_refused(tmp_path, small, group):
+	data, header = load(small['positions'])
+	copy = bytearray(data)
+	document = metadata_of(copy, header)
+	document['tracks'][0]['group'] = group
+	put_metadata(copy, header, document)
+	seal(copy)
+	refuses(save(tmp_path, 'group.fw', copy), "missing its name, dtype or group")
+
+
 def test_forged_chromosome_table_is_refused(tmp_path, small):
 	data, header = load(small['positions'])
 	at = int(header['chroms'])

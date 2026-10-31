@@ -75,13 +75,22 @@ from ._figwig_kernels import _encode_blocks
 from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_entries
 from ._figwig_kernels import _encode_tiles
+from ._figwig_kernels import _entry_gather
+from ._figwig_kernels import _entry_keys
 from ._figwig_kernels import _inflate_chunks
+from ._figwig_kernels import _batch_cuts
+from ._figwig_kernels import _bucket_ascending
+from ._figwig_kernels import _bucket_counts
+from ._figwig_kernels import _bucket_scatter
+from ._figwig_kernels import _bucket_starts
 from ._figwig_kernels import _bucket_sort
 from ._figwig_kernels import _inflate_chunks_libdeflate
 from ._figwig_kernels import _pread_runs
 from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
+from ._figwig_kernels import _radix_counts
+from ._figwig_kernels import _radix_scatter
 from ._kernels import _libc_pread
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
@@ -138,6 +147,34 @@ _CHUNKS_PER_THREAD = 64
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
 _SCRATCH_BYTES = 1 << 28
+
+# The most bits a pass of write_sparse's radix sort takes from its keys, and
+# the entries from which its passes are cut among the pool's threads.
+_RADIX_BITS = 16
+_RADIX_PARALLEL = 1 << 18
+
+# write_sparse sorts its keys by numpy's merge sort, not the radix sort,
+# where they hold at most _MERGE_RUNS descents, or on one thread where at
+# most one in _MERGE_FAR is below the key _MERGE_REACH before it.
+_MERGE_RUNS = 8
+_MERGE_REACH = 4096
+_MERGE_FAR = 16
+
+# A read's planner cuts a group's chunks into batches in Python up to this
+# many chunks, where the kernel's call costs more than the loop.
+_PLAN_LOOP_CHUNKS = 8
+
+# The entries of a sparse read from which its counting sort takes another
+# thread, and the bytes per entry its threads' rows of buckets past the
+# first may take.
+_GATHER_PER_THREAD = 1 << 18
+_GATHER_ROW_BYTES = 1
+
+# read_entries reads chromosomes together while a sparse read's sort key of
+# window, track and offset stays below _SPARSE_KEYS, and its plan holds at
+# most _ENTRIES_PAIRS (tile, group) pairs or one chromosome's.
+_SPARSE_KEYS = 1 << 63
+_ENTRIES_PAIRS = 1 << 20
 
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
@@ -779,6 +816,7 @@ class FigWigWriter:
 
 		self.order = _check_order(order)
 		self.tracks = _check_tracks(tracks, empty_ok=True)
+		self._integer_tracks = None
 		if self.order == 'tracks':
 			self._groups = [numpy.array([i]) for i in range(len(self.tracks))]
 		else:
@@ -838,6 +876,7 @@ class FigWigWriter:
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
+		self._block_jobs = []
 		self._copies = True
 		self._sorted_entries = False
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
@@ -1002,7 +1041,7 @@ class FigWigWriter:
 		# A file appended to keeps its chunks where they are; another file's
 		# are copied whole, and its runs and blocks keep their layout, moved
 		# to where the copy landed.
-		self._write(len(self._inflight))
+		self._drain()
 		extents = None if first else self._copy_chunks(source)
 
 		n_groups, n_tracks = len(source._groups), len(source.tracks)
@@ -1062,6 +1101,7 @@ class FigWigWriter:
 			return new + own if first else own + new
 
 		self.tracks = splice(self.tracks, records)
+		self._integer_tracks = None
 		self._track_ids = {track['name']: i for i, track in enumerate(self.tracks)}
 		self._stats = numpy.concatenate([stats, self._stats] if first else [
 			self._stats, stats])
@@ -1355,8 +1395,7 @@ class FigWigWriter:
 						ends[a:b], values[a:b, channel])
 					self._write_track_entries(i, int(tids[a]), positions,
 						entry_values, int(ends[b - 1]))
-			self._write(max(0, len(self._inflight) - (0 if self._pool is None
-				else 2 * self.n_jobs)))
+			self._drain(0 if self._pool is None else 2 * self.n_jobs)
 			return
 
 		# The encoders take float32 and integers as they are, and other types
@@ -1398,8 +1437,7 @@ class FigWigWriter:
 		# Batches are written as they finish compressing, keeping a few in
 		# flight per thread, so that a long call does not hold every chunk
 		# of its values in memory at once.
-		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
-			2 * self.n_jobs)))
+		self._drain(0 if self._pool is None else 2 * self.n_jobs)
 
 	def write_sparse(self, chroms: str | list[str] | numpy.ndarray,
 		positions: list[int] | numpy.ndarray, tracks: str | int | list |
@@ -1505,8 +1543,7 @@ class FigWigWriter:
 
 		# Declared dtypes are checked over all their tracks' entries at once,
 		# with each track's range found in one pass.
-		declared = [i for i in ids.tolist() if self.tracks[i]['dtype'] not in
-			(None, 'float32', 'float64')]
+		declared = ids[self._declared_integers()[ids]].tolist()
 		if declared:
 			mask = numpy.isin(track_ids, declared)
 			block = values[mask].astype(numpy.float64)
@@ -1545,24 +1582,38 @@ class FigWigWriter:
 			group_ids = None
 			values = numpy.asarray(values, dtype=numpy.float64)
 			bounds = numpy.array([0, n], dtype=numpy.int64)
+			slots, by_track = track_ids, True
 		elif self._sorted_entries:
 			order = None
 			group_ids = self._group_of[track_ids]
 			values = numpy.asarray(values, dtype=numpy.float64)
+			slots, by_track = track_ids, True
 		else:
-			group_ids = self._group_of[track_ids]
-			order = self._entry_order(tids, group_ids, track_ids, positions)
-			tids, positions, track_ids, group_ids = tids[order], positions[order], \
-				track_ids[order], group_ids[order]
-			values = values[order].astype(numpy.float64)
-			same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
-				positions[1:] == positions[:-1])
+			by_track = False
+			# A key per entry sorts in a radix sort on the pool, and two entries
+			# on one base of one track have equal keys; where the key would not
+			# fit in 63 bits, a numpy sort of two keys.
+			sorted_ = self._radix_entries(tids, single, track_ids, positions,
+				values, high)
+			if sorted_ is not None:
+				order, tids, positions, slots, group_ids, values, keys = sorted_
+				same = keys[1:] == keys[:-1]
+			else:
+				group_ids = self._group_of[track_ids]
+				order = self._entry_order(tids, group_ids, track_ids, positions)
+				tids, positions, track_ids, group_ids = tids[order], positions[
+					order], track_ids[order], group_ids[order]
+				values = values[order].astype(numpy.float64)
+				slots = self._slot_of[track_ids]
+				same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
+					positions[1:] == positions[:-1])
 			if same.any():
 				k = int(numpy.argmax(same)) + 1
+				track = int(self._groups[int(group_ids[k])][int(slots[k])])
 				raise ValueError("entries {} and {} both name base {} of {!r} in "
 					"track {!r}.".format(int(order[k - 1]), int(order[k]),
-					positions[k], names[codes[int(order[k])]], self.tracks[int(
-					track_ids[k])]['name']))
+					positions[k], names[codes[int(order[k])]], self.tracks[track][
+					'name']))
 
 		def given(k):
 			return k if order is None else int(order[k])
@@ -1591,17 +1642,18 @@ class FigWigWriter:
 				describe(given(c)), None, entries=self.order == 'positions')
 
 		self._written = True
+		pieces = []
 		for a, b in zip(bounds[:-1], bounds[1:]):
 			g, tid = group_at(a), int(tids[a])
 			if self.order == 'tracks':
 				self._write_track_entries(int(self._groups[g][0]), tid,
 					positions[a:b], values[a:b], int(positions[b - 1]) + 1)
 			else:
-				self._write_group_entries(g, tid, track_ids[a:b], positions[a:b],
-					values[a:b])
+				self._write_group_entries(g, tid, slots[a:b], positions[a:b],
+					values[a:b], pieces, by_track)
+		self._submit_pieces(pieces)
 
-		self._write(max(0, len(self._inflight) - (0 if self._pool is None else
-			2 * self.n_jobs)))
+		self._drain(0 if self._pool is None else 2 * self.n_jobs)
 
 	def _entry_order(self, tids, group_ids, track_ids, positions):
 		"""The order that sorts entries by chromosome, group, tile, track
@@ -1628,6 +1680,70 @@ class FigWigWriter:
 		if longest + 25 + high_bits <= 63:
 			return numpy.argsort((high << (longest + 25)) | low, kind='stable')
 		return numpy.lexsort((low, high))
+
+	def _declared_integers(self):
+		"""Which tracks were given an integer dtype, which a write checks its
+		values against; the records hold no other dtype until close."""
+
+		if self._integer_tracks is None or len(self._integer_tracks) != len(
+				self.tracks):
+			self._integer_tracks = numpy.array([track['dtype'] not in (None,
+				'float32', 'float64') for track in self.tracks], dtype=bool)
+		return self._integer_tracks
+
+	def _radix_entries(self, tids, single, track_ids, positions, values, top):
+		"""The entries in the order `_entry_order` gives, with each array
+		gathered into it, by a radix sort of one key per entry on the pool:
+		(order, tids, positions, slots in their groups, group ids, values as
+		float64, sorted keys), or None when the key would take more than 63
+		bits. `top` is the largest position."""
+
+		n = len(positions)
+		shift = self.tile.bit_length() - 1
+		n_groups = len(self._groups)
+		tile_bits = max(1, (top >> shift).bit_length())
+		slot_bits = max(1, int(self._slot_of.max()).bit_length())
+		top_tid = 0 if single else int(tids.max())
+		high_bits = max(1, (top_tid * n_groups + n_groups - 1).bit_length())
+		bits = high_bits + tile_bits + slot_bits + shift
+		if bits > 63:
+			return None
+
+		if not values.dtype.isnative or (values.dtype.kind == 'f' and values.dtype
+				not in (numpy.float32, numpy.float64)):
+			values = values.astype(numpy.float64)
+		n_chunks = self.n_jobs if self._pool is not None and n >= \
+			_RADIX_PARALLEL else 1
+		cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
+		keyed = numpy.zeros(1, dtype=numpy.int64) if single else tids
+		keys = numpy.empty(n, dtype=numpy.int64)
+		counted = []
+		_each(self._pool, n_chunks, lambda c: counted.append(_entry_keys(
+			positions, track_ids, keyed, not single, self._group_of, self._slot_of,
+			n_groups, shift, slot_bits, tile_bits, _MERGE_REACH, keys, cuts[c],
+			cuts[c + 1])))
+		descents, far = numpy.sum(counted, axis=0).tolist()
+		descents += int((keys[cuts[1:-1]] < keys[cuts[1:-1] - 1]).sum())
+		if descents <= _MERGE_RUNS or (n_chunks == 1 and far * _MERGE_FAR <= n):
+			# Keys in a few runs, or on one thread keys out of order only
+			# near each other, as reads given in position order are, where a
+			# contact map's columns each go back to its first rows, sort
+			# faster by numpy's merge sort.
+			order = numpy.argsort(keys, kind='stable')
+			keys = keys[order]
+		else:
+			order, keys = _radix_order(keys, bits, self._pool, n_chunks)
+
+		out = [numpy.empty(n, dtype=numpy.int64), numpy.empty(n,
+			dtype=numpy.int64), numpy.empty(n, dtype=numpy.float64), numpy.empty(n,
+			dtype=numpy.int64), numpy.empty(0 if single else n, dtype=numpy.int64)]
+		_each(self._pool, n_chunks, lambda c: _entry_gather(keys, order, values,
+			not single, shift, slot_bits, tile_bits, n_groups, cuts[c], cuts[c +
+			1], *out))
+		positions, slots, values, group_ids, tids_out = out
+		if not single:
+			tids = tids_out
+		return order, tids, positions, slots, group_ids, values, keys
 
 	def _write_group(self, g, tid, starts, ends, values, by_base, dtype=None):
 		"""Encode one group's items on one chromosome, in order, into chunks,
@@ -1802,16 +1918,20 @@ class FigWigWriter:
 			self._done[g].add(last[0])
 		self._last[g] = (tid, end)
 
-	def _write_group_entries(self, g, tid, track_ids, positions, values):
-		"""Encode one group's nonzero bases on one chromosome, sorted by
-		tile, track and position, into chunks on the pool. This thread only
-		finds where to cut the entries into batches of whole tiles; each
-		task finds its own tiles and its tracks' slots."""
+	def _write_group_entries(self, g, tid, slots, positions, values, pieces,
+		by_track=False):
+		"""Cut one group's nonzero bases on one chromosome, sorted by tile,
+		track and position, into batches of whole tiles, added to `pieces`
+		for `_submit_pieces` to encode on the pool. This thread only finds
+		where to cut; each task finds its own tiles, and with `by_track`,
+		where `slots` holds track ids, its tracks' slots."""
 
 		tile = self.tile
 		n_tracks = len(self._groups[g])
 		open_ = self._open[g]
 		if open_ is not None:
+			# The open tile's chunk goes to the file before the pieces after it.
+			self._submit_pieces(pieces)
 			self._encode(g, open_[0], numpy.array([open_[1]]), None, None, None,
 				False)
 			self._open[g] = None
@@ -1826,24 +1946,79 @@ class FigWigWriter:
 			per_batch = max(_ENTRIES_PER_BATCH, min(per_batch, len(positions) // (
 				_BATCHES_PER_THREAD * self.n_jobs)))
 		max_tiles = max(1, _BATCH_BYTES // (4 * n_tracks + 24))
-		cuts = _tile_cuts(positions, tile, per_batch, max_tiles)
-		for e0, e1 in zip(cuts[:-1].tolist(), cuts[1:].tolist()):
-			task = (self._entries_task, g, tid, track_ids[e0:e1], positions[e0:e1],
-				values[e0:e1], n_tracks)
-			if self._pool is None:
-				self._inflight.append((task[0](*task[1:]), g, None))
-			else:
-				self._inflight.append((self._pool.submit(*task), g, None))
+		if len(positions) <= per_batch and int(positions[-1]) // tile - int(
+				positions[0]) // tile < max_tiles:
+			cuts = [0, len(positions)]
+		else:
+			cuts = _tile_cuts(positions, tile, per_batch, max_tiles).tolist()
+		for e0, e1 in zip(cuts[:-1], cuts[1:]):
+			pieces.append((g, tid, slots[e0:e1], positions[e0:e1], values[e0:e1],
+				n_tracks, by_track))
 
 		self._sealed[g] = (tid, int(positions[-1]) // tile)
 		self._note_written(g, tid, int(positions[-1]) + 1)
 
-	def _entries_task(self, g, tid, track_ids, positions, values, n_tracks):
-		"""Encode and compress one batch of tiles from their entries. The
-		encoder stops before a tile that might not fit its buffer, which
+	def _submit_pieces(self, pieces):
+		"""Hand batches of entries from `_write_group_entries` to the pool in
+		order, packing consecutive ones into a task until it holds a share
+		of the call's entries, since a task per small group cost this thread
+		its dispatch and bookkeeping. Without a pool each batch is a task of
+		its own, run here, where packing would only copy their bytes.
+		Empties `pieces`."""
+
+		if len(pieces) == 0:
+			return
+		total = sum(len(piece[3]) for piece in pieces)
+		share = 1 if self._pool is None else max(1, total // (
+			_BATCHES_PER_THREAD * self.n_jobs))
+		task, size = [], 0
+		for k, piece in enumerate(pieces):
+			task.append(piece)
+			size += len(piece[3])
+			if size >= share or k == len(pieces) - 1:
+				if len(task) == 1:
+					args = (self._entries_task,) + task[0]
+					g, kind = task[0][0], None
+				else:
+					args = (self._entries_tasks, task)
+					g, kind = [piece[0] for piece in task], 'pieces'
+				result = args[0](*args[1:]) if self._pool is None else \
+					self._pool.submit(*args)
+				self._inflight.append((result, g, kind))
+				task, size = [], 0
+		pieces.clear()
+
+	def _entries_tasks(self, pieces):
+		"""`_entries_task` of each piece, in order, joined for the writing
+		thread: one buffer of every piece's chunks, then per piece its live
+		tile records, its bytes in the buffer, its stats and its summary."""
+
+		results = [self._entries_task(*piece) for piece in pieces]
+		parts, lives, totals = [], [], []
+		for compressed, sizes, raw, kinds, where, crcs, _, _ in results:
+			total = int(sizes.sum())
+			parts.append(compressed[:total])
+			live = numpy.zeros(len(where), dtype=_LIVE)
+			live['tile'] = where
+			live['kind'] = kinds
+			live['size'] = sizes
+			live['raw'] = raw
+			live['crc'] = crcs
+			lives.append(live)
+			totals.append(total)
+		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
+			dtype=numpy.uint8), lives, totals, [r[6] for r in results], [r[7] for r
+			in results])
+
+	def _entries_task(self, g, tid, slots, positions, values, n_tracks,
+		by_track=False):
+		"""Encode and compress one batch of tiles from their entries, each
+		track given by its slot in the group, or by its id with `by_track`.
+		The encoder stops before a tile that might not fit its buffer, which
 		holds at most about _BATCH_BYTES, and is called again from there."""
 
-		slots = self._slot_of[track_ids]
+		if by_track:
+			slots = self._slot_of[slots]
 		all_tiles = positions // self.tile
 		first = numpy.concatenate([[0], numpy.flatnonzero(all_tiles[1:] !=
 			all_tiles[:-1]) + 1, [len(all_tiles)]])
@@ -2154,11 +2329,58 @@ class FigWigWriter:
 		first = numpy.arange(0, cut + 1, _BLOCK_ENTRIES)
 		if first[-1] != cut:
 			first = numpy.append(first, cut)
-		task = (self._blocks_task, t, tid, positions[:cut], values[:cut], first)
+		job = (t, tid, positions[:cut], values[:cut], first)
 		if self._pool is None:
-			self._inflight.append((task[0](*task[1:]), t, 'blocks'))
+			self._inflight.append((self._blocks_task(*job), t, 'blocks'))
 		else:
-			self._inflight.append((self._pool.submit(*task), t, 'blocks'))
+			self._block_jobs.append(job)
+
+	def _submit_blocks(self):
+		"""Hand the tracks' blocks from `_flush_track` to the pool in order,
+		packing consecutive tracks' into a task until it holds a share of
+		their entries, since a task per track and chromosome cost this
+		thread its dispatch and bookkeeping. Without a pool `_flush_track`
+		encodes them itself."""
+
+		jobs = self._block_jobs
+		if len(jobs) == 0:
+			return
+		self._block_jobs = []
+		total = sum(len(job[2]) for job in jobs)
+		share = max(1, total // (_BATCHES_PER_THREAD * self.n_jobs))
+		task, size = [], 0
+		for k, job in enumerate(jobs):
+			task.append(job)
+			size += len(job[2])
+			if size >= share or k == len(jobs) - 1:
+				if len(task) == 1:
+					args = (self._blocks_task,) + task[0]
+					t, kind = task[0][0], 'blocks'
+				else:
+					args = (self._blocks_tasks, task)
+					t, kind = [job[0] for job in task], 'packed blocks'
+				result = args[0](*args[1:]) if self._pool is None else \
+					self._pool.submit(*args)
+				self._inflight.append((result, t, kind))
+				task, size = [], 0
+
+	def _blocks_tasks(self, jobs):
+		"""`_blocks_task` of each track's blocks, in order, joined for the
+		writing thread: one buffer of every track's blocks, and per track its
+		block records, with offsets from the buffer's start, its stats and
+		its summary."""
+
+		results = [self._blocks_task(*job) for job in jobs]
+		parts, records, at = [], [], 0
+		for compressed, sizes, _, _, where, _, _, _ in results:
+			total = int(sizes.sum())
+			parts.append(compressed[:total])
+			where['offset'] = at + numpy.cumsum(sizes) - sizes
+			records.append(where)
+			at += total
+		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
+			dtype=numpy.uint8), records, [r[6] for r in results], [r[7] for r in
+			results])
 
 	def _blocks_task(self, t, tid, positions, values, first):
 		"""Encode and compress one track's blocks. Returns (compressed bytes,
@@ -2201,59 +2423,132 @@ class FigWigWriter:
 				numpy.float32)[:, None])
 		return compressed, sizes, raw, kinds, records, None, stats, summary
 
+	def _drain(self, keep=0):
+		"""Hand the pool the tracks' blocks waiting for it, then write every
+		batch in flight but the last `keep`."""
+
+		self._submit_blocks()
+		self._write(max(0, len(self._inflight) - keep))
+
 	def _write(self, n_batches):
 		"""Write the first `n_batches` batches in flight to the file, in
 		order, record their chunks or blocks in the index, and fold in the
 		stats of those encoded on the pool."""
 
 		for result, g, kind in self._inflight[:n_batches]:
-			if not isinstance(result, tuple):
+			if not isinstance(result, (tuple, list)):
 				result = result.result()
-			if len(result) == 8:
-				stats, summary = result[6], result[7]
-				# One pass over the group's rows, where five fancy-indexed
-				# operations over thousands of tracks per batch were most of
-				# what this thread did per batch.
-				flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
-					dtype=numpy.int64), numpy.ascontiguousarray(stats,
-					dtype=numpy.float64))
-				if flagged >= 0:
-					raise ValueError("a value of track {!r} lies beyond float32's "
-						"range; declare the track float64 to keep it.".format(
-						self.tracks[int(flagged)]['name']))
-				if summary is not None:
-					self._sums[g].append(summary)
-
-			compressed, sizes, raw, kinds, where, crcs = result[:6]
-			if len(where) == 0:
-				continue
-
-			offset = self._file.tell()
-			self._file.write(compressed[:sizes.sum()])
-			total = int(sizes.sum())
-
-			if kind == 'blocks':
-				where['offset'] = offset + numpy.cumsum(sizes) - sizes
-				self._blocks[g].append(where)
-				continue
-
-			live = numpy.zeros(len(where), dtype=_LIVE)
-			live['tile'] = where
-			live['kind'] = kinds
-			live['size'] = sizes
-			live['raw'] = raw
-			live['crc'] = crcs
-			self._live[g].append(live)
-
-			runs = self._runs[g]
-			if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
-					runs[-1][1] < where[0] and runs[-1][3] + total < 2 ** 40:
-				runs[-1][1] = int(where[-1])
-				runs[-1][3] += total
+			if kind == 'pieces':
+				self._write_pieces(result, g)
+			elif kind == 'packed blocks':
+				self._write_packed_blocks(result, g)
 			else:
-				runs.append([int(where[0]), int(where[-1]), offset, total])
+				self._write_result(result, g, kind)
 
 		del self._inflight[:n_batches]
+
+	def _write_pieces(self, result, groups):
+		"""Write a packed task's pieces, as `_write_result` writes each: its
+		chunks in one write, then each piece's stats, summary, live records
+		and run of the file, in order."""
+
+		compressed, lives, totals, stats, summaries = result
+		offset = self._file.tell()
+		self._file.write(compressed)
+		for g, live, total, batch, summary in zip(groups, lives, totals, stats,
+				summaries):
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+				dtype=numpy.int64), numpy.ascontiguousarray(batch,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[g].append(summary)
+			if len(live) == 0:
+				continue
+			self._live[g].append(live)
+			first, last = int(live['tile'][0]), int(live['tile'][-1])
+			runs = self._runs[g]
+			if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
+					runs[-1][1] < first and runs[-1][3] + total < 2 ** 40:
+				runs[-1][1] = last
+				runs[-1][3] += total
+			else:
+				runs.append([first, last, offset, total])
+			offset += total
+
+	def _write_packed_blocks(self, result, tracks):
+		"""Write a packed task's tracks' blocks, as `_write_result` writes
+		each track's: their bytes in one write, then each track's stats,
+		summary and block records, in order."""
+
+		compressed, records, stats, summaries = result
+		offset = self._file.tell()
+		self._file.write(compressed)
+		for t, where, batch, summary in zip(tracks, records, stats, summaries):
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[t],
+				dtype=numpy.int64), numpy.ascontiguousarray(batch,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[t].append(summary)
+			if len(where) == 0:
+				continue
+			where['offset'] += offset
+			self._blocks[t].append(where)
+
+	def _write_result(self, result, g, kind):
+		"""Write one batch's chunks or blocks to the file, record them in the
+		index, and fold in its stats when it was encoded on the pool."""
+
+		if len(result) == 8:
+			stats, summary = result[6], result[7]
+			# One pass over the group's rows, where five fancy-indexed
+			# operations over thousands of tracks per batch were most of
+			# what this thread did per batch.
+			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
+				dtype=numpy.int64), numpy.ascontiguousarray(stats,
+				dtype=numpy.float64))
+			if flagged >= 0:
+				raise ValueError("a value of track {!r} lies beyond float32's "
+					"range; declare the track float64 to keep it.".format(
+					self.tracks[int(flagged)]['name']))
+			if summary is not None:
+				self._sums[g].append(summary)
+
+		compressed, sizes, raw, kinds, where, crcs = result[:6]
+		if len(where) == 0:
+			return
+
+		offset = self._file.tell()
+		self._file.write(compressed[:sizes.sum()])
+		total = int(sizes.sum())
+
+		if kind == 'blocks':
+			where['offset'] = offset + numpy.cumsum(sizes) - sizes
+			self._blocks[g].append(where)
+			return
+
+		live = numpy.zeros(len(where), dtype=_LIVE)
+		live['tile'] = where
+		live['kind'] = kinds
+		live['size'] = sizes
+		live['raw'] = raw
+		live['crc'] = crcs
+		self._live[g].append(live)
+
+		runs = self._runs[g]
+		if len(runs) > 0 and runs[-1][2] + runs[-1][3] == offset and \
+				runs[-1][1] < where[0] and runs[-1][3] + total < 2 ** 40:
+			runs[-1][1] = int(where[-1])
+			runs[-1][3] += total
+		else:
+			runs.append([int(where[0]), int(where[-1]), offset, total])
 
 	def close(self):
 		"""Write the open tiles and pending blocks, the tables, the index and
@@ -2275,7 +2570,7 @@ class FigWigWriter:
 			for t in range(len(self._pending)):
 				if self._pending[t] is not None:
 					self._flush_track(t)
-			self._write(len(self._inflight))
+			self._drain()
 
 			for i, track in enumerate(self.tracks):
 				if track['dtype'] is None:
@@ -2393,6 +2688,53 @@ def _moved(offsets, sizes, extents):
 	k = numpy.searchsorted(starts, offsets, side='right') - 1
 	moved = dests[numpy.maximum(k, 0)] + offsets - starts[numpy.maximum(k, 0)]
 	return numpy.where(numpy.asarray(sizes) > 0, moved, _HEADER.itemsize)
+
+
+def _each(pool, n, task):
+	"""task(c) for c in range(n), on the pool when there is one."""
+
+	if pool is None or n == 1:
+		for c in range(n):
+			task(c)
+	else:
+		for future in [pool.submit(task, c) for c in range(n)]:
+			future.result()
+
+
+def _radix_order(keys, bits, pool, n_chunks):
+	"""The stable order of non-negative int64 keys below 2**bits, and the
+	keys in it, by a least significant digit radix sort whose passes are
+	cut into `n_chunks` pieces that the pool takes at once. A digit every
+	key shares is skipped. `keys` is overwritten."""
+
+	n = len(keys)
+	cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
+	passes = max(1, -(-bits // _RADIX_BITS))
+	digit = -(-bits // passes)
+	mask = (1 << digit) - 1
+	order = numpy.empty(n, dtype=numpy.int64)
+	keys_out = numpy.empty(n, dtype=numpy.int64)
+	order_out = numpy.empty(n, dtype=numpy.int64)
+	first = True
+	for shift in range(0, bits, digit):
+		counts = numpy.zeros((n_chunks, mask + 1), dtype=numpy.int64)
+		_each(pool, n_chunks, lambda c: _radix_counts(keys, cuts[c], cuts[c + 1],
+			shift, mask, counts[c]))
+		if counts.sum(axis=0).max() == n:
+			continue
+
+		# Each digit's slots start after every smaller digit's, and a chunk's
+		# after the earlier chunks' keys of its digit.
+		flat = counts.T.ravel()
+		starts = (numpy.cumsum(flat) - flat).reshape(mask + 1, n_chunks).T.copy()
+		_each(pool, n_chunks, lambda c: _radix_scatter(keys, order, first,
+			cuts[c], cuts[c + 1], shift, mask, starts[c], keys_out, order_out))
+		keys, keys_out = keys_out, keys
+		order, order_out = order_out, order
+		first = False
+	if first:
+		order = numpy.arange(n, dtype=numpy.int64)
+	return order, keys
 
 
 def _crcs(data, cuts):
@@ -2650,17 +2992,37 @@ class FigWigReader:
 			raise ValueError(error + ": its metadata does not describe its {} "
 				"tracks.".format(n_tracks))
 
-		names = set()
-		for track in tracks:
-			if not isinstance(track, dict) or not isinstance(track.get('name'),
-					str) or track.get('dtype') not in _DTYPES or not isinstance(
-					track.get('group'), int) or not 0 <= track['group'] < n_groups:
-				raise ValueError(error + ": a track's record is missing its name, "
-					"dtype or group.")
-			if track['name'] in names:
-				raise ValueError(error + ": two tracks are named {!r}.".format(
-					track['name']))
-			names.add(track['name'])
+		# The records are checked a column at a time; where a check fails,
+		# the loop over them finds the first one at fault, as it says.
+		try:
+			names = [track['name'] for track in tracks]
+			groups = [track['group'] for track in tracks]
+			dtypes = [track['dtype'] for track in tracks]
+			valid = set(map(type, names)) <= {str} and set(map(type, groups)) <= {
+				int, bool} and set(dtypes) <= set(_DTYPES)
+			group_of = numpy.array(groups, dtype=numpy.int64) if valid else None
+		except (TypeError, KeyError, OverflowError):
+			valid = False
+		if valid:
+			track_ids = dict(zip(names, range(n_tracks)))
+			valid = (group_of >= 0).all() and (group_of < n_groups).all() and len(
+				track_ids) == n_tracks
+		if not valid:
+			seen = set()
+			for track in tracks:
+				if not isinstance(track, dict) or not isinstance(track.get('name'),
+						str) or track.get('dtype') not in _DTYPES or not isinstance(
+						track.get('group'), int) or not 0 <= track['group'] < n_groups:
+					raise ValueError(error + ": a track's record is missing its name, "
+						"dtype or group.")
+				if track['name'] in seen:
+					raise ValueError(error + ": two tracks are named {!r}.".format(
+						track['name']))
+				seen.add(track['name'])
+			dtypes = [track['dtype'] for track in tracks]
+			group_of = numpy.array([track['group'] for track in tracks],
+				dtype=numpy.int64)
+			track_ids = {track['name']: i for i, track in enumerate(tracks)}
 
 		self.tracks = tracks
 		self.genome = metadata.get('genome')
@@ -2679,9 +3041,8 @@ class FigWigReader:
 		self._identity = (stat.st_ino, stat.st_dev, header_bytes)
 		self._directory = numpy.frombuffer(directory, dtype='<u8').astype(
 			numpy.int64)
-		self._track_ids = {track['name']: i for i, track in enumerate(tracks)}
-		self._group_of = numpy.array([track['group'] for track in tracks],
-			dtype=numpy.int64)
+		self._track_ids = track_ids
+		self._group_of = group_of
 		by_group = numpy.argsort(self._group_of, kind='stable')
 		counts = numpy.bincount(self._group_of, minlength=n_groups)
 		if (counts == 0).any():
@@ -2690,8 +3051,9 @@ class FigWigReader:
 		self._slot_of = numpy.zeros(n_tracks, dtype=numpy.int64)
 		for group in self._groups:
 			self._slot_of[group] = numpy.arange(len(group))
-		self._dtype_codes = numpy.array([_DTYPES.index(track['dtype']) for
-			track in tracks], dtype=numpy.int64)
+		codes = {dtype: i for i, dtype in enumerate(_DTYPES)}
+		self._dtype_codes = numpy.fromiter(map(codes.__getitem__, dtypes),
+			dtype=numpy.int64, count=n_tracks)
 
 		self._tids = {name: i for i, (name, _) in enumerate(chroms)}
 		self._lengths = numpy.array([length for _, length in chroms],
@@ -3768,7 +4130,8 @@ class FigWigReader:
 		self._run(tasks, n_threads, out3 if mode == 'sum' else None, buffers > 0)
 
 		if sparse:
-			return self._gather(tasks, copies, n, len(ids), width, dtype)
+			return self._gather(tasks, copies, n, len(ids), width, dtype,
+				n_threads)
 
 		if nan_mode == 2:
 			# The kernels count a bin's NaN bases, since the bases that are
@@ -3801,44 +4164,54 @@ class FigWigReader:
 
 		return out
 
-	def _gather(self, tasks, copies, n, n_channels, width, dtype):
+	def _gather(self, tasks, copies, n, n_channels, width, dtype, n_threads):
 		"""The entries of a sparse read's tasks, as one `SparseWindows`
 		sorted by row, channel and offset, with each array built and freed
 		as late as it can be."""
 
 		parts = [task.entries for task in tasks if task.entries is not None]
-		if parts:
-			rows = numpy.concatenate([p[0] for p in parts])
-			channels = numpy.concatenate([p[1] for p in parts])
-			offsets = numpy.concatenate([p[2] for p in parts])
-			values = numpy.concatenate([p[3] for p in parts])
-		else:
-			rows = channels = offsets = numpy.zeros(0, dtype=numpy.int64)
-			values = numpy.zeros(0, dtype=dtype)
+		total = sum(len(p[0]) for p in parts)
 		for task in tasks:
 			task.entries = None
-		del parts
-
-		if copies:
-			extra = [(numpy.full(int((channels == source).sum()), channel,
-				dtype=numpy.int64), source) for channel, source in copies]
-			rows = numpy.concatenate([rows] + [rows[channels == s] for _, s in
-				extra])
-			offsets = numpy.concatenate([offsets] + [offsets[channels == s] for
-				_, s in extra])
-			values = numpy.concatenate([values] + [values[channels == s] for
-				_, s in extra])
-			channels = numpy.concatenate([channels] + [c for c, _ in extra])
-
-		# The tasks list each window's offsets in order, so a stable
-		# counting sort on (row, channel) is enough, in linear time; a key
-		# per entry sorts the rest.
-		if n * n_channels <= 4 * len(rows) + 1024:
-			rows_, channels_, offsets_, values_, ok = _bucket_sort(rows, channels,
-				offsets, values, n_channels, n * n_channels)
+		if parts and not copies and n * n_channels <= 4 * total + 1024:
+			# The tasks list each window's offsets in order, so a stable
+			# counting sort on (row, channel) straight from the tasks' parts,
+			# cut among the threads, is enough in most reads; a key per entry
+			# sorts the rest.
+			rows, channels, offsets, values, ok = self._bucket_gather(parts, n *
+				n_channels, n_channels, n_threads)
+			del parts
 			if ok:
-				return SparseWindows(rows_, channels_, offsets_, values_.astype(
-					dtype, copy=False), (n, n_channels, width))
+				return SparseWindows(rows, channels, offsets, values.astype(dtype,
+					copy=False), (n, n_channels, width))
+		else:
+			if parts:
+				rows = numpy.concatenate([p[0] for p in parts])
+				channels = numpy.concatenate([p[1] for p in parts])
+				offsets = numpy.concatenate([p[2] for p in parts])
+				values = numpy.concatenate([p[3] for p in parts])
+			else:
+				rows = channels = offsets = numpy.zeros(0, dtype=numpy.int64)
+				values = numpy.zeros(0, dtype=dtype)
+			del parts
+
+			if copies:
+				extra = [(numpy.full(int((channels == source).sum()), channel,
+					dtype=numpy.int64), source) for channel, source in copies]
+				rows = numpy.concatenate([rows] + [rows[channels == s] for _, s in
+					extra])
+				offsets = numpy.concatenate([offsets] + [offsets[channels == s] for
+					_, s in extra])
+				values = numpy.concatenate([values] + [values[channels == s] for
+					_, s in extra])
+				channels = numpy.concatenate([channels] + [c for c, _ in extra])
+
+			if n * n_channels <= 4 * len(rows) + 1024:
+				rows_, channels_, offsets_, values_, ok = _bucket_sort(rows,
+					channels, offsets, values, n_channels, n * n_channels)
+				if ok:
+					return SparseWindows(rows_, channels_, offsets_, values_.astype(
+						dtype, copy=False), (n, n_channels, width))
 		key = (rows * n_channels + channels) * width + offsets
 		order = numpy.argsort(key)
 		del key
@@ -3848,6 +4221,50 @@ class FigWigReader:
 		values = values[order].astype(dtype, copy=False)
 		return SparseWindows(rows, channels, offsets, values, (n, n_channels,
 			width))
+
+	def _bucket_gather(self, parts, n_buckets, n_channels, n_threads):
+		"""The parts' entries sorted by (row, channel) by a counting sort,
+		stable over the parts in order, as (rows, channels, offsets, values,
+		whether each bucket's offsets ascend). The parts are cut into runs
+		of about equal entries, a run per thread."""
+
+		sizes = numpy.array([len(p[0]) for p in parts], dtype=numpy.int64)
+		total = int(sizes.sum())
+		# Each run counts into its own row of buckets, so that a read of many
+		# windows and tracks with few entries sorts in about one row.
+		n_runs = max(1, min(n_threads, len(parts), total // _GATHER_PER_THREAD,
+			1 + _GATHER_ROW_BYTES * total // (8 * n_buckets)))
+		ends = numpy.cumsum(sizes)
+		cuts = numpy.unique(numpy.concatenate([[0], numpy.searchsorted(ends,
+			numpy.arange(1, n_runs) * total // n_runs, side='right'), [len(
+			parts)]]))
+		runs = [parts[a:b] for a, b in zip(cuts[:-1], cuts[1:])]
+		pool = self._pool_for(len(runs)) if len(runs) > 1 else None
+
+		counts = numpy.zeros((len(runs), n_buckets), dtype=numpy.int64)
+
+		def count(r):
+			for p in runs[r]:
+				_bucket_counts(p[0], p[1], n_channels, counts[r])
+
+		_each(pool, len(runs), count)
+		starts = _bucket_starts(counts)
+
+		out = [numpy.empty(total, dtype=numpy.int64) for _ in range(3)] + [
+			numpy.empty(total, dtype=numpy.result_type(*[p[3].dtype for p in
+			parts]))]
+
+		def scatter(r):
+			for p in runs[r]:
+				_bucket_scatter(p[0], p[1], p[2], p[3], n_channels, starts[r], *out)
+
+		_each(pool, len(runs), scatter)
+		bounds = numpy.arange(len(cuts), dtype=numpy.int64) * total // max(1,
+			len(cuts) - 1)
+		ok = []
+		_each(pool, len(cuts) - 1, lambda r: ok.append(_bucket_ascending(out[0],
+			out[1], out[2], bounds[r], bounds[r + 1])))
+		return out[0], out[1], out[2], out[3], all(ok)
 
 	def read_entries(self, tracks: str | int | list | None = None, chroms: str |
 		list[str] | None = None, n_jobs: int = 8) -> SparseEntries:
@@ -3888,20 +4305,41 @@ class FigWigReader:
 				if name not in self._tids:
 					raise ValueError(_unknown_chromosome(name, self.chrom_sizes))
 
-		parts = []
-		for name in names:
-			length = self.chrom_sizes[name]
-			found = self.read(name, [0], length, tracks=ids.tolist(), n_jobs=n_jobs,
-				sparse=True)
-			parts.append((numpy.full(len(found.offsets), self._tids[name],
-				dtype=numpy.int64), found.offsets, ids[found.channels],
-				found.values))
-
-		if not parts:
+		if not names:
 			empty = numpy.zeros(0, dtype=numpy.int64)
 			return SparseEntries(empty, empty, empty, numpy.zeros(0,
 				dtype=self._dtype(ids, None)))
 
+		# A sparse read of a window per chromosome, each as wide as the
+		# longest, reads nothing past a chromosome's end and gives its
+		# entries sorted by chromosome, track and position. Chromosomes go
+		# in one read while its plan, a pair per tile and group, stays within
+		# _ENTRIES_PAIRS or one chromosome's, and its sort key of window,
+		# track and offset below _SPARSE_KEYS.
+		widest = max(self.chrom_sizes[name] for name in names)
+		most = max(1, _SPARSE_KEYS // (max(1, len(ids)) * max(1, widest)))
+		n_groups = max(1, len(numpy.unique(self._group_of[ids])))
+		pairs = [n_groups * -(-self.chrom_sizes[name] // self.tile) for name in
+			names]
+		budget = max(_ENTRIES_PAIRS, max(pairs))
+		batches, total = [[]], 0
+		for name, p in zip(names, pairs):
+			if batches[-1] and (total + p > budget or len(batches[-1]) == most):
+				batches.append([])
+				total = 0
+			batches[-1].append(name)
+			total += p
+
+		parts = []
+		for batch in batches:
+			found = self.read(batch, numpy.zeros(len(batch), dtype=numpy.int64),
+				widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
+			tids = numpy.array([self._tids[name] for name in batch],
+				dtype=numpy.int64)
+			parts.append((tids[found.rows], found.offsets, ids[found.channels],
+				found.values))
+		if len(parts) == 1:
+			return SparseEntries(*parts[0])
 		return SparseEntries(*[numpy.concatenate([p[k] for p in parts]) for k
 			in range(4)])
 
@@ -4003,26 +4441,16 @@ class FigWigReader:
 		# are not cut inside a window, whose bins would otherwise be summed
 		# by two tasks at once, unless the window runs past twice a batch.
 		tasks = []
-		cut_inside = False
 		continues = _continuing_windows(rows, inverse, len(unique)) if bins > 1 \
-			else None
-		a = 0
-		while a < len(unique):
-			total_bytes, n_live, b = 0, 0, a
-			while b < len(unique) and (b == a or (total_bytes + bounds[b] <=
-					cap and n_live < most)):
-				total_bytes += int(bounds[b])
-				n_live += int(live[b])
-				b += 1
-			if bins > 1:
-				while b < len(unique) and continues[b - 1]:
-					if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
-						cut_inside = True
-						break
-					total_bytes += int(bounds[b])
-					n_live += int(live[b])
-					b += 1
-
+			else numpy.zeros(0, dtype=bool)
+		if len(unique) <= _PLAN_LOOP_CHUNKS:
+			batches, cut_inside = _batch_cuts_loop(bounds, live, cap, most,
+				continues, bins > 1)
+		else:
+			firsts, totals, cut_inside = _batch_cuts(bounds, live.astype(
+				numpy.int64), int(cap), int(most), continues, bins > 1)
+			batches = zip(firsts[:-1].tolist(), firsts[1:].tolist(), totals.tolist())
+		for a, b, total_bytes in batches:
 			p0, p1 = int(first[a]), int(first[b]) if b < len(unique) else total
 			chunk = numpy.where(live[inverse[p0:p1]], inverse[p0:p1] - a, -1)
 			tasks.append(_Task(self, g, slots, unique[a:b][live[a:b]],
@@ -4032,9 +4460,8 @@ class FigWigReader:
 				rows[p0:p1], out, width, mode, accumulate, bins, crcs[unique[a:b][
 				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]],
 				nan_mode))
-			a = b
 
-		return tasks, cut_inside
+		return tasks, bool(cut_inside)
 
 	def _plan_tracks(self, channels, tids, starts, lengths, width, out, mode,
 		accumulate, bins, n_jobs, stops=None, nan_mode=0):
@@ -4269,6 +4696,32 @@ def _split_tasks(tasks, n_threads, by_window=False):
 		out.extend(pieces)
 		cut_inside |= cut
 	return out, cut_inside
+
+
+def _batch_cuts_loop(bounds, live, cap, most, continues, binned):
+	"""`_batch_cuts` in Python, for a group of a few chunks: a list of each
+	batch's (first chunk, end, bytes), and whether a window was cut inside a
+	batch."""
+
+	batches, cut_inside, a = [], False, 0
+	while a < len(bounds):
+		total_bytes, n_live, b = 0, 0, a
+		while b < len(bounds) and (b == a or (total_bytes + bounds[b] <= cap and
+				n_live < most)):
+			total_bytes += int(bounds[b])
+			n_live += int(live[b])
+			b += 1
+		if binned:
+			while b < len(bounds) and continues[b - 1]:
+				if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+					cut_inside = True
+					break
+				total_bytes += int(bounds[b])
+				n_live += int(live[b])
+				b += 1
+		batches.append((a, b, total_bytes))
+		a = b
+	return batches, cut_inside
 
 
 def _compact(chunk, live):
