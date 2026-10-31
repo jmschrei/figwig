@@ -358,6 +358,14 @@ of these in GPU memory, where `torch.from_dlpack` takes them without a
 copy. A base no track wrote is 0, as is a bigWig's no-data unless
 `bw2fw --missing nan` keeps them apart.
 
+For large multitrack files, indexed summaries are practically necessary for
+responsive interactive browser use. [figwig-js](https://github.com/genome-spy/figwig-js/)
+uses them to avoid downloading and decompressing whole genome-wide summary
+levels for small viewports. Enable `summary_index=True` when writing; the
+default is off. Python uses the index automatically for selected-chromosome
+`tile_sums` and exact integer `sums`. Existing v1 readers remain compatible.
+See the [summary index guide](docs/summary_restarts.rst) for usage and limits.
+
 A file is written in position order, tiles across tracks, for reading
 windows across many tracks, or in track order for reading a few tracks over
 the genome, and `figwig reorder` rewrites it in the other; `write_sparse`

@@ -1,10 +1,16 @@
 # Writing figwig files
 
-`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None)`
+`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None, summary_index=False)`
 with `write(chroms, starts, values, ends=None, tracks=None)` and
 `write_sparse(chroms, positions, tracks, values)`; `write_figwig` writes one
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
+
+Enable `summary_index=True` for large multitrack files intended for interactive
+browser use to avoid whole-level downloads and decompression. The default is
+off; existing v1 readers remain compatible. `append=True` cannot create the
+index; append invalidates it, and merge/reorder discard it. See
+`docs/summary_restarts.rst` in the source checkout for details.
 
 ```python
 import numpy

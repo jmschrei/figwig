@@ -14,6 +14,10 @@ the same layout, from which parsers in other languages can be compiled,
 whose compiled Python parser ``tests/test_kaitai.py`` runs over the same
 files.
 
+The optional :doc:`regional summary index <summary_restarts>` enables browser
+access to small regions without whole-level downloads or decompression. It uses
+optional metadata and unused data-region bytes, preserving the core v1 layout.
+
 **Stability.** Version 1 is frozen: the layout on this page does not
 change. A file that needs another layout carries another ``version`` in
 its header, and a reader of version 1 refuses it. An addition that a

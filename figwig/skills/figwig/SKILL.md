@@ -36,7 +36,7 @@ say.
 | a bigWig at a URL | download it first; figwig takes a URL for a path and raises `FileNotFoundError` |
 | a bigWig's zoom-level summaries (`stats()`, a whole-chromosome mean) | pyBigWig or pybigtools; figwig reads every base. A figwig file's `tile_sums` serves this |
 | a bigWig whose intervals overlap | pybigtools, which sums them; figwig raises |
-| a genome browser track from a figwig file | `figwig fw2bw -z 10`; browsers do not read `.fw` |
+| a browser that requires bigWig tracks | `figwig fw2bw -z 10` |
 
 ## Conventions that hold everywhere
 

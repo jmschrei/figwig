@@ -334,6 +334,13 @@ tile sums are, and the default is none; they cost a few hundred kilobytes
 per level for six tracks and are announced by a header bit that a reader
 without them ignores.
 
+For responsive interactive browsing of large multitrack files, enable
+``summary_index=True`` on ``FigWigWriter`` or ``write_figwig`` (default
+``False``). The :doc:`regional summary index <summary_restarts>` avoids
+downloading and decompressing whole levels for small viewports. Python uses it
+automatically for selected-chromosome ``tile_sums`` and exact integer ``sums``;
+existing v1 readers remain compatible.
+
 Writing
 -------
 
@@ -628,13 +635,12 @@ with, stand in for a bigWig's zoom levels down to the tile's resolution:
 a summary at 1 Mb bins is a reshape of them, and a summary finer than a
 tile decodes the chunks under it, through ``bins``, which took 0.09 s for
 100 bp bins over chr22 where pyBigWig's ``stats`` took 9.8 s
-(:doc:`benchmarks`); a genome browser needs the tracks written back with
-``fw2bw -z``. Every value is at
-most float64, and there are no string or categorical tracks. A read from a
-remote file would need the group's index, a few tens of KB for a
-genome-wide track, before its first chunk; the reader does not read over
-HTTP. The format is little-endian, and read and written by this package
-alone; the layout below is complete enough to read it without it.
+(:doc:`benchmarks`). Use ``fw2bw -z`` to export tracks for browsers that require
+bigWig. Every value is at most float64, and there are no string or categorical
+tracks. A remote reader needs the group's index, a few tens of KB for a
+genome-wide track, before its first chunk. The Python reader uses local files.
+The format is little-endian; the layout below is complete enough to implement
+another reader or writer.
 
 The layout
 ----------

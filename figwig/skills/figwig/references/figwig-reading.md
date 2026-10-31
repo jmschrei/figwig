@@ -34,9 +34,17 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 | `labels=` one int per track read, -1 skips | `(n, labels, width)` sums: pseudobulks in the read |
 | `bins=` a divisor of `width` | `(n, tracks, width // bins)` sums; `bins=width` is each window's total |
 | `sums(chroms, starts, ends)` | `(n, tracks)` totals over intervals of any lengths |
-| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64 |
+| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no raw chunk decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64 |
 | `read_entries(tracks, chroms)` | every nonzero base of tracks over chromosomes, `SparseEntries` |
 | `channels="channel", items="read"` on `read`, `bins=` and `sums` | `(n, items, channels, width)`, the tracks arranged by two attributes, each item needing every channel once |
+
+An optional summary index accelerates selected-chromosome `tile_sums` and exact
+integer `sums` automatically, preserving order and duplicates. Interval sums
+read raw boundary pieces and retain the 2**24/2**53 exactness guards. Whole-genome
+reads use complete streams; floating-point sums, binned reads and NaN counting
+keep raw semantics. Missing, unknown or stale indices fall back; recognized
+corruption raises. Python reads local files. See `docs/summary_restarts.rst`
+in the source checkout.
 
 - Mixed tracks come back in the narrowest type holding every one exactly
   (float32 for uint8 + float32, float64 for uint32 + float32). `dtype=`
