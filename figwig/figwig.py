@@ -153,6 +153,13 @@ _SCRATCH_BYTES = 1 << 28
 _RADIX_BITS = 16
 _RADIX_PARALLEL = 1 << 18
 
+# write_sparse sorts its keys by numpy's merge sort, not the radix sort,
+# where they hold at most _MERGE_RUNS descents, or on one thread where at
+# most one in _MERGE_FAR is below the key _MERGE_REACH before it.
+_MERGE_RUNS = 8
+_MERGE_REACH = 4096
+_MERGE_FAR = 16
+
 # The entries of a sparse read from which its counting sort takes another
 # thread, and the bytes per entry its threads' rows of buckets past the
 # first may take.
@@ -1706,10 +1713,22 @@ class FigWigWriter:
 		cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
 		keyed = numpy.zeros(1, dtype=numpy.int64) if single else tids
 		keys = numpy.empty(n, dtype=numpy.int64)
-		_each(self._pool, n_chunks, lambda c: _entry_keys(positions, track_ids,
-			keyed, not single, self._group_of, self._slot_of, n_groups, shift,
-			slot_bits, tile_bits, keys, cuts[c], cuts[c + 1]))
-		order, keys = _radix_order(keys, bits, self._pool, n_chunks)
+		counted = []
+		_each(self._pool, n_chunks, lambda c: counted.append(_entry_keys(
+			positions, track_ids, keyed, not single, self._group_of, self._slot_of,
+			n_groups, shift, slot_bits, tile_bits, _MERGE_REACH, keys, cuts[c],
+			cuts[c + 1])))
+		descents, far = numpy.sum(counted, axis=0).tolist()
+		descents += int((keys[cuts[1:-1]] < keys[cuts[1:-1] - 1]).sum())
+		if descents <= _MERGE_RUNS or (n_chunks == 1 and far * _MERGE_FAR <= n):
+			# Keys in a few runs, or on one thread keys out of order only
+			# near each other, as reads given in position order are, where a
+			# contact map's columns each go back to its first rows, sort
+			# faster by numpy's merge sort.
+			order = numpy.argsort(keys, kind='stable')
+			keys = keys[order]
+		else:
+			order, keys = _radix_order(keys, bits, self._pool, n_chunks)
 
 		out = [numpy.empty(n, dtype=numpy.int64), numpy.empty(n,
 			dtype=numpy.int64), numpy.empty(n, dtype=numpy.float64), numpy.empty(n,

@@ -2518,18 +2518,30 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 
 @numba.njit(nogil=True, cache=True)
 def _entry_keys(positions, track_ids, tids, multi, group_of, slot_of, n_groups,
-	shift, slot_bits, tile_bits, keys, lo, hi):
+	shift, slot_bits, tile_bits, reach, keys, lo, hi):
 	"""The sort keys of entries lo to hi of a write_sparse call: from high
 	bits to low, the chromosome and group, the tile, the track's slot in its
-	group and the offset in the tile, each in its own bits."""
+	group and the offset in the tile, each in its own bits. Returns how many
+	keys are below the one before, and how many are below the one `reach`
+	before."""
 
 	mask = (numpy.int64(1) << shift) - 1
+	descents = 0
+	far = 0
+	last = numpy.int64(-1)
 	for i in range(lo, hi):
 		p = positions[i]
 		t = track_ids[i]
 		high = (tids[i] if multi else tids[0]) * n_groups + group_of[t]
-		keys[i] = ((((high << tile_bits) | (p >> shift)) << slot_bits) | slot_of[t]
+		key = ((((high << tile_bits) | (p >> shift)) << slot_bits) | slot_of[t]
 			) << shift | (p & mask)
+		keys[i] = key
+		if key < last:
+			descents += 1
+		if i - lo >= reach and key < keys[i - reach]:
+			far += 1
+		last = key
+	return descents, far
 
 
 @numba.njit(nogil=True, cache=True)

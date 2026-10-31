@@ -1768,6 +1768,10 @@ def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
 	the same message for two entries on one base."""
 
 	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	# The radix sort, whatever order the keys come in.
+	monkeypatch.setattr(figwig.figwig, '_MERGE_RUNS', -1)
+	monkeypatch.setattr(figwig.figwig, '_MERGE_REACH', 1)
+	monkeypatch.setattr(figwig.figwig, '_MERGE_FAR', 10 ** 9)
 	original = FigWigWriter._radix_entries
 	radix, used = [True], []
 
@@ -1827,6 +1831,73 @@ def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
 			messages.append(str(error.value))
 	assert messages[0] == messages[1]
 	assert used.count(True) == len(values) + 3 + 1
+
+
+@pytest.mark.parametrize('n_jobs', [1, 3])
+def test_write_sparse_sorts_by_either_sort_alike(tmp_path, monkeypatch, n_jobs):
+	"""Keys sorted by numpy's merge sort or by the radix sort give the same
+	file, byte for byte; on one thread, keys out of order over the whole
+	call go to the radix sort, and keys out of order only near each other,
+	or in a few runs, to the merge sort."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	rng = numpy.random.default_rng(12)
+	tracks = ['t{}'.format(i) for i in range(64)]
+	groups = [tracks[i:i + 4] for i in range(0, 64, 4)]
+
+	def in_position_order(positions, which):
+		order = numpy.lexsort((which, positions))
+		return positions[order], which[order]
+
+	# Each track over its own stretch, as reads are, in position order: keys
+	# out of order only near each other.
+	stretches = [numpy.sort(rng.choice(300, 150, replace=False)) + t * 70 for t in
+		range(64)]
+	local = in_position_order(numpy.concatenate(stretches), numpy.repeat(
+		numpy.arange(64), 150))
+	# Every track over the whole chromosome, in position order: each tile's
+	# keys go back to the first group's.
+	key = numpy.unique(rng.integers(0, 64 * CHROM_SIZES['chr1'], 20000))
+	far = in_position_order(key // 64, key % 64)
+	# Keys in order, in two runs.
+	p, t = far
+	order = numpy.lexsort((p % 64, t % 4, p // 64, t // 4))
+	half = len(order) // 2
+	runs = (numpy.concatenate([p[order][half:], p[order][:half]]),
+		numpy.concatenate([t[order][half:], t[order][:half]]))
+	inputs = {'local': local, 'far': far, 'runs': runs}
+	radix_runs = []
+	original = figwig.figwig._radix_order
+
+	def spy(*args):
+		radix_runs.append(True)
+		return original(*args)
+
+	monkeypatch.setattr(figwig.figwig, '_radix_order', spy)
+
+	def write(name, p, t, **constants):
+		with monkeypatch.context() as m:
+			for constant, value in constants.items():
+				m.setattr(figwig.figwig, constant, value)
+			path = str(tmp_path / '{}.fw'.format(name))
+			with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=groups,
+					n_jobs=n_jobs) as writer:
+				writer.write_sparse('chr1', p, t, numpy.arange(1, len(p) + 1))
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	for name, (p, t) in inputs.items():
+		del radix_runs[:]
+		chosen = write(name, p, t)
+		took_radix = len(radix_runs) > 0
+		merged = write(name + '_merge', p, t, _MERGE_RUNS=10 ** 9)
+		radix = write(name + '_radix', p, t, _MERGE_RUNS=-1, _MERGE_REACH=1,
+			_MERGE_FAR=10 ** 9)
+		assert chosen == merged == radix, name
+		if n_jobs == 1:
+			assert took_radix == (name == 'far'), name
+		else:
+			assert took_radix == (name != 'runs'), name
 
 
 def test_write_sparse_packs_group_batches_into_tasks(tmp_path, monkeypatch):
