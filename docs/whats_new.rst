@@ -12,9 +12,9 @@ Unreleased
 figwig files
 ------------
 
-	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` to write indexed summaries for interactive browser use. The index avoids downloading and decompressing complete genome-wide summary levels for small regions, which is practically necessary for responsive browsing of large multitrack files. Existing v1 readers still read the same raw values and summary payloads. The flag defaults to ``False`` and is unavailable with ``append=True``; normal append invalidates the accelerator while retaining foreign metadata.
+	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` (default ``False``) for responsive interactive browser use without whole-level summary downloads and decompression. Existing v1 readers remain compatible. See :doc:`summary_restarts` for usage and limits.
 
-	- ``FigWigReader`` uses the optional summary index automatically for selected-chromosome ``tile_sums`` and exact integer interval ``sums``, reading only the needed windows without a genome-sized summary array. Distant intervals read their union, wholly aligned exact intervals need no raw chunks, and whole-genome reads retain complete-stream checks. Ordinary and stale-index files keep the existing fallback; precision and NaN semantics are unchanged.
+	- ``FigWigReader`` uses the index automatically for selected-chromosome ``tile_sums`` and exact integer ``sums``, reading only requested ranges. Precision, missing-value semantics and ordinary-file fallback are unchanged.
 
 	- ``sums`` over a track stored as runs, such as the coverage ``figwig bam2fw -c`` writes, only decodes the changes of value before each interval, adds a run of integers once rather than base by base, and takes the tiles an interval covers whole from the file's tile sums when the track holds integers whose sums those keep exactly. On one thread of the benchmarks' server, the coverage of ENCODE ATAC-seq BAM ENCFF877LRY sums over 78,733 gene bodies in 0.47 s, where it took 7.9 s, and over 100,548 peaks in 0.41 s, where it took 1.6 s; a fold-change track over the gene bodies in 1.55 s, where it took 6.8 s; 48 count tracks over the gene bodies in 6.8 s, where they took 14.4 s. The sums are the same to the bit.
 

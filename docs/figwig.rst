@@ -334,22 +334,12 @@ tile sums are, and the default is none; they cost a few hundred kilobytes
 per level for six tracks and are announced by a header bit that a reader
 without them ignores.
 
-For interactive browser use of large multitrack files, indexed summaries are
-practically necessary: ordinary summaries require downloading and decompressing
-a complete genome-wide level for each selected track group, even for a small
-viewport. Write a :doc:`regional summary index <summary_restarts>` and
-restartable compressed summaries with ``FigWigWriter(..., summary_index=True)``
-(or the same ``write_figwig`` keyword).
-
-Python uses the index automatically for
-``tile_sums(chroms=..., level=...)`` and the exact integer ``sums`` optimization,
-reading the requested ranges without the whole genome's summaries or a
-genome-sized temporary array. Broad queries use complete streams; whole-genome
-queries retain their existing checks. Existing v1 readers return the same
-values. The default is ``False``; the flag
-cannot be combined with ``append=True``. Tiny levels and levels beyond the
-directory budget retain ordinary streams, and normal append, merge and reorder
-do not preserve the accelerator.
+For responsive interactive browsing of large multitrack files, enable
+``summary_index=True`` on ``FigWigWriter`` or ``write_figwig`` (default
+``False``). The :doc:`regional summary index <summary_restarts>` avoids
+downloading and decompressing whole levels for small viewports. Python uses it
+automatically for selected-chromosome ``tile_sums`` and exact integer ``sums``;
+existing v1 readers remain compatible.
 
 Writing
 -------

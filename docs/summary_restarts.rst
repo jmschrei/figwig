@@ -2,32 +2,17 @@ Optional regional summary index
 ===============================
 
 Indexed summaries are practically necessary for responsive interactive browser
-use of large multitrack files. Without the index, a small regional query must
-download and decompress a complete genome-wide summary level for each selected
-track group. The index limits this work to the windows covering the requested
-region. The `figwig-js <https://github.com/genome-spy/figwig-js/>`_ reader uses
-these indices for regional HTTP reads.
-
-Enable them with ``FigWigWriter(..., summary_index=True)`` or the same keyword
-to ``write_figwig``. The flag defaults to ``False``.
-This extension preserves the :doc:`frozen v1 format <format>`:
-raw data, summary bin grids, decoded summary values and whole-level reader APIs
-are unchanged. An unmodified v1 reader ignores the accelerator and reads the
-ordinary summary streams. Python uses the index for selected-chromosome
-summaries and exact integer interval sums from regular files.
-
-The extension uses optional bit 1 (``0x2``) and the top-level JSON key
-``org.figwig.summary-restarts``. The bit is not a claim of an independently
-registered upstream feature assignment. Literal BGZF and concatenated zlib
-streams are not v1 summaries; this extension instead places full-flush restart
-points inside each existing single zlib stream.
-
-Windows use a 32 KiB decoded target and a 2,048-bin cap. Readers that do not
-recognize the extension version use ordinary v1 summaries. The core file
-format remains version 1.
+use of large multitrack files. The `figwig-js <https://github.com/genome-spy/figwig-js/>`_
+reader uses them to fetch and decompress windows for the requested region,
+instead of complete genome-wide summary levels. Windows target 32 KiB decoded
+bytes, capped at 2,048 bins. The :doc:`core format <format>` remains v1;
+unmodified readers use the ordinary zlib summary streams.
 
 Usage and limits
 ----------------
+
+Enable the index with ``summary_index=True`` on ``FigWigWriter`` or
+``write_figwig``; the default is ``False``.
 
 .. code-block:: python
 
@@ -44,35 +29,24 @@ No reader flag is needed:
     totals = reader.sums("chr1", [100_001, 8_000_003],
                          [120_007, 8_020_009], tracks="counts")
 
-``tile_sums`` allocates only the selected chromosomes' bins, preserving their
-requested order, duplicate selections and existing float32/float64 values.
-Python's integer ``sums`` path reads the union of the whole tiles inside its
-intervals and decodes boundary pieces from raw data. Its existing exactness
-guards still apply: summaries with absolute values of 2**24 or more and spans
-whose peak times length reaches 2**53 use raw values. Floating-point ``sums``,
-``read(..., bins=...)`` and NaN counting keep their existing raw-data behavior.
-The reader retains checked catalogs, drops them on pickle and keeps no open
-descriptor or decoded-window cache. These are local reads; HTTP is not added.
+Python reads local files. ``tile_sums`` allocates only selected bins, preserving
+order, duplicates and float32/float64 values. Integer ``sums`` reads the union
+of whole-tile interiors and raw boundary pieces, falling back to raw values when
+a stored tile sum's magnitude reaches 2**24 or peak times interval length reaches
+2**53. Floating-point ``sums``, ``read(..., bins=...)`` and NaN counting use raw
+values. Only checked catalogs are cached; pickle drops them. No file descriptor
+or decoded window is retained.
 
-The writer leaves a level ordinary when both its compressed and decoded sizes
-are at most 64 KiB, when one ID-plus-sum row exceeds the 32 KiB decoded target,
-or when its directory would exceed its budget. The existing global summary
-cutoff (``n_tracks * n_tiles * 4 <= 2**28``) still applies. No summary is created
-where the writer would otherwise omit it. If no level is accelerated, no root,
-locator or optional bit is emitted.
-
-The directory has a 16 MiB construction budget, including its root, group
-locators, catalogs and pages. The writer divides its page budget deterministically
-among groups and considers each group's levels from finest to coarsest; unused
-shares are not reassigned. This keeps output independent of thread completion
-order. These are writer choices, rather than changes to v1 summary semantics.
+The writer keeps a level ordinary if both compressed and decoded sizes are at
+most 64 KiB, one ID-plus-sum row exceeds 32 KiB, or its directory would exceed
+its budget. The 16 MiB directory budget includes all structures; page allowance
+is divided deterministically among groups, finest levels first, without reassigning unused
+shares. The existing summary cutoff, ``n_tracks * n_tiles * 4 <= 2**28``, still
+applies. If no level is indexed, no root, locator or optional bit is emitted.
 
 ``summary_index=True`` with ``append=True`` raises before opening the file.
-Ordinary track append preserves every foreign metadata key, including the old
-locator, and clears the accelerator bit; the stale directory is unused. Merge
-and reorder create new files and default to ordinary summaries. They do not
-promise to preserve the accelerator. A new indexed file can be created explicitly
-through a new writer. This initial feature provides no converter or sidecar.
+Ordinary append clears the accelerator bit and preserves foreign metadata,
+including the stale locator. Merge and reorder discard the index.
 
 Discovery and checksums
 -----------------------
@@ -83,12 +57,11 @@ The locator is::
 
     "org.figwig.summary-restarts": {"version": 2, "offset": ROOT, "length": 256}
 
-Discovery requires both optional bit ``0x2`` and this key. A missing key or an
-unknown locator version follows the ordinary v1 path. Once the version is
-recognized, malformed current-generation structures are errors. A valid root
-whose header snapshot differs from the current header is stale and may be
-ignored. No discovery step requires the physical file length, a suffix request
-or a scan: the v1 header and existing tables already locate the metadata.
+Discovery requires optional bit ``0x2`` and this key. Missing keys and unknown
+versions use ordinary v1 reads; recognized malformed structures raise errors.
+A valid root with a different header snapshot is stale and may be ignored.
+Discovery uses only the v1 header and tables, without a file-size probe or scan.
+The optional bit is an extension convention, not an upstream-assigned feature.
 
 The root, group directory, catalogs and descriptor pages occupy unused data
 region bytes before the chromosome table. Root offset is at least 128; every
@@ -121,12 +94,11 @@ Offset    Field
 192       64 reserved zero bytes
 ========  ====================================================================
 
-The header snapshot binds the accelerator to the exact file generation. It is
-not a cryptographic content identity. There is no checksum cycle: metadata holds
-only the root locator, not the root checksum. The writer reserves the directory,
-writes the ordinary tables and index, computes the final header, fills the root
-and directory, and publishes the core header last. A failed new write leaves
-the previous path untouched through the writer's usual temporary-file mechanism.
+The header snapshot binds the index to the file generation. The writer reserves
+the directory, writes tables and index, computes the final header, fills the
+root and directory, then publishes the header last. Metadata holds only the
+root locator, avoiding checksum cycles. The writer's temporary file preserves
+the previous path on failure.
 
 Group directory and level catalogs
 ----------------------------------
@@ -228,5 +200,4 @@ corruption in an unread fragment is deferred until that fragment or the complete
 stream is requested. Python uses complete streams when a query touches at least
 half of a level's windows, and retains its existing complete-stream path for
 whole-genome queries. Complete-stream reads and unmodified v1 readers retain
-their CRC/Adler checks. This extension changes spatial access, not zero,
-NaN, precision, aggregation or resolution semantics.
+their CRC/Adler checks.

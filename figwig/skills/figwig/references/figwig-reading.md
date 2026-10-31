@@ -38,15 +38,13 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 | `read_entries(tracks, chroms)` | every nonzero base of tracks over chromosomes, `SparseEntries` |
 | `channels="channel", items="read"` on `read`, `bins=` and `sums` | `(n, items, channels, width)`, the tracks arranged by two attributes, each item needing every channel once |
 
-Files written with `summary_index=True` use the optional index automatically
-for selected-chromosome `tile_sums` and exact integer `sums`. Distant intervals
-read their union, with raw boundary pieces; integer summaries are used only
-below the existing 2**24/2**53 exactness limits. Whole-genome reads keep complete
-streams; float sums, general binned reads and NaN counting keep raw semantics.
-Only requested summary bins are allocated, with the given selection order and
-duplicates preserved. Missing/unknown/stale indices use ordinary v1 reads;
-recognized corrupt indices raise. The Python reader accepts local files, not
-HTTP URLs.
+An optional summary index accelerates selected-chromosome `tile_sums` and exact
+integer `sums` automatically, preserving order and duplicates. Interval sums
+read raw boundary pieces and retain the 2**24/2**53 exactness guards. Whole-genome
+reads use complete streams; floating-point sums, binned reads and NaN counting
+keep raw semantics. Missing, unknown or stale indices fall back; recognized
+corruption raises. Python reads local files. See `docs/summary_restarts.rst`
+in the source checkout.
 
 - Mixed tracks come back in the narrowest type holding every one exactly
   (float32 for uint8 + float32, float64 for uint32 + float32). `dtype=`

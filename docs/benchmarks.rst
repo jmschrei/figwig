@@ -770,24 +770,21 @@ fold change, gene bodies           1.55 s      0.26 s
 Regional stored summaries
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``benchmarks/compare_summaries.py`` compares files written with and without the
-optional :doc:`summary index <summary_restarts>`, on the same inputs in both
-storage orders. Its defaults are 8 and 48 tracks of deterministic sparse integer
-counts and float32 signals, five repetitions, and one thread. It reads one or
-every track: a selected chromosome's base and zoom summaries, nearby and distant
-interval sums (aligned and with raw boundary pieces), whole-genome summaries,
-raw windows and a sequence of repeated queries, pans and resolution changes.
+``benchmarks/compare_summaries.py`` compares the optional
+:doc:`summary index <summary_restarts>` on/off in both storage orders. Defaults
+are 8 and 48 tracks of seeded integer counts and float32 signals, five repetitions
+and one thread. Cases cover selected-chromosome and whole-genome summaries,
+aligned and unaligned interval sums, raw reads, pans and zooms, selecting one
+or all tracks.
 
 .. code-block:: bash
 
     python benchmarks/compare_summaries.py \
         --workdir benchmarks/results/summaries --repeats 5
 
-Real source tracks can be supplied as repeated ``--bigwig`` arguments. As in
-``compare_formats.py``, tracks beyond the supplied sources are cyclic shifts
-within each source chromosome, and off/on files receive identical values.
-``--dtype int32`` requires exact nonnegative integer counts; ``float32`` accepts
-signals. For example, using the reading benchmark's ATAC-seq input:
+Supply real inputs with repeated ``--bigwig`` arguments. Additional tracks are
+cyclic shifts within source chromosomes; on/off files receive identical values.
+Use ``--dtype int32`` for nonnegative integer counts or ``float32`` for signals:
 
 .. code-block:: bash
 
@@ -795,24 +792,22 @@ signals. For example, using the reading benchmark's ATAC-seq input:
         --dtype float32 --tracks 8 --chroms chr1 chr21 chr22 --tile 1024 \
         --repeats 3 --workdir benchmarks/results/encode-summaries
 
-Each file/mode/repetition runs in a fresh process after imports, kernel warmup
-and a linear file read. The OS page cache is warm, rather than disk-cold; each
-query opens a fresh reader, except that navigation keeps one across its steps.
-Configurations alternate and rotate. Output hashes must agree across layouts,
-flag settings and a same-indexed-file control that ignores the optional index.
-``--baseline-reader`` also accepts a previous revision of ``figwig.py``;
-``--baseline-revision`` checks its bytes against git. That module uses the
-snapshotted current helper kernels, a choice recorded in the manifest.
+Each file/mode/repetition uses a fresh process. Imports, kernel warmup and a
+linear file read precede timing; the OS page cache is warm. Readers are fresh
+except during navigation.
+Configurations rotate; hashes must match across layouts, flag settings and a
+control that ignores the index. ``--baseline-reader`` accepts an older
+``figwig.py``; ``--baseline-revision`` verifies it against git. The baseline
+shares current helper kernels, recorded in the manifest.
 
-The script keeps individual JSONL samples, medians and ranges, exact source and
-input hashes, source snapshots, environment and commands under ignored
-``benchmarks/results/``. Writer time includes open/write/close; a separate
-pipeline time includes source streaming and input hashing. Logical read calls,
-bytes and decoded bytes are counted in a separate, untimed pass and are not
-physical disk I/O. Peak RSS is the worker's cumulative high water, including
-all workload warmups, rather than an individual query's allocation. Run one
-``--workloads`` and one ``--selections`` setting for an isolated memory comparison.
-These local-file measurements are separate from HTTP latency measurements.
+Raw samples, medians, ranges, source/input hashes, source snapshots, environment
+and commands go under ignored ``benchmarks/results/``. Writer time includes
+open/write/close; pipeline time also includes source streaming and hashing.
+Logical read/decode counters are collected separately, untimed, and do not
+measure physical I/O. Peak RSS is the worker's cumulative high water, including
+warmups; select one ``--workloads`` value and one ``--selections`` value for an
+isolated memory comparison.
+These timings cover local-file access.
 
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

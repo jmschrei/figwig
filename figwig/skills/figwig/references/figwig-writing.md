@@ -7,14 +7,10 @@ call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
 
 Enable `summary_index=True` for large multitrack files intended for interactive
-browser use. Indexed summaries are practically necessary to avoid downloading
-and decompressing complete genome-wide levels for small viewports. Python also
-uses the index automatically for selected-chromosome `tile_sums` and exact
-integer `sums`. It preserves v1 values and old-reader access; the default is off.
-Tiny levels or a full index budget retain ordinary streams.
-It cannot be combined with `append=True`; ordinary append invalidates the index,
-and merge/reorder do not propagate it. See `docs/summary_restarts.rst` and
-`benchmarks/compare_summaries.py` in the source checkout.
+browser use to avoid whole-level downloads and decompression. The default is
+off; existing v1 readers remain compatible. `append=True` cannot create the
+index; append invalidates it, and merge/reorder discard it. See
+`docs/summary_restarts.rst` in the source checkout for details.
 
 ```python
 import numpy
