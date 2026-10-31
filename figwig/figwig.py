@@ -160,8 +160,10 @@ _GATHER_PER_THREAD = 1 << 18
 _GATHER_ROW_BYTES = 1
 
 # read_entries reads chromosomes together while a sparse read's sort key of
-# window, track and offset stays below this.
+# window, track and offset stays below _SPARSE_KEYS, and its plan holds at
+# most _ENTRIES_PAIRS (tile, group) pairs or one chromosome's.
 _SPARSE_KEYS = 1 << 63
+_ENTRIES_PAIRS = 1 << 20
 
 # A file keeps each track's sum over every tile, for summaries without a
 # read of the chunks, when those sums take at most this many bytes.
@@ -4281,14 +4283,26 @@ class FigWigReader:
 
 		# A sparse read of a window per chromosome, each as wide as the
 		# longest, reads nothing past a chromosome's end and gives its
-		# entries sorted by chromosome, track and position. The chromosomes
-		# go in as few reads as keep the read's sort key of window, track and
-		# offset below _SPARSE_KEYS.
+		# entries sorted by chromosome, track and position. Chromosomes go
+		# in one read while its plan, a pair per tile and group, stays within
+		# _ENTRIES_PAIRS or one chromosome's, and its sort key of window,
+		# track and offset below _SPARSE_KEYS.
 		widest = max(self.chrom_sizes[name] for name in names)
-		per_read = max(1, _SPARSE_KEYS // (max(1, len(ids)) * max(1, widest)))
+		most = max(1, _SPARSE_KEYS // (max(1, len(ids)) * max(1, widest)))
+		n_groups = max(1, len(numpy.unique(self._group_of[ids])))
+		pairs = [n_groups * -(-self.chrom_sizes[name] // self.tile) for name in
+			names]
+		budget = max(_ENTRIES_PAIRS, max(pairs))
+		batches, total = [[]], 0
+		for name, p in zip(names, pairs):
+			if batches[-1] and (total + p > budget or len(batches[-1]) == most):
+				batches.append([])
+				total = 0
+			batches[-1].append(name)
+			total += p
+
 		parts = []
-		for a in range(0, len(names), per_read):
-			batch = names[a:a + per_read]
+		for batch in batches:
 			found = self.read(batch, numpy.zeros(len(batch), dtype=numpy.int64),
 				widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
 			tids = numpy.array([self._tids[name] for name in batch],

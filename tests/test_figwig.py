@@ -1465,6 +1465,41 @@ def test_read_entries_in_several_reads(fw, track_fw, monkeypatch, order,
 		numpy.testing.assert_array_equal(a, b)
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_read_entries_plans_within_the_longest_chromosome(fw, track_fw,
+	monkeypatch, order):
+	"""With no budget of its own, read_entries reads chromosomes together
+	only while their tiles stay within the longest chromosome's, and gives
+	the entries one read gives."""
+
+	reader = FigWigReader(fw if order == 'positions' else track_fw)
+	tracks = ['atac_plus', 'signal', 'negative']
+	one = reader.read_entries(tracks=tracks, n_jobs=2)
+	monkeypatch.setattr(figwig.figwig, '_ENTRIES_PAIRS', 0)
+	calls = []
+	read = FigWigReader.read
+
+	def counted(self, chroms, *args, **kwargs):
+		calls.append(len(chroms))
+		return read(self, chroms, *args, **kwargs)
+
+	monkeypatch.setattr(FigWigReader, 'read', counted)
+	several = reader.read_entries(tracks=tracks, n_jobs=2)
+	tiles = [-(-size // reader.tile) for size in reader.chrom_sizes.values()]
+	expected, total = [0], 0
+	for n in tiles:
+		if expected[-1] and total + n > max(tiles):
+			expected.append(0)
+			total = 0
+		expected[-1] += 1
+		total += n
+	assert calls == expected and len(expected) > 1
+	for a, b in zip((one.chroms, one.positions, one.tracks, one.values), (
+			several.chroms, several.positions, several.tracks, several.values)):
+		assert a.dtype == b.dtype
+		numpy.testing.assert_array_equal(a, b)
+
+
 ###
 # Nonzero bases as input, and matrix chunks
 
