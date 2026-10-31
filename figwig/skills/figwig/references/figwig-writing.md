@@ -6,10 +6,12 @@ with `write(chroms, starts, values, ends=None, tracks=None)` and
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
 
-`summary_index=True` opts into the regional summary accelerator,
-used automatically by Python's selected-chromosome `tile_sums` and exact integer
-`sums`, and by figwig-js over HTTP. It preserves v1 values and old-reader access;
-the default is off. Tiny levels or a full index budget retain ordinary streams.
+Enable `summary_index=True` for large multitrack files intended for interactive
+browser use. Indexed summaries are practically necessary to avoid downloading
+and decompressing complete genome-wide levels for small viewports. Python also
+uses the index automatically for selected-chromosome `tile_sums` and exact
+integer `sums`. It preserves v1 values and old-reader access; the default is off.
+Tiny levels or a full index budget retain ordinary streams.
 It cannot be combined with `append=True`; ordinary append invalidates the index,
 and merge/reorder do not propagate it. See `docs/summary_restarts.rst` and
 `benchmarks/compare_summaries.py` in the source checkout.

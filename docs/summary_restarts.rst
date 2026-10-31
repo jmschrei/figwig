@@ -1,14 +1,20 @@
 Optional regional summary index
 ===============================
 
-``FigWigWriter(..., summary_index=True)`` opts into an accelerator
-for regional summary reads. The default is ``False``. The same flag is accepted
-by ``write_figwig``. This extension preserves the :doc:`frozen v1 format <format>`:
+Indexed summaries are practically necessary for responsive interactive browser
+use of large multitrack files. Without the index, a small regional query must
+download and decompress a complete genome-wide summary level for each selected
+track group. The index limits this work to the windows covering the requested
+region. The `figwig-js <https://github.com/genome-spy/figwig-js/>`_ reader uses
+these indices for regional HTTP reads.
+
+Enable them with ``FigWigWriter(..., summary_index=True)`` or the same keyword
+to ``write_figwig``. The flag defaults to ``False``.
+This extension preserves the :doc:`frozen v1 format <format>`:
 raw data, summary bin grids, decoded summary values and whole-level reader APIs
 are unchanged. An unmodified v1 reader ignores the accelerator and reads the
-ordinary summary streams. Figwig-js uses it for bounded regional HTTP reads;
-Python uses it for selected-chromosome summaries and exact integer interval sums
-from regular files.
+ordinary summary streams. Python uses the index for selected-chromosome
+summaries and exact integer interval sums from regular files.
 
 The extension uses optional bit 1 (``0x2``) and the top-level JSON key
 ``org.figwig.summary-restarts``. The bit is not a claim of an independently

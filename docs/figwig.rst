@@ -334,10 +334,14 @@ tile sums are, and the default is none; they cost a few hundred kilobytes
 per level for six tracks and are announced by a header bit that a reader
 without them ignores.
 
-For readers that fetch small regions over HTTP, new files can opt into
-``FigWigWriter(..., summary_index=True)`` (or the same ``write_figwig`` keyword).
-This writes a :doc:`regional summary index <summary_restarts>`
-and restartable compressed summaries. Python uses the index automatically for
+For interactive browser use of large multitrack files, indexed summaries are
+practically necessary: ordinary summaries require downloading and decompressing
+a complete genome-wide level for each selected track group, even for a small
+viewport. Write a :doc:`regional summary index <summary_restarts>` and
+restartable compressed summaries with ``FigWigWriter(..., summary_index=True)``
+(or the same ``write_figwig`` keyword).
+
+Python uses the index automatically for
 ``tile_sums(chroms=..., level=...)`` and the exact integer ``sums`` optimization,
 reading the requested ranges without the whole genome's summaries or a
 genome-sized temporary array. Broad queries use complete streams; whole-genome
@@ -641,13 +645,12 @@ with, stand in for a bigWig's zoom levels down to the tile's resolution:
 a summary at 1 Mb bins is a reshape of them, and a summary finer than a
 tile decodes the chunks under it, through ``bins``, which took 0.09 s for
 100 bp bins over chr22 where pyBigWig's ``stats`` took 9.8 s
-(:doc:`benchmarks`); a genome browser needs the tracks written back with
-``fw2bw -z``. Every value is at
-most float64, and there are no string or categorical tracks. A read from a
-remote file would need the group's index, a few tens of KB for a
-genome-wide track, before its first chunk; the reader does not read over
-HTTP. The format is little-endian, and read and written by this package
-alone; the layout below is complete enough to read it without it.
+(:doc:`benchmarks`). Use ``fw2bw -z`` to export tracks for browsers that require
+bigWig. Every value is at most float64, and there are no string or categorical
+tracks. A remote reader needs the group's index, a few tens of KB for a
+genome-wide track, before its first chunk. The Python reader uses local files.
+The format is little-endian; the layout below is complete enough to implement
+another reader or writer.
 
 The layout
 ----------

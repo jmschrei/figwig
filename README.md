@@ -358,10 +358,15 @@ of these in GPU memory, where `torch.from_dlpack` takes them without a
 copy. A base no track wrote is 0, as is a bigWig's no-data unless
 `bw2fw --missing nan` keeps them apart.
 
-For regional summary access, `FigWigWriter(..., summary_index=True)` writes an
-optional index, default off. Python uses it automatically for
-selected-chromosome `tile_sums` and exact integer interval `sums`, and figwig-js
-uses it for regional HTTP reads. Existing v1 readers return the same values.
+Indexed summaries are practically necessary for responsive interactive browser
+use of large multitrack files. Without them, a small regional query must download
+and decompress an entire genome-wide summary level for each selected track
+group. [figwig-js](https://github.com/genome-spy/figwig-js/) uses the indices to
+fetch and decompress only the summary windows needed for the visible region.
+
+Write them with `FigWigWriter(..., summary_index=True)`; the flag defaults to
+off. Python uses the index automatically for selected-chromosome `tile_sums`
+and exact integer interval `sums`. Existing v1 readers return the same values.
 See the [summary index guide](docs/summary_restarts.rst) and
 `benchmarks/compare_summaries.py` for usage, limits and reproducible comparisons.
 

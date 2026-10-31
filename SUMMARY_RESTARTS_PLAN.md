@@ -3,8 +3,12 @@
 Implement an opt-in `FigWigWriter(..., summary_index=True)` accelerator, default
 `False`, preserving the frozen v1 layout, stored summary bytes after inflation,
 and existing reader APIs. This repository owns its extension specification,
-writer and local Python summary reader. The companion browser reader plan is
-`/Users/klavikka/projektit/figwig-js/SUMMARY_RESTARTS_PLAN.md`.
+writer and local Python summary reader.
+
+Indexed summaries are practically necessary for interactive browser use of
+large multitrack files: each viewport must avoid downloading and decompressing
+complete genome-wide summary levels. The [summary index guide](docs/summary_restarts.rst)
+describes the browser reader that uses them.
 
 ## Contract and simplicity review
 
@@ -112,9 +116,10 @@ index for selected chromosomes and the exact integer interval-sum optimization.
   read/decode counters separately from timing. Distinguish warm OS page cache
   from cold reader state and support public bigWig inputs as well as a seeded
   synthetic dataset. Retain source/input hashes, commands and every raw run.
-- Implement regional support in figwig-js without changing whole-level APIs or
-  ordinary v1 fallback. Test real Chromium cross-origin range access when CORS
-  hides the physical size; verify exact ranges, cache ownership, abort and close.
+- Implement regional support in the browser reader without changing whole-level
+  APIs or ordinary v1 fallback. Test real Chromium cross-origin range access
+  when CORS hides the physical size; verify exact ranges, cache ownership,
+  abort and close.
 - Benchmark flag off/on on identical data over a shared 50 Mbps link with 10 ms
   simulated RTT. Report initialization separately, cold and panning/zoom queries,
   payload/index/gap bytes, requests, bytes inflated, cache memory, file growth
