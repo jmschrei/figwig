@@ -9,7 +9,7 @@ import numpy
 
 METADATA_KEY = 'org.figwig.summary-restarts'
 OPTIONAL_BIT = 2
-PROFILE_VERSION = 2
+VERSION = 2
 ROOT_BYTES = 256
 PAGE_ENTRIES = 102
 TARGET_BYTES = 1 << 15
@@ -70,14 +70,14 @@ class SummaryIndexReader:
 
 	@classmethod
 	def open(cls, read, locator, header, bound, directory, tracks, tiles, order):
-		if not isinstance(locator, dict) or locator.get('version') != PROFILE_VERSION:
+		if not isinstance(locator, dict) or locator.get('version') != VERSION:
 			return None
 		offset = locator.get('offset')
 		_require(type(offset) is int and locator.get('length') == ROOT_BYTES and
 			128 <= offset <= bound - ROOT_BYTES, 'invalid root locator.')
 		root = read(offset, ROOT_BYTES)
 		_require(root[:8] == b'FWRSUM1\0' and struct.unpack_from('<HH', root, 8)
-			== (PROFILE_VERSION, ROOT_BYTES), 'invalid root magic, version or size.')
+			== (VERSION, ROOT_BYTES), 'invalid root magic, version or size.')
 		_crc(root, struct.unpack_from('<I', root, 12)[0], 12)
 		_require(not any(root[36:64]) and not any(root[192:]), 'nonzero reserved bytes.')
 		if root[64:192] != header:
@@ -336,7 +336,7 @@ class SummaryIndex:
 		"""Resolve legacy payload offsets after core table locations are known."""
 		out = bytearray(self.size())
 		out[:8] = b'FWRSUM1\0'
-		struct.pack_into('<HHIQIII', out, 8, PROFILE_VERSION, ROOT_BYTES, 0,
+		struct.pack_into('<HHIQIII', out, 8, VERSION, ROOT_BYTES, 0,
 			offset + ROOT_BYTES, len(self.tracks), PAGE_ENTRIES, TARGET_BYTES)
 		out[64:192] = header
 		at = ROOT_BYTES + len(self.tracks) * 32

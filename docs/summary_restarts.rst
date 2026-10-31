@@ -3,24 +3,22 @@ Optional regional summary index
 
 ``FigWigWriter(..., summary_index=True)`` opts into an accelerator
 for regional summary reads. The default is ``False``. The same flag is accepted
-by ``write_figwig``. This profile preserves the :doc:`frozen v1 format <format>`:
+by ``write_figwig``. This extension preserves the :doc:`frozen v1 format <format>`:
 raw data, summary bin grids, decoded summary values and whole-level reader APIs
 are unchanged. An unmodified v1 reader ignores the accelerator and reads the
 ordinary summary streams. Figwig-js uses it for bounded regional HTTP reads;
 Python uses it for selected-chromosome summaries and exact integer interval sums
 from regular files.
 
-The profile uses optional bit 1 (``0x2``) and the top-level JSON key
+The extension uses optional bit 1 (``0x2``) and the top-level JSON key
 ``org.figwig.summary-restarts``. The bit is not a claim of an independently
 registered upstream feature assignment. Literal BGZF and concatenated zlib
-streams are not v1 summaries; this profile instead places full-flush restart
+streams are not v1 summaries; this extension instead places full-flush restart
 points inside each existing single zlib stream.
 
-This profile is version 2, with a 32 KiB decoded window target
-and a 2,048-bin cap. Readers that do not recognize a profile use the ordinary
-v1 summaries, including the earlier 16 KiB profile 1. The root's
-``FWRSUM1`` magic identifies the directory family; its separate version field
-identifies this profile. The core file format remains version 1.
+Windows use a 32 KiB decoded target and a 2,048-bin cap. Readers that do not
+recognize the extension version use ordinary v1 summaries. The core file
+format remains version 1.
 
 Usage and limits
 ----------------
@@ -106,7 +104,7 @@ Root, 256 bytes
 Offset    Field
 ========  ====================================================================
 0         Eight bytes ``FWRSUM1\0``
-8         Profile version ``u2 = 2``; root bytes ``u2 = 256``
+8         Extension version ``u2 = 2``; root bytes ``u2 = 256``
 12        Root CRC-32 ``u4``
 16        Group-directory offset ``u8``, exactly ``ROOT + 256``
 24        Group count ``u4``, equal to the core header's
@@ -216,7 +214,7 @@ no dictionary, and an appended empty final block ``03 00``. Require the marker,
 a true DEFLATE end, exact output length, complete input consumption, and both
 CRCs. Limit output while inflating; checking the length only afterward is unsafe.
 The artificial final block provides framing, not integrity. ``Z_SYNC_FLUSH``
-does not reset history and is insufficient for this profile.
+does not reset history and cannot provide independent restart points.
 
 Regional reads validate the selected directory pages and fragments. They cannot
 check the original whole-stream CRC/Adler without reading the whole stream;
@@ -224,5 +222,5 @@ corruption in an unread fragment is deferred until that fragment or the complete
 stream is requested. Python uses complete streams when a query touches at least
 half of a level's windows, and retains its existing complete-stream path for
 whole-genome queries. Complete-stream reads and unmodified v1 readers retain
-their CRC/Adler checks. This profile changes spatial access, not zero,
+their CRC/Adler checks. This extension changes spatial access, not zero,
 NaN, precision, aggregation or resolution semantics.

@@ -26,9 +26,8 @@ exact final 128-byte header. This is a branch-local convention,
 not a claim of an upstream-assigned official feature. Do not change reserved
 fields or the frozen core record layout.
 
-The 32 KiB / 2,048-bin design is profile 2 in both the metadata
-locator and root. Unsupported profiles, including the earlier 16 KiB profile 1,
-fall back to ordinary v1 summaries. Keep the existing magic as a family marker.
+Use a 32 KiB decoded window target and a 2,048-bin cap. Readers that do not
+recognize the extension version fall back to ordinary v1 summaries.
 
 The selected design uses directly addressed CRC-paged fixed-window descriptors,
 with no B+ tree or per-chromosome block directory. A window is the existing

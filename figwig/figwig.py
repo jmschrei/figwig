@@ -95,7 +95,7 @@ from .writer import _check_engine
 from .writer import _compress_blocks
 from ._summary_index import METADATA_KEY as _SUMMARY_INDEX_KEY
 from ._summary_index import OPTIONAL_BIT as _OPTIONAL_SUMMARY_INDEX
-from ._summary_index import PROFILE_VERSION as _SUMMARY_INDEX_VERSION
+from ._summary_index import VERSION as _SUMMARY_INDEX_VERSION
 from ._summary_index import SummaryIndex
 from ._summary_index import SummaryIndexReader
 from ._summary_index import SummaryIndexError

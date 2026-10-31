@@ -275,7 +275,7 @@ def test_restart_decompression_caps_output_before_accepting_it(pair, tmp_path, m
 	compressor = zlib.compressobj(wbits=-15)
 	bomb = compressor.compress(bytes(1 << 20)) + compressor.flush(zlib.Z_FULL_FLUSH)
 	window = next(w for w in ref['windows'] if w['sums_compressed_bytes'] >= len(bomb))
-	# Keep the bad output inside the original source extent and the profile's
+	# Keep the bad output inside the original source extent and the window's
 	# compressed-size bound, so the bounded inflater itself must reject it.
 	page = ref['index_offset'] + window['window'] // 102 * 4096
 	slot = page + 16 + window['window'] % 102 * 40
@@ -328,19 +328,16 @@ def test_stale_index_uses_ordinary_summary_stream(pair, oracle, tmp_path):
 	assert reader._summary_restart is False
 
 
-@pytest.mark.parametrize('profile', [1, 9])
+@pytest.mark.parametrize('version', [1, 9])
 @pytest.mark.parametrize('order', ['positions', 'tracks'])
-def test_unsupported_profiles_keep_all_v1_values_and_zooms(tmp_path, monkeypatch, profile, order):
+def test_unknown_extension_versions_keep_all_v1_values_and_zooms(tmp_path, monkeypatch, version, order):
 	with monkeypatch.context() as previous:
-		previous.setattr(_summary_index, 'PROFILE_VERSION', profile)
-		previous.setattr(_summary_index, 'TARGET_BYTES', 16384)
-		previous.setattr(_summary_index, 'MAX_WINDOW_BINS', 1024)
-		previous.setattr(runtime, '_SUMMARY_INDEX_VERSION', profile)
+		previous.setattr(_summary_index, 'VERSION', version)
+		previous.setattr(runtime, '_SUMMARY_INDEX_VERSION', version)
 		path = write(tmp_path / 'unsupported.fw', order, enabled=True)
 	file = v1.File(path)
 	root = file.metadata['org.figwig.summary-restarts']['offset']
-	assert struct.unpack_from('<H', file.bytes, root + 8)[0] == profile
-	assert struct.unpack_from('<I', file.bytes, root + 32)[0] == 16384
+	assert struct.unpack_from('<H', file.bytes, root + 8)[0] == version
 	reader = FigWigReader(path, verify=True)
 	for level in range(4):
 		assert reader.tile_sums(chroms='chrB', level=level).tobytes() == \
