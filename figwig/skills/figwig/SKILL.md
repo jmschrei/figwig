@@ -49,7 +49,7 @@ say.
 - bigWigs have `missing` (0.0 by default; pyBigWig gives NaN): a base no
   interval covers reads as it, and a write leaves out bases whose value is
   it or NaN. A figwig file has no `missing`: a base never written is 0.
-- A base past the end of its chromosome is NaN in a float output.
+- A base past the end of its chromosome is NaN in a float output of a bigWig read unless `oob=` is given.
 - `n_jobs=8` by default on every reader and writer, `-1` for every CPU;
   `-p` on the commands defaults to 1.
 - Anything figwig cannot read exactly raises `ValueError` with the cause.
