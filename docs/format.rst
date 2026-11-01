@@ -14,9 +14,12 @@ the same layout, from which parsers in other languages can be compiled,
 whose compiled Python parser ``tests/test_kaitai.py`` runs over the same
 files.
 
-The optional :doc:`regional summary index <summary_restarts>` enables browser
-access to small regions without whole-level downloads or decompression. It uses
-optional metadata and unused data-region bytes, preserving the core v1 layout.
+An optional regional summary index (header ``optional`` bit 1, described in
+"The regional summary index" below, with usage in :ref:`regional
+summaries <regional-summaries>`)
+lets a reader decode the summaries of a region without inflating a whole
+level. It is an addition of the kind the next paragraph describes: version 1
+readers ignore it and read the file as they read any other.
 
 **Stability.** Version 1 is frozen: the layout on this page does not
 change. A file that needs another layout carries another ``version`` in
@@ -24,7 +27,7 @@ its header, and a reader of version 1 refuses it. An addition that a
 version 1 reader can ignore is announced by a bit of the header's
 ``optional`` field, and one it must know by a bit of ``required``, which a
 reader refuses when it does not know the bit. No ``required`` bit is
-defined, and one ``optional`` bit is.
+defined, and two ``optional`` bits are.
 
 The words *must* and *may* below are requirements on readers and writers;
 *the writer* means the one in this package, whose choices among the
@@ -76,7 +79,9 @@ A file is, in this order:
 1. the 128-byte header;
 2. the data region: chunks, in position order, or blocks, in track order,
    in any order and with any unused bytes between them, from offset 128 to
-   the chromosome table;
+   the chromosome table; when the file has a regional summary index, the
+   writer places its structures after the last chunk or block, ending at the
+   chromosome table;
 3. the chromosome table, at ``chroms``;
 4. the statistics table, at ``tracks``;
 5. the metadata, at ``metadata``, of ``metadata_length`` bytes;
@@ -90,7 +95,8 @@ ends as the writer lays them out, and ``tables_crc`` covers the bytes from
 it reads any of them.
 
 Every structure below is found through an offset in the header or the
-index, never by scanning, and the data region may hold bytes nothing
+index, or, for the regional summary index, in the metadata, never by
+scanning, and the data region may hold bytes nothing
 points to (see "Appending and merging"). A reader must not assume that
 the chunks are contiguous, that they are in tile order in the file, that
 a chunk starts on any alignment, or that the data region ends where the
@@ -186,7 +192,7 @@ The header
    * - 100
      - ``optional``
      - u4
-     - feature bits a reader may ignore; bit 0 says each index record ends with a zoom section, and the writer sets it in every file; a reader ignores any other bit
+     - feature bits a reader may ignore; bit 0 says each index record ends with a zoom section, and the writer sets it in every file; bit 1 says the file has a regional summary index, found through the metadata ("The regional summary index"); a reader that does not know the bit, or any other, ignores it
    * - 104
      - ``header_crc``
      - u4
@@ -251,8 +257,9 @@ The metadata
 ------------
 
 ``metadata_length`` bytes of UTF-8 encoding one JSON object. The format
-defines five keys; a writer that appends to a file keeps every other key
-of the file's metadata as it was, so other software may add its own.
+defines five keys, and one more for the regional summary index below; a
+writer that appends to a file keeps every other key of the file's metadata
+as it was, so other software may add its own.
 
 .. list-table::
    :header-rows: 1
@@ -270,6 +277,8 @@ of the file's metadata as it was, so other software may add its own.
      - ``"positions"`` or ``"tracks"``; informational, since the header's ``flags`` decide
    * - ``figwig``
      - a string, the version of the package that wrote the file; informational
+   * - ``org.figwig.summary-restarts``
+     - optional: the locator of the regional summary index, an object of ``version`` (2), ``offset`` (the root's) and ``length`` (256); present only in a file with a regional summary index, and kept by an append, which clears ``optional`` bit 1
 
 The ``group`` keys define the groups: group *g* holds the tracks whose
 ``group`` is *g*, in track order, and that order is the order of a group's
@@ -290,7 +299,7 @@ a value in the tile, or in a *one* chunk; the values are the same in any.
 
 The writer serializes the object with Python's ``json.dumps(document,
 allow_nan=False)``: keys in insertion order, the five keys above after any
-carried over, in the order ``figwig``, ``genome``, ``attributes``,
+carried over (the locator among them), in the order ``figwig``, ``genome``, ``attributes``,
 ``order``, ``tracks``; a track's record in the order its keys were given,
 with ``dtype`` and ``group`` added at the end when they were not;
 separators ``", "`` and ``": "``; non-ASCII characters as ``\uXXXX``
@@ -456,6 +465,224 @@ has bins 0 and 1. A bin's sum of a track is the sum of the f4 tile sums
 of the summary over the bin's tiles, in f8; the listed bins are those that
 hold a listed tile. A file written without zoom levels has ``n_zooms`` 0,
 and a group without a summary has no levels either.
+
+.. _regional-summary-index:
+
+The regional summary index
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A group's summary and each of its zoom levels are one zlib stream, which a
+reader cannot enter in the middle. The regional summary index lets a writer
+restart the compressor inside those streams and record where, so that a
+reader that wants the bins of one region inflates only the pieces that hold
+them. It is optional, for readers and for writers: the streams below stay
+the streams of "The summary" and "The zoom section", inflating to the same
+bytes, though not compressed to the same bytes: a restarted stream is longer,
+and the record holds its length and CRC-32 as it does those of any stream. A
+reader that ignores the index reads them whole as before. The format version
+stays 1; the index is
+announced by ``optional`` bit 1 of the header and found through the
+``org.figwig.summary-restarts`` key of the metadata, whose value is the
+object ``{"version": 2, "offset": ROOT, "length": 256}``. The extension has
+its own version, 2 here, so that it can change without a new format
+version.
+
+A reader finds the index only when ``optional`` bit 1 is set and the key is
+present. It uses the ordinary streams for a locator without the bit, for one
+that is not an object or has a ``version`` it does not know, and for an index
+that is *stale*, whose root
+holds a copy of the header that differs from the file's header (an append
+changes the header and clears the bit, and a writer that left the bit set
+would still be caught by the copy). For a locator it does know whose
+structures fail a check below, the reader refuses the file as corrupt, since
+the file claims an index that it cannot trust.
+
+All integers are little-endian. Offsets are absolute u8 byte offsets, except
+a fragment's, which is a u4 offset from the first byte of its zlib stream.
+The root, the group directory, the level catalogs and the descriptor pages
+lie in the data region, from ``ROOT`` (at least 128) to ``chroms``, do not
+overlap one another, and are not reached through a group's record: records
+stay back to back through ``length`` as "The index" says.
+
+**The root** is 256 bytes at ``ROOT``:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 24 66
+
+   * - offset
+     - field
+     - meaning
+   * - 0
+     - magic
+     - the 8 bytes ``FWRSUM1`` and a zero byte
+   * - 8
+     - ``version``, ``len_root``
+     - u2 each: 2 and 256
+   * - 12
+     - ``crc``
+     - u4, the CRC-32 of the 256 bytes with this field as 0
+   * - 16
+     - ``directory_offset``
+     - u8, ``ROOT + 256``
+   * - 24
+     - ``n_groups``
+     - u4, the header's
+   * - 28
+     - ``descriptors_per_page``
+     - u4, 102
+   * - 32
+     - ``window_target``
+     - u4, 32768
+   * - 36
+     - reserved
+     - 28 bytes, zero
+   * - 64
+     - ``header_snapshot``
+     - the 128 bytes of the file's final header
+   * - 192
+     - reserved
+     - 64 bytes, zero
+
+**The group directory** is ``n_groups`` locators of 32 bytes from
+``directory_offset``; group *g*'s is at ``directory_offset + 32 * g``:
+``levels_offset`` (u8, the offset of its catalog), ``n_levels`` (u4, from 1 to
+13: the summary, then
+the group's zoom levels in order, so more than 1 only when ``optional`` bit
+0 is set), ``levels_crc`` (u4, the CRC-32 of the catalog), ``group`` and
+``n_tracks`` (u4 each, equal to the group's number and track count in the
+metadata), ``crc`` (u4, the CRC-32 of the 32 bytes with this field as 0)
+and ``reserved`` (u4, zero). A reader checks a locator's CRC-32 before it follows
+``levels_offset``.
+
+**A level catalog** is ``n_levels`` entries of 32 bytes: ``source_offset`` (u8),
+``index_offset`` (u8), ``source_rows``, ``source_bytes`` and ``source_crc`` (u4
+each) and ``window_bins`` (u4). The entry's position is the level: 0 is the
+summary, with f4 sums, and level *k* from 1 has ``factor`` ``4 ** k`` and f8
+sums. ``source_rows``, ``source_bytes`` and ``source_crc`` are the level's
+``n_sum`` or ``n``, ``n_sum_bytes`` or ``n_bytes`` and ``crc`` of the group's
+record, and ``source_offset`` is the offset of the stream's first byte, which
+lies, whole, inside the group's record. A level with ``source_bytes`` 0 is
+absent, and one with ``source_rows`` 0 and a stream of 8 bytes is present and
+empty; a reader checks the stream's CRC-32 and Adler-32 before it returns zeros
+for it.
+
+``index_offset`` and ``window_bins`` both 0 make an *ordinary* level, which a
+reader reads whole. Otherwise the level is *restarted*: ``window_bins`` is a
+power of two of at most 2,048, ``source_rows`` is nonzero, and ``index_offset``
+is the offset of the level's descriptor pages.
+
+**Windows and descriptor pages.** Bins are numbered over the genome as in
+"The zoom section", for the summary as for the zoom levels, and a level has
+*B* bins in all: the sum over the chromosomes of ``ceil(tiles / factor)``. A
+*window* is ``window_bins`` consecutive bin numbers, window *j* being the bins
+``j * window_bins`` up to ``(j + 1) * window_bins`` or *B*; windows do not
+respect chromosomes, though bins do. A restarted level has
+``ceil(B / window_bins)`` windows, listed in order in pages: page *p* is at
+``index_offset + 4096 * p`` and holds the windows from ``102 * p`` on,
+``count`` of them, the smaller of 102 and the windows left, in
+``16 + 40 * count`` bytes: the 4 bytes ``FWRP``, ``first_window`` (u4,
+``102 * p``), ``count`` (u4), ``crc`` (u4, the CRC-32 of the page's bytes with
+this field as 0), and ``count`` descriptors of 40 bytes, ten u4 each:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 76
+
+   * - field
+     - meaning
+   * - ``n_rows``
+     - the rows of the level's stream whose bin numbers lie in the window, at most ``window_bins`` and at most the bins the window holds
+   * - ``first_source_row``
+     - the number of rows of the level before the window's first; ``first_source_row + n_rows`` is at most the level's ``source_rows``
+   * - ``ids_offset``, ``ids_bytes``, ``ids_crc``, ``ids_raw_crc``
+     - the bin-number fragment: its offset in the stream, its length, the CRC-32 of its compressed bytes and of its ``4 * n_rows`` decoded bytes
+   * - ``sums_offset``, ``sums_bytes``, ``sums_crc``, ``sums_raw_crc``
+     - the same for the sums fragment, which decodes to ``n_rows * tracks * w`` bytes, ``w`` 4 for the summary and 8 for a zoom level
+
+A window with no rows has all ten fields 0. For the others, the rows are
+those of the stream's rows whose bin numbers lie in the window, in the
+stream's order, so the bin numbers of a fragment ascend, are at least
+``j * window_bins`` and below the smaller of ``(j + 1) * window_bins`` and *B*, and the
+sums keep the group's slot order. Both fragments lie between the
+stream's 2-byte header and its 4-byte trailer, at positive length and at
+most ``2 * decoded + 64`` bytes; a window's bin-number fragment ends before
+its sums fragment starts; no two fragments overlap; and the windows with
+rows follow one another in ``first_source_row`` and in both offsets. A writer
+lays a level out so; a reader checks these within a page, and the CRC-32 values
+of the fragments catch what it does not.
+
+**The restarts.** The stream of a restarted level is one zlib stream of the
+bytes the ordinary stream holds, in the same order: all the bin numbers, then
+all the sums. The compressor has a 32 KiB window, no preset dictionary, and
+is flushed with ``Z_FULL_FLUSH`` after the bin numbers of each window that
+has rows, in window order, and then after the sums of each, so that every
+fragment starts where the compressor's history was reset (the 2 bytes of the
+zlib header, for the first) and ends with the flush marker ``00 00 ff ff``;
+the stream then ends as any zlib stream does. A reader inflates a fragment
+by itself: raw DEFLATE with no dictionary, the fragment followed by the two
+bytes ``03 00`` (an empty final block), which supply the end of the stream
+and not any check. It requires the marker, an end of stream reached, no
+input left over, exactly the decoded length the descriptor implies,
+and both CRC-32 values, and it limits the output as it inflates, since
+checking the length afterwards would allow a fragment to expand without
+bound. A flush that does not reset the history (``Z_SYNC_FLUSH``) cannot be
+used.
+
+A reader that reads fragments does not check the whole stream's CRC-32 and
+Adler-32, since it does not read the rest of the stream: a corrupt fragment
+that is never requested is found when it or the whole stream is read. A
+reader may also read a level whole, with those checks, which it should when
+a query wants at least about half of the level's windows.
+
+**Checks.** A reader that uses the index checks, before it reads or allocates
+by a value, and whether or not it verifies chunks:
+
+- the locator: an object whose ``version`` it knows (otherwise it uses the
+  ordinary streams), with ``length`` 256 and an ``offset`` of at least 128 and
+  at most 256 bytes before ``chroms``, and at most 16 MiB before it;
+- the root: its magic, ``version``, ``len_root``, CRC-32 and zero bytes, then
+  that its ``header_snapshot`` is the file's header (otherwise the index is stale
+  and it uses the ordinary streams), that ``directory_offset`` is ``ROOT + 256``,
+  that ``n_groups`` is the header's, and that ``descriptors_per_page`` and
+  ``window_target`` are 102 and 32768;
+- each group's locator, when it reads the group: its CRC-32, that ``group`` and
+  ``n_tracks`` match the metadata, that ``n_levels`` is from 1 to 13 and more
+  than 1 only with ``optional`` bit 0, that the catalog lies in the data region
+  and has the CRC-32 the locator holds;
+- the catalog: that the streams lie in the group's record where "The summary" and
+  "The zoom section" put them and end where the record ends, that ``n_zooms`` is
+  ``n_levels - 1``, that each level's ``source_rows`` is at most its bins and an
+  absent or empty level is as above, that an ordinary level has no
+  ``index_offset``, that a restarted level's ``window_bins`` is a power of two of
+  at most 2,048 whose windows fit the 32 KiB target, and that the catalog and the
+  pages of the group lie in the data region and do not overlap one another;
+- the stream of a level it reads: that the record's header for it (``n_sum`` or
+  ``n``, ``n_sum_bytes`` or ``n_bytes``, ``crc``) is what the catalog holds, and
+  that its zlib header is deflate with no preset dictionary and a valid check
+  value, with a window of 32 KiB for a restarted level;
+- each page it reads: its magic, ``first_window``, ``count``, CRC-32 and
+  descriptors against the rules above;
+- each fragment it reads: its two CRC-32 values, its marker, its decoded length,
+  and that the bin numbers ascend and lie in the window.
+
+**What a writer chooses.** The index is written only for a file that keeps
+summaries (``n_tracks * n_tiles * 4`` at most 2**28 bytes), and a level is
+restarted only if it passes these tests; otherwise it stays ordinary. A
+level with no rows, one with a decoded size at most 64 KiB whose compressed
+size is also at most 64 KiB, and one whose row of ``4 + w * tracks`` bytes
+exceeds 32 KiB stay ordinary. ``window_bins`` is the largest power of two at
+most 2,048 for which ``window_bins * (4 + w * tracks)`` is at most 32,768. The pages of
+all levels of the file take at most 16 MiB with the root, the directory and
+the catalogs; the writer divides what remains after those equally among the
+groups, and a group spends its share on its levels from the finest, a
+level whose pages would exceed what is left staying ordinary. If no level
+is restarted, the writer writes no index, no key and no bit. The root, the
+directory and the pages are written before the header, and the root holds
+the header's final bytes, so that a header that names an index is never ahead
+of it. An append (see "Appending and merging") leaves the index's bytes as unused
+bytes and clears the bit; a merge into a new file does not copy it, and its
+writer writes one of its own if asked.
 
 Chunks
 ------
@@ -639,7 +866,9 @@ tables and index are then unused bytes inside the data region, between the
 old chunks and the new, which no run, record or offset points to; a merge
 into a new file copies each run's and block's bytes and drops them. A
 reader that counts a file's bytes may report them, as ``figwig info -b``
-does, but must not read them.
+does, but must not read them. An append clears ``optional`` bit 1 and keeps
+the metadata key, so a reader finds no index in the appended file. A merge
+writes a new file, with an index of its own if its writer was asked for one.
 
 Limits
 ------
@@ -668,6 +897,8 @@ Limits
      - 12
    * - summary kept
      - while ``n_tracks * n_tiles * 4 <= 2**28`` bytes
+   * - regional summary index
+     - 16 MiB of structures; windows of at most 2,048 bins and 32 KiB decoded; 102 descriptors per page
    * - run bytes
      - the writer starts a new run past 2**40 bytes
 
@@ -699,6 +930,9 @@ A reader of version 1:
   pointers in range, and a block's positions strictly ascending and
   matching its record's ``first`` and ``last``;
 - treats every failure as a corrupt or unsupported file, never as a value.
+
+A reader may ignore the regional summary index and read every summary and
+zoom stream whole; one that uses it follows "The regional summary index".
 
 A reader may skip the check of a track's varints it does not read, since
 their byte count is all it needs to step over them, and may ignore the

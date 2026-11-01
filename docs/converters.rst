@@ -42,7 +42,9 @@ it), ``--dtype`` one dtype for every track, ``-l`` the compression
 level, with 0 for uncompressed chunks, which costs four bytes per base of
 a dense float track, and ``-z`` the number of zoom levels to keep beside
 the tile sums (none by default; ``bam2fw`` takes it too, and ``reorder``
-and ``merge`` keep the input's). Each piece of a chromosome is read on one thread of
+and ``merge`` keep the input's), and ``--summary-index`` to write the
+optional regional summary index (:ref:`regional summaries <regional-summaries>`; off by default,
+not with ``--append``; ``bam2fw`` takes it too). Each piece of a chromosome is read on one thread of
 its own while the piece before it is encoded and compressed on ``-p``
 threads, and the arrays read are handed to the writer without a copy.
 ``--append`` adds the
@@ -185,7 +187,7 @@ the other ways of making a per-cell file.
                          -n NAME [-m METADATA] [-g GENOME]
                          [--barcode-column BARCODE_COLUMN] [--cells CELLS]
                          [--groups GROUPS] [-t TILE] [--dtype DTYPE] [-z ZOOMS]
-                         [-l LEVEL] [--force] [-v]
+                         [-l LEVEL] [--summary-index] [--force] [-v]
                          filename [filename ...]
 
 figwig reorder
@@ -206,7 +208,10 @@ input's when it is in position order and to 16,384 and 8 otherwise; ``-l``
 sets the compression level, which defaults to the input's when the output
 is in the input's order, and otherwise to 6 in position order and 0 in
 track order, so a file reordered to track order is uncompressed, and
-three to four times larger, unless ``-l`` says otherwise. The output may
+three to four times larger, unless ``-l`` says otherwise. The output has a
+regional summary index when the header of the input announces one, unless
+``--no-summary-index`` says otherwise, and ``--summary-index`` writes one for
+an input that has none. The output may
 be the input's own path, and no other existing file unless ``-f`` is
 given: the input is read
 whole before the output takes its place. The values are read in the
@@ -228,7 +233,11 @@ their track names must differ; ``figwig reorder`` writes a file again with
 another tile, level or order first. The chunks are copied as they are, so
 a merge costs a read and a write of the bytes and no decoding, and
 leaves out the tables and indexes a file appended to in place left
-behind. The output may be one of the inputs, and no other existing file
+behind. The output has a regional summary index when the header of the first
+file announces one, unless ``--no-summary-index`` says otherwise, and
+``--summary-index`` writes one when it does not; it is written anew over the
+merged tracks, not copied.
+The output may be one of the inputs, and no other existing file
 unless ``-f`` is given. ``-g`` records a reference genome; the first
 file's is kept otherwise, as are its attributes.
 
@@ -247,8 +256,9 @@ table of its tracks with their name, dtype, group, nonzero bases (NaN
 bases are not counted), sum and every attribute. A control character in a
 name or attribute is escaped and a nested attribute is printed as JSON, so
 every value takes one line. ``-b`` also counts the
-bytes its chunks take, its tables and index take, the bytes nothing uses,
-which an append in place leaves behind and ``merge`` drops, and any bytes
+bytes its chunks take, its tables and index take, those of its regional summary
+index, the bytes nothing uses, which an append in place leaves behind (an
+index it could not use, stale or damaged, among them) and ``merge`` drops, and any bytes
 past the end the header names, which a killed append leaves and the next
 append writes over; it reads every group's index, a few milliseconds per
 group. A file of thousands of tracks prints a line per track.

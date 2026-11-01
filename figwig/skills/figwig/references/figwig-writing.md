@@ -6,11 +6,13 @@ with `write(chroms, starts, values, ends=None, tracks=None)` and
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
 
-Enable `summary_index=True` for large multitrack files intended for interactive
-browser use to avoid whole-level downloads and decompression. The default is
-off; existing v1 readers remain compatible. `append=True` cannot create the
-index; append invalidates it, and merge/reorder discard it. See
-`docs/summary_restarts.rst` in the source checkout for details.
+`summary_index=True` (default off) also writes the regional summary index of the
+format page; `append=True` cannot create it, and an append clears it. On
+the command line it is `--summary-index` on `bw2fw`, `bam2fw`, `reorder` and
+`merge`, the last two keeping an input's index by default. It adds a few
+percent to the file and speeds up reads of part of the genome, while a read of
+the whole genome is slower and raw reads are unchanged; a level under 64 KiB
+stays ordinary, so a small file gets none.
 
 ```python
 import numpy

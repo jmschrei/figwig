@@ -12,9 +12,7 @@ Unreleased
 figwig files
 ------------
 
-	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` (default ``False``) for responsive interactive browser use without whole-level summary downloads and decompression. Existing v1 readers remain compatible. See :doc:`summary_restarts` for usage and limits.
-
-	- ``FigWigReader`` uses the index automatically for selected-chromosome ``tile_sums`` and exact integer ``sums``, reading only requested ranges. Precision, missing-value semantics and ordinary-file fallback are unchanged.
+	- ``FigWigWriter`` and ``write_figwig`` accept ``summary_index=True`` (default ``False``), which writes an optional index that lets a reader decode the summary of one region without inflating a whole level, and ``FigWigReader`` uses it automatically for selected-chromosome ``tile_sums`` and exact integer ``sums``, reading only the requested ranges, with the same values and the same fallback to raw values. The format stays version 1, and readers that do not know the index read the file as before. On one thread of the benchmarks' server, over 64 integer tracks in position order, ``tile_sums`` of a chromosome that is 20 Mb of 300 takes 19 ms, where it took 225 ms, and four integer ``sums`` of 200 kb 23 ms, where they took 81 ms; the file is 1.9% larger, and ``tile_sums`` of the whole genome takes 280 ms, where it took 262. Reading the sums no longer loops over the chromosomes in Python, so with or without the index ``tile_sums`` over a file of 100,000 contigs takes 21 ms, where it took 49. See :ref:`regional-summaries` and :doc:`benchmarks`. Thanks @tuner!
 
 	- ``sums`` over a track stored as runs, such as the coverage ``figwig bam2fw -c`` writes, only decodes the changes of value before each interval, adds a run of integers once rather than base by base, and takes the tiles an interval covers whole from the file's tile sums when the track holds integers whose sums those keep exactly. On one thread of the benchmarks' server, the coverage of ENCODE ATAC-seq BAM ENCFF877LRY sums over 78,733 gene bodies in 0.47 s, where it took 7.9 s, and over 100,548 peaks in 0.41 s, where it took 1.6 s; a fold-change track over the gene bodies in 1.55 s, where it took 6.8 s; 48 count tracks over the gene bodies in 6.8 s, where they took 14.4 s. The sums are the same to the bit.
 
@@ -22,6 +20,10 @@ figwig files
 
 Converters and commands
 -----------------------
+
+	- ``--summary-index`` on ``figwig bw2fw`` and ``bam2fw`` writes the regional summary index, and ``figwig reorder`` and ``merge`` write one when the header of their input (of the first file, for ``merge``) announces one, unless ``--no-summary-index``, or when ``--summary-index`` is given.
+
+	- ``figwig info -b`` counts a file's regional summary index apart from its unused bytes.
 
 	- ``figwig bam2fw -c`` on threads writes each 4 Mb of a chromosome's coverage as one dense window, whose tiles the writer encodes on its threads, where it encoded every run on the calling thread, unless the 4 Mb hold fewer runs than one per 1,024 bases, as sparse coverage such as RNA-seq's does, which goes in as runs as before: the 2.4 GB ATAC-seq BAM takes 7.2 s on 8 threads, where it took 14.2 s. The file is the same to the byte, and one thread writes it as before.
 

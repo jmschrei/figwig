@@ -36,7 +36,7 @@ say.
 | a bigWig at a URL | download it first; figwig takes a URL for a path and raises `FileNotFoundError` |
 | a bigWig's zoom-level summaries (`stats()`, a whole-chromosome mean) | pyBigWig or pybigtools; figwig reads every base. A figwig file's `tile_sums` serves this |
 | a bigWig whose intervals overlap | pybigtools, which sums them; figwig raises |
-| a browser that requires bigWig tracks | `figwig fw2bw -z 10` |
+| a genome browser track from a figwig file | `figwig fw2bw -z 10`; browsers do not read `.fw` |
 
 ## Conventions that hold everywhere
 
@@ -70,7 +70,7 @@ say.
 | BAM, SAM, BED or fragment files → bigWig count tracks | `references/bam2bw.md` |
 | bigWigs ↔ figwig file (`bw2fw`, `fw2bw`), reads → figwig tracks (`bam2fw`), `reorder`, `merge`, `info`, the metadata table, `--missing nan` | `references/converters.md` |
 | read a figwig file: tracks by attribute, dtype, `sparse=`, `labels=` pseudobulks, `bins=`, `sums` over peaks or genes, `tile_sums`, zoom levels, reads or cells as `channels=`/`items=`, GPU output, DataLoader | `references/figwig-reading.md` |
-| write a figwig file: tracks and dtypes, tile, groups and order, `write_sparse` for cells or reads, `append=True`, `add_file`, `verify=True` | `references/figwig-writing.md` |
+| write a figwig file: tracks and dtypes, tile, groups and order, `write_sparse` for cells or reads, `append=True`, `add_file`, `verify=True`, `summary_index=` | `references/figwig-writing.md` |
 | a whole job: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip, Fiber-seq reads as tracks | `references/recipes.md` |
 | choose `n_jobs` or `-p`, estimate memory, the first call's compile time, measure on the target machine | `references/threads-and-memory.md` |
 
@@ -83,5 +83,6 @@ say.
 | 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
 | `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |
 | threads not making a read faster; a first call that takes 30 s | `references/threads-and-memory.md` |
+| `tile_sums`, or `sums` of integer tracks, over one chromosome slow on a big multitrack file | `references/figwig-writing.md`: `summary_index=True` |
 | a figwig read slower than expected, or decoding more tracks than asked | `references/threads-and-memory.md` for threads and batches, then `references/figwig-writing.md`: tile, groups and order |
 | "has been replaced or rewritten since this reader opened it" | `references/errors.md`: open the reader again |

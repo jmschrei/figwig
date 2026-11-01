@@ -767,82 +767,36 @@ fold change, peaks                 0.33 s      0.070 s
 fold change, gene bodies           1.55 s      0.26 s
 =================================  ==========  ==========
 
-Regional stored summaries
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Regional summaries
+~~~~~~~~~~~~~~~~~~
 
-``benchmarks/compare_summaries.py`` compares the optional
-:doc:`summary index <summary_restarts>` on/off in both storage orders. Defaults
-are 8 and 48 tracks of seeded integer counts and float32 signals, five repetitions
-and one thread. Cases cover selected-chromosome and whole-genome summaries,
-aligned and unaligned interval sums, raw reads, pans and zooms, selecting one
-or all tracks.
+The same reads of the same 64 integer tracks, written without and with
+``summary_index=True`` (:ref:`regional summaries <regional-summaries>`): three
+chromosomes of 200, 80 and 20 Mb, half of the tiles of 1,024 bases nonzero in
+each track, 8 tracks per group and 6 zoom levels, in position order and in track
+order. One thread, a new reader for each read, the minimum of 15, in
+milliseconds (``claude_comments/2026-11-01-regional-summaries/``,
+``make_indexed.py`` and ``bench_index.py``):
 
-.. code-block:: bash
+=======================================  ==========  ==========  ==========  ==========
+read                                     position,   position,   track,      track,
+                                         plain       indexed     plain       indexed
+=======================================  ==========  ==========  ==========  ==========
+``tile_sums``, chr3 (20 Mb of 300)       225         19          150         31
+``tile_sums``, chr2 (80 Mb of 300)       246         75          160         104
+``tile_sums``, chr2, level 2             131         8.6         116         19
+``tile_sums``, the whole genome          262         280         173         214
+``tile_sums``, the whole genome, 2       132         152         117         132
+4 integer ``sums`` of 200 kb             81          23          7.5         1.6
+``read``, 16 windows of 2,048 bases      14.3        14.3        0.47        0.46
+the file                                 123.1 MB    125.5 MB    91.5 MB     94.4 MB
+=======================================  ==========  ==========  ==========  ==========
 
-    python benchmarks/compare_summaries.py \
-        --tracks 8 48 --dtype int32 float32 --tile 16384 --tiles 65536 \
-        --threads 1 --repeats 3 --selections all \
-        --workloads chrom_base sums_local_aligned whole_base raw_windows \
-        --workdir benchmarks/results/summary-index-m5-32k
-
-**Apple M5 example.** At revision
-`4eb3ecd <https://github.com/tuner/figwig/commit/4eb3ecdd252fb17b134ed034f78b0aaff07d01a7>`_,
-with Python 3.12.13, NumPy 2.5.4, numba 0.68.0, deflate 0.9.0 and zlib 1.2.12,
-the command above gave these median milliseconds over three repetitions for
-all 48 int32 tracks. The seeded synthetic genome has three chromosomes; the
-selected chromosome has 2,048 of 100,352 tiles. Times include fresh reader
-construction with a warm OS page cache. Columns show ordinary → indexed:
-
-.. list-table::
-    :header-rows: 1
-
-    * - Query
-      - Position order, ms
-      - Track order, ms
-    * - Selected-chromosome ``tile_sums``
-      - 29.54 → 2.12
-      - 41.80 → 4.96
-    * - Four nearby aligned integer ``sums``
-      - 29.17 → 0.96
-      - 40.65 → 4.57
-    * - Whole-genome ``tile_sums``
-      - 38.83 → 43.45
-      - 52.66 → 59.22
-    * - Eight raw 2,048-base windows
-      - 9.40 → 9.37
-      - 31.16 → 30.23
-
-All 336 samples matched across layouts and index settings, including the
-same-file index-ignored control. Whole-genome reads still inflate complete
-streams and can be slower with restart boundaries.
-
-Supply real inputs with repeated ``--bigwig`` arguments. Additional tracks are
-cyclic shifts within source chromosomes; on/off files receive identical values.
-Use ``--dtype int32`` for nonnegative integer counts or ``float32`` for signals:
-
-.. code-block:: bash
-
-    python benchmarks/compare_summaries.py --bigwig ENCFF830RWF.bigWig \
-        --dtype float32 --tracks 8 --chroms chr1 chr21 chr22 --tile 1024 \
-        --repeats 3 --workdir benchmarks/results/encode-summaries
-
-Each file/mode/repetition uses a fresh process. Imports, kernel warmup and a
-linear file read precede timing; the OS page cache is warm. Readers are fresh
-except during navigation.
-Configurations rotate; hashes must match across layouts, flag settings and a
-control that ignores the index. ``--baseline-reader`` accepts an older
-``figwig.py``; ``--baseline-revision`` verifies it against git. The baseline
-shares current helper kernels, recorded in the manifest.
-
-Raw samples, medians, ranges, source/input hashes, source snapshots, environment
-and commands go under ignored ``benchmarks/results/``; choose an empty workdir
-for each run. Writer time includes
-open/write/close; pipeline time also includes source streaming and hashing.
-Logical read/decode counters are collected separately, untimed, and do not
-measure physical I/O. Peak RSS is the worker's cumulative high water, including
-warmups; select one ``--workloads`` value and one ``--selections`` value for an
-isolated memory comparison.
-These timings cover local-file access.
+A read of part of the genome inflates only the pieces of the summary that hold
+its bins, and is faster the smaller the part. A read of the whole genome inflates
+every stream whole, and the restart points make the streams larger, so it is 7%
+slower in position order and 24% in track order at level 0, and 13% to 15% at
+level 2. Raw reads are the same, and the files are 1.9% and 3.1% larger.
 
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

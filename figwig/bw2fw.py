@@ -82,6 +82,11 @@ def _parser(prog):
 	parser.add_argument('-l', '--level', default=6, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"6.")
+	parser.add_argument('--summary-index', action='store_true', help="Write "
+		"the optional regional summary index, which lets a reader decode the "
+		"tile sums of one chromosome or interval without inflating a whole "
+		"level. It adds a few percent to the file and takes effect on levels "
+		"of more than 64 KiB. Not with --append. Default is off.")
 	parser.add_argument('--missing', default=0.0, type=float, help="The value "
 		"of a base that no interval of a bigWig covers: 0, or nan to keep it "
 		"apart from a measured 0, as for methylation or conservation, at the "
@@ -176,7 +181,7 @@ def _shared_chrom_sizes(readers, sizes=None):
 
 def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_TILE,
 	groups=_DEFAULT_GROUPS, level=6, n_jobs=1, verbose=False, missing=0.0,
-	append=False, zooms=0):
+	append=False, zooms=0, summary_index=False):
 	"""Write the bigWigs `filenames` as the tracks of `output`, or add them
 	to it with `append`."""
 
@@ -218,7 +223,8 @@ def _convert(filenames, output, tracks, chrom_sizes, genome=None, tile=_DEFAULT_
 		missing))}
 	with FigWigWriter(output, chrom_sizes, tracks, genome=genome, tile=tile,
 			groups=groups, level=level, n_jobs=n_jobs, append=append,
-			attributes=attributes, zooms=zooms) as writer, ThreadPoolExecutor(1) as \
+			attributes=attributes, zooms=zooms, summary_index=summary_index) as \
+			writer, ThreadPoolExecutor(1) as \
 			reader:
 		writer._copies = False
 		ahead = None
@@ -269,6 +275,8 @@ def main(argv=None, prog='figwig bw2fw'):
 		_convert(args.bigwig, args.output, tracks, chrom_sizes, genome=args.genome,
 			tile=args.tile, groups=args.groups, level=args.level,
 			n_jobs=args.parallel, verbose=args.verbose, missing=args.missing,
-			append=args.append, zooms=args.zooms)
+			append=args.append, zooms=args.zooms,
+			summary_index=args.summary_index)
 	except (ValueError, TypeError, OSError) as e:
-		raise _exit(prog, e)
+		raise _exit(prog, e, **{'summary_index=True': '--summary-index',
+			'append=True': '--append'})

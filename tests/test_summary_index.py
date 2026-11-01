@@ -1,281 +1,520 @@
-"""The optional directory against unchanged v1 readers and an independent oracle."""
+# test_summary_index.py
+# Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
-import io
-import shutil
+"""The units of figwig/_summary_index.py: merging bin ranges, bounded
+inflating, the writer that decides which levels are restarted and how their
+windows are sized, and the reader's checks of a descriptor page. The files
+the writer produces are in test_summary_writer.py, the reads in
+test_summary_reader.py and the damaged files in test_summary_corruption.py.
+"""
+
 import struct
 import zlib
 
-import kaitaistruct
 import numpy
 import pytest
 
-from figwig import FigWigReader
-from figwig import FigWigWriter
-from figwig import write_figwig
-from figwig.merge import _merge
-from figwig.reorder import _reorder
 from figwig import _summary_index
+from figwig._summary_index import _SummaryIndex
+from figwig._summary_index import _SummaryIndexError
+from figwig._summary_index import _SummaryIndexReader
+from figwig._summary_index import _Level
+from figwig._summary_index import Entry
+from figwig._summary_index import _check_levels
+from figwig._summary_index import _index_bytes
+from figwig._summary_index import _inflate
+from figwig._summary_index import _merge_ranges
+from figwig._summary_index import _parse_page
+from figwig._summary_index import _restart
+from figwig._summary_index import _stream_offsets
 
-from . import format_reference as v1
-from .kaitai_figwig import Figwig
-from .summary_reference import read_index
-from .test_kaitai import compare as compare_kaitai
-
-
-KEY = 'org.figwig.summary-restarts'
-CHROMS = {'chrA': 192000, 'chrB': 603, 'empty': 267}
-TRACKS = [{'name': 'track{}'.format(i), 'dtype': 'float64' if i == 3 else
-	'float32'} for i in range(8)]
-
-
-def signals():
-	rng = numpy.random.default_rng(1701)
-	for chrom, length in CHROMS.items():
-		tiles = -(-length // 16)
-		rows = numpy.zeros((8, tiles))
-		rows[0] = rng.normal(2, 1, tiles).astype(numpy.float32)
-		rows[1] = numpy.arange(tiles) % 10 + 1
-		rows[3] = 2 ** 24 + 1 + numpy.arange(tiles) % 3
-		rows[4] = rng.uniform(0, 10, tiles).astype(numpy.float32)
-		rows[4, ::37] = numpy.nan
-		rows[6] = numpy.nan
-		rows[7] = 0.25 + numpy.arange(tiles) % 7
-		values = numpy.repeat(rows, 16, axis=1)[:, :length]
-		values[2, ::2] = 1
-		values[2, 1::2] = -1
-		if chrom == 'chrA':
-			values[:, 4096 * 16:6144 * 16] = 0
-		elif chrom == 'empty':
-			values[:] = 0
-		yield chrom, values
+from .summary_files import repair
 
 
-def write(path, order='positions', enabled=False, n_jobs=2):
-	with FigWigWriter(path, CHROMS, TRACKS, tile=16, groups=8, order=order,
-			level=6, engine='zlib', zooms=3, n_jobs=n_jobs,
-			summary_index=enabled) as writer:
-		for chrom, values in signals():
-			writer.write(chrom, [0], values[None])
-	return path
+##
+# _merge_ranges
+##
+
+@pytest.mark.parametrize('ranges, expected', [
+	([], []),
+	([(2, 5)], [(2, 5)]),
+	# Touching ranges are one; an empty range goes; order does not matter.
+	([(5, 9), (1, 3), (3, 4), (9, 9), (12, 15)], [(1, 4), (5, 9), (12, 15)]),
+	([(1, 10), (2, 3), (4, 12)], [(1, 12)]),
+	([(7, 7), (3, 3)], []),
+])
+def test_merge_ranges_is_the_union_of_the_nonempty_ranges(ranges, expected):
+	assert _merge_ranges(ranges) == expected
 
 
-@pytest.fixture(scope='module', params=['positions', 'tracks'])
-def pair(tmp_path_factory, request):
-	root = tmp_path_factory.mktemp('summary-' + request.param)
-	return (write(root / 'ordinary.fw', request.param),
-		write(root / 'indexed.fw', request.param, True))
+def test_merge_ranges_takes_an_array_and_a_long_unsorted_list():
+	"""An (n, 2) array is taken as it is, and the union of many ranges in any
+	order is the one a sweep gives: here 1,000 ranges of 3 bins every 5, which
+	leave a gap of 2 between each, and the same in reverse and shuffled."""
+
+	rng = numpy.random.default_rng(0)
+	starts = numpy.arange(0, 5000, 5)
+	pairs = numpy.column_stack([starts, starts + 3])
+	want = [(int(a), int(a) + 3) for a in starts]
+	assert _merge_ranges(pairs) == want
+	assert _merge_ranges(pairs[::-1]) == want
+	assert _merge_ranges(pairs[rng.permutation(len(pairs))]) == want
+	# Ranges of 5 touch, and one that is inside another changes nothing.
+	touching = numpy.column_stack([starts, starts + 5])
+	assert _merge_ranges(numpy.vstack([touching, [[7, 9]]])) == [(0, 5000)]
 
 
-def test_indexed_files_keep_every_legacy_value_and_summary(pair):
-	ordinary, indexed = map(v1.File, pair)
-	assert indexed.header.optional == 3 and indexed.header.version == 1
-	assert indexed.header.zooms == 0 and not any(indexed.header.padding)
-	assert read_index(pair[0]) is None
-	verified = read_index(pair[1])
-	assert any(level['window_bins'] for group in verified['groups'] for
-		level in group['levels'])
-	assert indexed.header.chroms - verified['offset'] <= 16 * 1024 ** 2
-	for a, b in zip(ordinary.groups, indexed.groups):
-		assert a.summary[0].tobytes() == b.summary[0].tobytes()
-		assert a.summary[1].tobytes() == b.summary[1].tobytes()
-		for x, y in zip(a.zooms, b.zooms):
-			assert x[0] == y[0] and x[1].tobytes() == y[1].tobytes()
-			assert x[2].tobytes() == y[2].tobytes()
-	reader = FigWigReader(pair[1], verify=True)
-	for chrom, values in signals():
-		actual = reader.read(chrom, [0], values.shape[1], dtype='float64')[0]
-		assert numpy.array_equal(actual, values, equal_nan=True)
-		assert numpy.array_equal(numpy.signbit(actual), numpy.signbit(values))
-	for g, group in enumerate(indexed.groups):
-		ids, sums = reader._tile_sums_of(g)
-		assert ids.tolist() == group.summary[0].tolist()
-		assert sums.tobytes() == group.summary[1].tobytes()
-		for actual, expected in zip(reader._zoom_levels_of(g), group.zooms):
-			assert actual[0] == expected[0]
-			assert actual[1].tolist() == expected[1].tolist()
-			assert actual[2].tobytes() == expected[2].tobytes()
-	parsed = Figwig(kaitaistruct.KaitaiStream(io.BytesIO(indexed.bytes)))
-	compare_kaitai(parsed, indexed)
+def test_merge_ranges_takes_numpy_integers_and_returns_python_ones():
+	merged = _merge_ranges((numpy.int64(a), numpy.uint32(b)) for a, b in
+		[(4, 6), (0, 2)])
+	assert merged == [(0, 2), (4, 6)]
+	assert all(type(x) is int for pair in merged for x in pair)
 
 
-def test_global_window_can_span_chromosomes_without_changing_bins(pair):
-	verified = read_index(pair[1])
-	base = verified['groups'][0]['levels'][0]
-	assert any(window['ids'][0] < 12000 <= window['ids'][-1] for
-		window in base['windows'])
-	assert any(window['ids'][0] >= 0 for window in base['windows'])
-	# No descriptors or fragments describe the long all-zero middle gap.
-	occupied = {window['window'] for window in base['windows']}
-	for bin_id in range(4096, 6144, base['window_bins']):
-		assert bin_id // base['window_bins'] not in occupied
-	assert any(level['index_offset'] == 0 for group in verified['groups'] for
-		level in group['levels'])
+##
+# _inflate
+##
+
+def deflated(payload, raw=False):
+	compressor = zlib.compressobj(wbits=-15 if raw else 15)
+	return compressor.compress(payload) + compressor.flush()
 
 
-def test_empty_tracks_keep_available_empty_streams(pair):
-	file = v1.File(pair[1])
-	if file.header.order != 'tracks':
-		return
-	verified = read_index(pair[1])
-	for group in [5]:
-		for level in verified['groups'][group]['levels']:
-			assert level['source_rows'] == 0 and level['source_bytes'] == 8
-			assert level['window_bins'] == level['index_offset'] == 0
-			assert level['windows'] is None
-	# Track-order writing currently retains zero-sum rows for NaN-only tiles.
-	# The accelerator must retain those IDs rather than infer spatial absence.
-	missing = verified['groups'][6]['levels'][0]
-	assert missing['source_rows'] > 0
-	assert all(not window['sums'].any() for window in missing['windows'])
+@pytest.mark.parametrize('raw', [False, True])
+def test_inflate_returns_the_bytes_of_a_stream(raw):
+	payload = bytes(range(256)) * 4
+	assert _inflate(deflated(payload, raw), len(payload), raw) == payload
 
 
-def test_disabled_flag_and_thread_counts_keep_deterministic_output(tmp_path):
-	paths = [tmp_path / name for name in ['default.fw', 'disabled.fw',
-		'one.fw', 'two.fw']]
-	with FigWigWriter(paths[0], CHROMS, TRACKS, tile=16, groups=8,
-			level=6, engine='zlib', zooms=3, n_jobs=2) as writer:
-		for chrom, values in signals():
-			writer.write(chrom, [0], values[None])
-	write(paths[1])
-	assert paths[0].read_bytes() == paths[1].read_bytes()
-	write(paths[2], enabled=True, n_jobs=1)
-	write(paths[3], enabled=True, n_jobs=2)
-	assert paths[2].read_bytes() == paths[3].read_bytes()
-
-
-@pytest.mark.parametrize('value', [None, 0, 1, 'yes', numpy.bool_(True)])
-def test_flag_rejects_non_booleans_before_creating_files(tmp_path, value):
-	path = tmp_path / 'invalid.fw'
-	with pytest.raises(TypeError, match='summary_index'):
-		FigWigWriter(path, {'chr1': 16}, ['a'], summary_index=value)
-	assert not path.exists()
-
-
-def test_append_rejection_and_default_invalidation(pair, tmp_path):
-	path = tmp_path / 'append.fw'
-	shutil.copyfile(pair[1], path)
-	before = path.read_bytes()
-	with pytest.raises(ValueError, match='append=True'):
-		FigWigWriter(path, None, ['extra'], append=True, summary_index=True)
-	assert path.read_bytes() == before
-	locator = v1.File(path).metadata[KEY]
-	with FigWigWriter(path, None, ['extra'], append=True, engine='zlib', n_jobs=1):
-		pass
-	after = v1.File(path)
-	assert after.header.optional == 1 and after.metadata[KEY] == locator
-	assert read_index(path) is None
-	reader = FigWigReader(path, verify=True)
-	assert len(reader.tracks) == 9
-	assert numpy.array_equal(reader.read('chrB', [0], CHROMS['chrB'],
-		tracks=['track0']), FigWigReader(pair[1]).read('chrB', [0],
-		CHROMS['chrB'], tracks=['track0']), equal_nan=True)
-
-
-def test_merge_and_reorder_safely_drop_the_extension(pair, tmp_path):
-	merged, reordered = tmp_path / 'merge.fw', tmp_path / 'reorder.fw'
-	_merge([pair[1]], merged)
-	_reorder(pair[1], reordered, 'tracks' if v1.File(pair[1]).header.order ==
-		'positions' else 'positions', n_jobs=1)
-	for path in [merged, reordered]:
-		file = v1.File(path)
-		assert not file.header.optional & 2 and KEY not in file.metadata
-		assert read_index(path) is None
-
-
-def test_budget_and_global_summary_cutoff_keep_legacy_behavior(tmp_path, monkeypatch):
-	monkeypatch.setattr(_summary_index, 'INDEX_BYTES', 512)
-	path = write(tmp_path / 'budget.fw', enabled=True)
-	file = v1.File(path)
-	assert not file.header.optional & 2 and KEY not in file.metadata
-	assert read_index(path) is None
-	import figwig.figwig
-	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 1)
-	path = write(tmp_path / 'absent.fw', enabled=True)
-	file = v1.File(path)
-	assert all(group.summary is None and not group.zooms for group in file.groups)
-	assert not file.header.optional & 2
-
-
-def test_write_figwig_passes_through_the_option(tmp_path):
-	path = tmp_path / 'convenience.fw'
-	values = numpy.ones((1, 8, 160000), dtype=numpy.float32)
-	write_figwig(path, {'chr1': 160000}, TRACKS, 'chr1', [0], values,
-		tile=16, groups=8, n_jobs=1, engine='zlib', summary_index=True)
-	assert read_index(path)['groups'][0]['levels'][0]['window_bins'] == 512
-
-
-@pytest.mark.parametrize('order', ['positions', 'tracks'])
-def test_summary_restarts_are_independent_of_raw_compression_codec(tmp_path, order):
-	path = tmp_path / 'stored.fw'
-	with FigWigWriter(path, {'chr1': 144000}, ['a', 'b'], tile=16, groups=2,
-			order=order, level=0, n_jobs=1, summary_index=True) as writer:
-		writer.write('chr1', [0], numpy.ones((1, 2, 144000), dtype=numpy.uint8))
-	assert v1.File(path).header.codec == 0
-	assert all(group['levels'][0]['window_bins'] for group in read_index(path)['groups'])
-	assert FigWigReader(path, verify=True).tile_sums().shape == (2, 9000)
-
-
-@pytest.mark.parametrize('where', ['root', 'locator', 'catalog', 'page',
-	'row_rank', 'fragment_offset', 'fragment_crc', 'empty_window'])
-def test_independent_verifier_rejects_malformed_directory(pair, tmp_path, where):
-	file = v1.File(pair[1])
-	verified = read_index(pair[1])
-	root_at = verified['offset']
-	data = bytearray(file.bytes)
-	locator_at = root_at + 256
-	catalog_at = struct.unpack_from('<Q', data, locator_at)[0]
-	base = verified['groups'][0]['levels'][0]
-	page_at = base['index_offset']
-	if where in ['root', 'locator', 'catalog', 'page']:
-		at = {'root': root_at + 40, 'locator': locator_at + 16,
-			'catalog': catalog_at + 16, 'page': page_at + 16}[where]
-		data[at] ^= 1
+@pytest.mark.parametrize('what', ['longer than asked', 'shorter than asked',
+	'trailing bytes', 'cut off', 'not deflate'])
+def test_inflate_refuses_what_is_not_exactly_the_stream(what):
+	payload = bytes(range(200))
+	data, size = deflated(payload), len(payload)
+	if what == 'longer than asked':
+		size += 1
+	elif what == 'shorter than asked':
+		size -= 1
+	elif what == 'trailing bytes':
+		data += b'\x00'
+	elif what == 'cut off':
+		data = data[:-5]
 	else:
-		window = base['windows'][0]['window']
-		slot = page_at + 16 + window * 40
-		if where == 'row_rank':
-			struct.pack_into('<I', data, slot + 4, 1)
-		elif where == 'fragment_offset':
-			struct.pack_into('<I', data, slot + 8, 1)
-		elif where == 'fragment_crc':
-			data[slot + 16] ^= 1
-		else:
-			empty = 4096 // base['window_bins']
-			page_at = base['index_offset'] + (empty // 102) * 4096
-			slot = page_at + 16 + (empty % 102) * 40
-			struct.pack_into('<I', data, slot + 4, 1)
-		count = struct.unpack_from('<I', data, page_at + 8)[0]
-		struct.pack_into('<I', data, page_at + 12, 0)
-		struct.pack_into('<I', data, page_at + 12, zlib.crc32(
-			data[page_at:page_at + 16 + count * 40]))
-	path = tmp_path / (where + '.fw')
-	path.write_bytes(data)
-	with pytest.raises(v1.FormatError):
-		read_index(path)
+		data = b'\xff' * 40
+	with pytest.raises(_SummaryIndexError, match='corrupt DEFLATE|wrong-sized or incomplete'):
+		_inflate(data, size)
 
 
-def test_stale_header_binding_falls_back(pair, tmp_path):
-	file = v1.File(pair[1])
-	at = file.metadata[KEY]['offset']
-	data = bytearray(file.bytes)
-	data[at + 64 + 28] ^= 1
-	struct.pack_into('<I', data, at + 12, 0)
-	struct.pack_into('<I', data, at + 12, zlib.crc32(data[at:at + 256]))
-	path = tmp_path / 'stale.fw'
-	path.write_bytes(data)
-	assert read_index(path) is None
+def test_inflate_never_asks_zlib_for_more_than_one_byte_past_the_size(
+	monkeypatch):
+	"""A fragment that expands without bound is stopped while it inflates,
+	not after: zlib is given a limit of size + 1 and the output stays under
+	it."""
+
+	limits = []
+	real = zlib.decompressobj
+
+	class Recording:
+		def __init__(self, *args):
+			self.decoder = real(*args)
+
+		def decompress(self, data, max_length=0):
+			limits.append(max_length)
+			return self.decoder.decompress(data, max_length)
+
+		def __getattr__(self, name):
+			return getattr(self.decoder, name)
+
+	monkeypatch.setattr(_summary_index.zlib, 'decompressobj', Recording)
+	with pytest.raises(_SummaryIndexError):
+		_inflate(deflated(bytes(1 << 24)), 10)
+	assert limits == [11]
 
 
-def test_failed_directory_finalization_keeps_previous_path(tmp_path, monkeypatch):
-	path = tmp_path / 'previous.fw'
-	previous = b'previous file remains until publication'
-	path.write_bytes(previous)
+def test_summary_index_error_is_a_value_error():
+	assert issubclass(_SummaryIndexError, ValueError)
 
-	def fail(*args):
-		raise RuntimeError('directory finalization failed')
 
-	monkeypatch.setattr(_summary_index.SummaryIndex, 'serialize', fail)
-	with pytest.raises(RuntimeError, match='finalization'):
-		write(path, enabled=True)
-	assert path.read_bytes() == previous
-	assert list(tmp_path.iterdir()) == [path]
+##
+# _SummaryIndex: which levels are restarted, and how wide their windows are
+##
+
+def level_of(tracks, level, rows):
+	"""One compressed level of `rows` rows over `tracks` tracks, every bin of
+	the level listed: the writer's record of it and the stream it returned."""
+
+	index = _SummaryIndex([tracks], [rows] * (level + 1))
+	ids = numpy.arange(rows, dtype=numpy.uint32)
+	sums = numpy.ones((rows, tracks), dtype=numpy.float64)
+	stream = index.compress(0, level, ids, sums)
+	return index.levels[0][0], stream, ids, sums
+
+
+def rows_past_the_tiny_limit(tracks, level):
+	row = 4 + (8 if level else 4) * tracks
+	return 65536 // row + 1
+
+
+@pytest.mark.parametrize('tracks, level, bins', [
+	# bins is the largest power of two, at most 2,048, with bins * (4 + w *
+	# tracks) <= 32,768, where w is 4 for the summary and 8 for a zoom level.
+	(1, 0, 2048), (2, 0, 2048), (3, 0, 2048), (4, 0, 1024), (10, 0, 512),
+	(100, 0, 64), (4000, 0, 2),
+	(1, 1, 2048), (2, 1, 1024), (3, 1, 1024), (4, 1, 512), (1000, 3, 4),
+])
+def test_summary_index_sizes_windows_to_the_decoded_target(tracks, level, bins):
+	record, _, _, _ = level_of(tracks, level, rows_past_the_tiny_limit(tracks,
+		level))
+	assert record[3] == bins and record[4] is not None
+
+
+def test_summary_index_restarts_a_level_whose_row_is_exactly_the_target():
+	# 8,191 tracks make a summary row of 4 + 4 * 8,191 = 32,768 bytes: one bin.
+	record, _, _, _ = level_of(8191, 0, 3)
+	assert record[3] == 1 and record[4] is not None
+
+
+def test_summary_index_leaves_a_level_whose_row_is_past_the_target():
+	# 8,192 tracks make a row of 32,772 bytes, though 3 rows are past 64 KiB.
+	record, _, _, _ = level_of(8192, 0, 3)
+	assert record[3] == 0 and record[4] is None
+
+
+@pytest.mark.parametrize('rows, restarted', [(8191, False), (8192, False),
+	(8193, True)])
+def test_summary_index_restarts_a_level_only_past_64_kib(rows, restarted):
+	"""One track makes a row of 8 bytes: 8,192 rows are exactly 65,536 bytes,
+	which is not past 64 KiB, and 8,193 are."""
+
+	record, _, _, _ = level_of(1, 0, rows)
+	assert (record[4] is not None) == restarted
+
+
+def test_summary_index_restarts_a_small_level_whose_stream_is_past_64_kib():
+	"""Two rows of 8,191 tracks are 65,536 bytes, not past 64 KiB, but random
+	sums deflate to a little more than they are: the level is restarted, since a
+	reader that kept it ordinary would inflate a stream of 64 KiB and more."""
+
+	rng = numpy.random.default_rng(0)
+	sums = numpy.frombuffer(rng.bytes(2 * 8191 * 4), dtype='<f4').reshape(2, 8191)
+	index = _SummaryIndex([8191], [2])
+	stream = index.compress(0, 0, numpy.arange(2, dtype=numpy.uint32), sums)
+	assert len(stream) > 65536 and index.levels[0][0][4] is not None
+
+
+def test_summary_index_keeps_an_ordinary_level_as_the_ordinary_stream():
+	record, stream, ids, sums = level_of(2, 0, 100)
+	payload = ids.astype('<u4').tobytes() + sums.astype('<f4').tobytes()
+	assert stream == zlib.compress(payload, 6)
+	assert record == (100, len(stream), zlib.crc32(stream), 0, None)
+
+
+def test_summary_index_writes_an_empty_level_as_an_empty_stream():
+	index = _SummaryIndex([2], [1000])
+	stream = index.compress(0, 0, numpy.zeros(0, dtype=numpy.uint32),
+		numpy.zeros((0, 2)))
+	assert stream == zlib.compress(b'', 6) and len(stream) == 8
+	assert index.levels[0][0] == (0, 8, zlib.crc32(stream), 0, None)
+	assert index.size() == 0
+
+
+@pytest.mark.parametrize('level', [0, 2])
+def test_summary_index_restarts_inside_one_stream_of_the_same_bytes(level):
+	record, stream, ids, sums = level_of(2, level, 6000)
+	dtype = '<f8' if level else '<f4'
+	assert zlib.decompress(stream) == ids.astype('<u4').tobytes() + \
+		sums.astype(dtype).tobytes()
+	assert record[3] != 0 and record[0] == 6000 and record[1] == len(stream)
+	assert record[2] == zlib.crc32(stream)
+
+
+def test_summary_index_size_is_its_root_locators_catalogs_and_pages():
+	index = _SummaryIndex([2], [6000])
+	ids = numpy.arange(6000, dtype=numpy.uint32)
+	index.compress(0, 0, ids, numpy.ones((6000, 2)))
+	# 6,000 bins in windows of 2,048 are 3 windows, in one page of 16 + 3 * 40.
+	assert index.size() == 256 + 32 + 32 + 3 * 40 + 16
+
+
+##
+# _SummaryIndex: the budget
+##
+
+def two_groups(monkeypatch, order):
+	"""Two groups of two tracks with two levels over 20,480 and 5,120 bins,
+	with a budget that holds the finest level's pages and 215 bytes more, one
+	short of the next level's: level 0 needs 10 windows, 416 bytes, and level 1
+	needs 5, 216. The root, the locators and the catalogs come out of it first."""
+
+	base = 256 + 2 * (32 + 2 * 32)
+	monkeypatch.setattr(_summary_index, 'INDEX_BYTES', base + 2 * (416 + 215))
+	index = _SummaryIndex([2, 2], [20480, 5120])
+	fine = numpy.arange(6000, dtype=numpy.uint32)
+	coarse = numpy.arange(3300, dtype=numpy.uint32)
+	for g in order:
+		index.compress(g, 0, fine, numpy.ones((6000, 2)))
+		index.compress(g, 1, coarse, numpy.ones((3300, 2)))
+	return index
+
+
+@pytest.mark.parametrize('order', [[0, 1], [1, 0]])
+def test_summary_index_spends_a_groups_share_from_its_finest_level(
+	monkeypatch, order):
+	"""Each group has the same share, so which group compresses first does not
+	change which levels are restarted: both keep level 0 and leave level 1."""
+
+	index = two_groups(monkeypatch, order)
+	for g in (0, 1):
+		restarted = [record[4] is not None for record in index.levels[g]]
+		assert restarted == [True, False]
+	assert 0 < index.size() <= _summary_index.INDEX_BYTES
+
+
+def test_summary_index_without_budget_restarts_nothing_and_writes_no_index(
+	monkeypatch):
+	monkeypatch.setattr(_summary_index, 'INDEX_BYTES', 512)
+	index = _SummaryIndex([2], [20480])
+	index.compress(0, 0, numpy.arange(6000, dtype=numpy.uint32),
+		numpy.ones((6000, 2)))
+	assert index.levels[0][0][4] is None and index.size() == 0
+
+
+##
+# _SummaryIndexReader: the checks of a descriptor page
+##
+
+# A level of 24 bins in windows of 8 has 3 windows, one page. Its 10 rows hold
+# two tracks of f4 sums, so a window of n rows has ids of 4 * n bytes and sums
+# of 8 * n, and its stream is 1,000 bytes with a 2-byte header and a 4-byte
+# trailer around the fragments, which lie as a writer writes them: the ids
+# fragments of every window with rows, in window order, then the sums fragments.
+LEVEL = _Level(source_offset=0, index_offset=0, source_rows=10, source_bytes=1000,
+	source_crc=0, window_bins=8, total=24)
+
+
+def page_of(descriptors, first=0, count=None):
+	"""The bytes of a page holding these descriptors, ten u4 each, with the
+	CRC-32 the page's own rule asks for."""
+
+	body = b''.join(struct.pack('<10I', *fields) for fields in descriptors)
+	data = bytearray(b'FWRP' + struct.pack('<III', first, len(descriptors) if
+		count is None else count, 0) + body)
+	repair(data, 0, len(data), 12)
+	return bytes(data)
+
+
+# rows, rank, ids at, size, crc, raw crc, then the same for the sums.
+WINDOW_0 = (3, 0, 2, 20, 0, 0, 52, 40, 0, 0)
+EMPTY = (0,) * 10
+WINDOW_2 = (4, 3, 22, 30, 0, 0, 92, 60, 0, 0)
+GOOD = [WINDOW_0, EMPTY, WINDOW_2]
+
+
+def read_page(descriptors, level=LEVEL, **kwargs):
+	return _parse_page(page_of(descriptors, **kwargs), level, 0, 2, False)
+
+
+def test_a_page_of_consistent_descriptors_is_read():
+	rows = read_page(GOOD)
+	assert [row[0] for row in rows] == [3, 0, 4]
+
+
+@pytest.mark.parametrize('what, descriptors, message', [
+	('more rows than bins in a window', [(9,) + WINDOW_0[1:]] + GOOD[1:],
+		'invalid row count or rank'),
+	# Alone in its page the window has nothing after it to disagree with, so
+	# only the bound on its rank refuses it: 8 + 3 rows are past the 10.
+	('a rank past the rows left', [(3, 8) + WINDOW_0[2:], EMPTY, EMPTY],
+		'invalid row count or rank'),
+	('an ids fragment before the stream header', [WINDOW_0[:2] + (1,) +
+		WINDOW_0[3:]] + GOOD[1:], 'invalid fragment extent'),
+	('an empty ids fragment', [WINDOW_0[:3] + (0,) + WINDOW_0[4:]] + GOOD[1:],
+		'invalid fragment extent'),
+	('an ids fragment longer than its rows allow', [WINDOW_0[:3] + (2 * 12 + 65,) +
+		WINDOW_0[4:]] + GOOD[1:], 'invalid fragment extent'),
+	('a sums fragment past the stream', [WINDOW_0[:6] + (990, 10) +
+		WINDOW_0[8:]] + GOOD[1:], 'invalid fragment extent'),
+	('ids and sums fragments that overlap', [WINDOW_0[:6] + (10,) +
+		WINDOW_0[7:]] + GOOD[1:], 'overlapping ID/sum fragments'),
+	('a second window that does not follow the first in rank', GOOD[:2] +
+		[WINDOW_2[:1] + (4,) + WINDOW_2[2:]], 'out of order'),
+	('a second window whose fragments start before the first ends', GOOD[:2] +
+		[WINDOW_2[:2] + (10,) + WINDOW_2[3:]], 'out of order'),
+	('a nonzero field in a window with no rows', [WINDOW_0, (0, 0, 0, 0, 1, 0,
+		0, 0, 0, 0), WINDOW_2], 'nonzero empty-window descriptor'),
+	# The ids of the second window, 30 to 60, lie inside the sums of the first, 22
+	# to 62, though each window follows the one before in every offset.
+	('the ids of a later window inside the sums of an earlier one', [(3, 0, 2, 20, 0,
+		0, 22, 40, 0, 0), EMPTY, (4, 3, 30, 30, 0, 0, 92, 60, 0, 0)],
+		'overlapping page fragments'),
+])
+def test_a_page_with_an_inconsistent_descriptor_is_refused(what, descriptors,
+	message):
+	with pytest.raises(_SummaryIndexError, match=message):
+		read_page(descriptors)
+
+
+def test_a_page_whose_last_window_has_fewer_bins_bounds_its_rows():
+	"""24 bins in windows of 8, but a level of 21: the last window holds bins
+	16 to 20, so a descriptor of 6 rows there is more than its window has."""
+
+	with pytest.raises(_SummaryIndexError):
+		read_page([WINDOW_0, EMPTY, (6,) + WINDOW_2[1:]], LEVEL._replace(total=21))
+
+
+@pytest.mark.parametrize('what, kwargs', [
+	('another first window', dict(first=1)),
+	('another count', dict(count=2)),
+])
+def test_a_page_that_is_not_the_page_asked_for_is_refused(what, kwargs):
+	with pytest.raises(_SummaryIndexError, match='descriptor page header'):
+		read_page(GOOD, **kwargs)
+
+
+def test_a_page_with_a_changed_byte_fails_its_checksum():
+	data = bytearray(page_of(GOOD))
+	data[20] ^= 1
+	with pytest.raises(_SummaryIndexError, match='checksum'):
+		_parse_page(bytes(data), LEVEL, 0, 2, False)
+
+
+@pytest.mark.parametrize('what', ['random', 'zeros'])
+def test_restarted_fragments_stay_within_their_bound_and_end_in_the_marker(what):
+	"""A fragment of bytes that do not compress is a little longer than they are,
+	and one of zeros is far shorter: both are at most 2 * decoded + 64 bytes and
+	end with the flush marker, which the writer relies on and does not check."""
+
+	rng = numpy.random.default_rng(0)
+	ids = numpy.arange(1024, dtype=numpy.uint32)
+	sums = rng.random((1024, 3), dtype=numpy.float32) if what == 'random' else \
+		numpy.zeros((1024, 3), dtype=numpy.float32)
+	stream, entries = _restart(ids, sums, 512, 2, '<f4')
+	assert zlib.decompress(stream) == ids.tobytes() + sums.tobytes()
+	for row in entries:
+		for name, length in (('ids', 4 * row['n_rows']), ('sums', 12 * row['n_rows'])):
+			start, size = int(row[name + '_offset']), int(row[name + '_bytes'])
+			assert 0 < size <= 2 * length + 64
+			assert stream[start + size - 4:start + size] == b'\x00\x00\xff\xff'
+
+
+##
+# _index_bytes and _check_levels
+##
+
+def test_index_bytes_counts_a_partial_last_window():
+	"""Bins in windows of 2,048 are ceil(bins / 2,048) windows of 40 bytes, and a
+	page of 16 bytes for each 102 of them."""
+
+	assert _index_bytes(2048, 2048) == 40 + 16
+	assert _index_bytes(2049, 2048) == 2 * 40 + 16
+	assert _index_bytes(102 * 8, 8) == 102 * 40 + 16
+	assert _index_bytes(102 * 8 + 1, 8) == 103 * 40 + 2 * 16
+
+
+def levels_of(entries, sizes, zoomed=False, tracks=1):
+	"""`_check_levels` over a version 1 record whose summary header starts at
+	1,000 and whose streams have `sizes`, on a genome of 24 tiles."""
+
+	end = 1000 + 12 + sum(sizes) + (4 if zoomed else 0) + 16 * (len(sizes) - 1)
+	return _check_levels(entries, 1000, end, [24], tracks, zoomed, len(entries) - 1
+		if zoomed else 0, 128, 1 << 20)
+
+
+def test_check_levels_takes_a_level_where_the_record_has_it():
+	levels, sections = levels_of([Entry(1012, 0, 5, 100, 0, 0)], [100])
+	assert len(levels) == 1 and sections == [] and levels[0].total == 24
+
+
+@pytest.mark.parametrize('rows, size', [(0, 100), (3, 5)])
+def test_check_levels_refuses_a_restarted_level_without_rows_or_bytes(rows, size):
+	entry = Entry(1012, 4096, rows, size, 0, 8)
+	with pytest.raises(_SummaryIndexError, match='invalid window dimensions'):
+		levels_of([entry], [size])
+
+
+@pytest.mark.parametrize('what, entries, sizes, zoomed', [
+	('a summary with rows and no stream', [Entry(1012, 0, 3, 0, 0, 0)], [0], False),
+	('a zoom level with no stream', [Entry(1012, 0, 5, 100, 0, 0), Entry(1132, 0, 0,
+		0, 0, 0)], [100, 0], True),
+	('more rows than the level has bins', [Entry(1012, 0, 25, 100, 0, 0)], [100], False),
+])
+def test_check_levels_refuses_a_level_that_is_not_one(what, entries, sizes, zoomed):
+	with pytest.raises(_SummaryIndexError, match='invalid source extent'):
+		levels_of(entries, sizes, zoomed)
+
+
+##
+# _SummaryIndexReader._whole: a level read whole
+##
+
+def whole_level(ids, sums, total=100, **changes):
+	"""The yield of `_whole` for a level of these rows, whose stream is built
+	here with the CRC-32 the catalog would hold."""
+
+	tracks = sums.shape[1]
+	payload = numpy.asarray(ids, dtype='<u4').tobytes() + numpy.asarray(sums,
+		dtype='<f4').tobytes()
+	data = zlib.compress(payload, 6)
+	level = _Level(source_offset=0, index_offset=0, source_rows=len(ids),
+		source_bytes=len(data), source_crc=zlib.crc32(data), window_bins=0,
+		total=total)._replace(**changes)
+	return list(_SummaryIndexReader()._whole(lambda offset, size: data, level,
+		tracks, 0))
+
+
+def test_a_level_read_whole_yields_its_ids_and_sums():
+	sums = numpy.arange(8, dtype=numpy.float32).reshape(4, 2)
+	[(ids, got)] = whole_level([3, 8, 40, 99], sums)
+	assert ids.tolist() == [3, 8, 40, 99] and got.tobytes() == sums.tobytes()
+
+
+@pytest.mark.parametrize('ids, total', [
+	([3, 3, 8], 100),		# not strictly ascending
+	([8, 3, 40], 100),		# descending
+	([3, 8, 100], 100),		# the last is not a bin of the level
+])
+def test_a_level_read_whole_must_have_ascending_ids_of_the_level(ids, total):
+	with pytest.raises(_SummaryIndexError, match='out of order or bounds'):
+		whole_level(ids, numpy.ones((3, 1)), total)
+
+
+def test_a_level_read_whole_must_match_its_checksum():
+	with pytest.raises(_SummaryIndexError, match='checksum'):
+		whole_level([1, 2, 3], numpy.ones((3, 1)), source_crc=1)
+
+
+def test_a_level_read_whole_is_refused_past_the_allocation_limit(monkeypatch):
+	monkeypatch.setattr(_summary_index, 'MAX_LEVEL_BYTES', 10)
+	with pytest.raises(_SummaryIndexError, match='allocation limit'):
+		whole_level([1, 2, 3], numpy.ones((3, 1)))
+
+
+def test_an_empty_level_read_whole_is_empty():
+	[(ids, sums)] = whole_level([], numpy.zeros((0, 2)))
+	assert len(ids) == 0 and sums.shape == (0, 2)
+
+
+##
+# The layout the two sides share
+##
+
+def test_the_structures_have_the_sizes_the_format_gives():
+	assert (_summary_index.ROOT.size, _summary_index.LOCATOR.size,
+		_summary_index.ENTRY.size, _summary_index.PAGE.size,
+		_summary_index.DESCRIPTOR.itemsize) == (256, 32, 32, 16, 40)
+	# A full page of 102 descriptors is exactly the stride between pages.
+	assert _summary_index.PAGE.size + _summary_index.PAGE_ENTRIES * \
+		_summary_index.DESCRIPTOR.itemsize == _summary_index.PAGE_STRIDE
+
+
+@pytest.mark.parametrize('sizes, zoomed, offsets, end', [
+	# A summary header of 12 bytes before the first stream; n_zooms (4) after it
+	# when the record has zooms, even none; 16 for each zoom level's header.
+	([100], False, [1012], 1112),
+	([100], True, [1012], 1116),
+	([100, 40], True, [1012, 1012 + 100 + 4 + 16], 1012 + 100 + 4 + 16 + 40),
+	([100, 40, 8], True, [1012, 1132, 1132 + 40 + 16],
+		1132 + 40 + 16 + 8),
+])
+def test_stream_offsets_follow_the_version_1_record(sizes, zoomed, offsets, end):
+	assert _stream_offsets(1000, sizes, zoomed) == (offsets, end)

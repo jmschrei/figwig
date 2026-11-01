@@ -33,6 +33,3 @@ Thumbs.db
 # Model checkpoints and large artifacts
 *.torch
 *.log
-
-# Generated benchmark inputs and raw measurements
-benchmarks/results/

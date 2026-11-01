@@ -40,7 +40,10 @@ figwig info k562.fw [-b]                                                        
 - `-t` tile, `--groups` tracks per group, `--dtype` one dtype for all,
   `-l` level (0 for raw chunks), `-z` zoom levels beside the tile sums
   (`bam2fw` takes it too; `reorder` and `merge` keep the input's).
-  `--append` keeps the file's chromosomes, tile and level and refuses `-s`,
+  `--summary-index` writes the regional summary index (`bam2fw` takes it
+  too; `reorder` and `merge` keep an input's unless `--no-summary-index`;
+  not with `--append`). `--append` keeps the file's chromosomes, tile and
+  level and refuses `-s`,
   `-t`, `-l`; a chromosome the file lacks is dropped with a warning.
 - Values equal `read_bigwig(..., missing=0.0, keep_nan=True)` on the
   bigWig: uncovered bases 0, NaN intervals NaN (the track is then float32).
@@ -105,6 +108,7 @@ group per file.
   chromosomes, tile, level and order (`reorder` one first otherwise) and
   distinct track names; it drops the dead bytes an append left. `-g`
   records a genome where the files disagree; the output may be an input.
-- `info -b` counts chunk bytes, table and index bytes, and the bytes
-  nothing uses (an append's leftovers, which `merge` drops) and any past
+- `info -b` counts chunk bytes, table and index bytes, a regional summary
+  index's bytes, and the bytes nothing uses (an append's leftovers, which
+  `merge` drops, an appended file's old summary index among them) and any past
   the header's length (a killed append, written over by the next).

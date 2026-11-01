@@ -1,198 +1,230 @@
-"""Independent, whole-file verifier for docs/summary_restarts.rst.
+# summary_reference.py
+# Contact: Jacob Schreiber <jmschreiber91@gmail.com>
 
-This intentionally imports no production summary-index encoder or parser.
-``read_index(path)`` returns None for an unadvertised/unknown/stale extension,
-otherwise root metadata and groups/levels, with decoded occupied windows.
-The unchanged v1 specification reader supplies the original summary oracle.
+"""A reader of the regional summary index, written from "The regional
+summary index" of docs/format.rst with struct, zlib and numpy, on top of
+the specification's reader of version 1 (format_reference.py). It imports
+nothing from figwig.
+
+`read_index(path)` returns None for a file that has no current index: the
+bit or the key missing, a version it does not know, or a root whose copy of
+the header is not the file's. It raises FormatError for an index that breaks
+a rule of the page, and otherwise an `Index` whose windows hold their
+decoded rows, each checked against the rows the version 1 reader finds in
+the ordinary stream.
 """
 
 import struct
 import zlib
+from collections import namedtuple
 
 import numpy
 
-from . import format_reference as v1
+from . import format_reference
 
 
 KEY = 'org.figwig.summary-restarts'
+ROOT_BYTES = 256
+PAGE_BYTES = 4096
+PER_PAGE = 102
+TARGET = 32768
+INDEX_LIMIT = 1 << 24
+
+Index = namedtuple('Index', 'root header groups sections')
+Group = namedtuple('Group', 'locator catalog levels')
+Level = namedtuple('Level', 'k factor source_offset source_rows source_bytes '
+	'source_crc window_bins index_offset total pages windows')
+Window = namedtuple('Window', 'number at n_rows first_source_row ids_offset '
+	'ids_bytes sums_offset sums_bytes ids sums')
+
+
+def fail(message):
+	raise format_reference.FormatError('summary index: ' + message)
 
 
 def require(condition, message):
 	if not condition:
-		raise v1.FormatError('summary restart index: ' + message)
+		fail(message)
 
 
-def check_crc(data, expected, message, field=None):
+def crc_of(data, field=None):
+	data = bytearray(data)
 	if field is not None:
-		data = bytearray(data)
-		struct.pack_into('<I', data, field, 0)
-	require(zlib.crc32(data) == expected, message + ' CRC mismatch')
+		data[field:field + 4] = bytes(4)
+	return zlib.crc32(data)
 
 
-def fragment(data, relative, size, crc, raw_crc, expected):
-	require(2 <= relative and size > 0 and relative <= len(data) - 4 - size,
-		'fragment outside source stream')
-	require(size <= 2 * len(expected) + 64, 'oversized compressed fragment')
-	encoded = data[relative:relative + size]
-	check_crc(encoded, crc, 'fragment')
-	require(encoded.endswith(b'\x00\x00\xff\xff'), 'missing full-flush marker')
+def fragment(stream, at, size, crc, raw_crc, length):
+	"""The decoded bytes of a fragment of `stream`, after every check the page
+	lists for one."""
+
+	require(2 <= at and size > 0 and at + size <= len(stream) - 4,
+		'a fragment lies outside its stream')
+	require(size <= 2 * length + 64, 'a fragment is too long for its rows')
+	data = stream[at:at + size]
+	require(zlib.crc32(data) == crc, 'a fragment fails its CRC-32')
+	require(data.endswith(b'\x00\x00\xff\xff'), 'a fragment lacks its marker')
 	decoder = zlib.decompressobj(-15)
 	try:
-		raw = decoder.decompress(encoded + b'\x03\x00', len(expected) + 1)
-	except zlib.error as error:
-		raise v1.FormatError('invalid restart DEFLATE: ' + str(error)) from None
-	require(len(raw) == len(expected) and decoder.eof and not decoder.unused_data
-		and not decoder.unconsumed_tail, 'wrong-sized or incomplete fragment')
-	check_crc(raw, raw_crc, 'decoded fragment')
-	require(raw == expected, 'fragment differs from legacy summary')
+		raw = decoder.decompress(data + b'\x03\x00', length + 1)
+	except zlib.error:
+		fail('a fragment is not DEFLATE')
+	require(decoder.eof and not decoder.unused_data and len(raw) == length,
+		'a fragment does not inflate to its length')
+	require(zlib.crc32(raw) == raw_crc, 'a decoded fragment fails its CRC-32')
 	return raw
 
 
-def source_levels(file, group):
-	data = file.bytes
-	at = int(file.directory[group])
+def streams(file, g):
+	"""(first byte, rows, bytes, crc, ids, sums) of each level of group `g` in
+	the version 1 record, the summary first."""
+
+	data, at = file.bytes, int(file.directory[g])
 	n = struct.unpack_from('<I', data, at)[0]
 	if file.header.order == 'tracks':
 		at += 8 + n * 40
 	else:
 		at += 8 + n * 32
 		at += 8 + struct.unpack_from('<I', data, at + 4)[0]
-	n, size, crc = struct.unpack_from('<III', data, at)
-	at += 12
-	levels = [(at, n, size, crc, file.groups[group].summary)]
-	at += size
+	rows, size, crc = struct.unpack_from('<III', data, at)
+	levels = [(at + 12, rows, size, crc) + tuple(file.groups[g].summary or (None, None))]
+	at += 12 + size
 	if file.header.optional & 1:
 		count = struct.unpack_from('<I', data, at)[0]
 		at += 4
 		for k in range(count):
-			factor, n, size, crc = struct.unpack_from('<IIII', data, at)
-			at += 16
-			require(factor == 4 ** (k + 1), 'invalid legacy zoom factor')
-			levels.append((at, n, size, crc, file.groups[group].zooms[k][1:]))
-			at += size
-	require(at == (int(file.directory[group + 1]) if group + 1 < len(file.groups)
-		else file.header.length), 'legacy group extent mismatch')
+			_, rows, size, crc = struct.unpack_from('<IIII', data, at)
+			ids_sums = file.groups[g].zooms[k][1:]
+			levels.append((at + 16, rows, size, crc) + tuple(ids_sums))
+			at += 16 + size
 	return levels
 
 
+def check_wrapper(stream, restarted):
+	"""The zlib header of a level's stream: deflate, no preset dictionary, a
+	valid check value, and for a restarted level the 32 KiB window."""
+
+	cmf, flg = stream[0], stream[1]
+	require(cmf & 15 == 8 and (cmf >> 4 == 7 if restarted else cmf >> 4 <= 7) and
+		(cmf * 256 + flg) % 31 == 0 and not flg & 32, 'a stream has an unusable zlib header')
+
+
+def read_level(file, k, source, window_bins, index, tracks, sections):
+	rows, size, crc, ids, sums = source[1:]
+	factor = 4 ** k
+	if size:
+		check_wrapper(file.bytes[source[0]:source[0] + 2], bool(window_bins))
+	total = sum(-(-int(t) // factor) for t in numpy.diff(file.tile_offsets))
+	width = 8 if k else 4
+	level = dict(k=k, factor=factor, source_offset=source[0], source_rows=rows,
+		source_bytes=size, source_crc=crc, window_bins=window_bins,
+		index_offset=index, total=total, pages=[], windows={})
+	if not window_bins:
+		require(index == 0, 'an ordinary level has pages')
+		return Level(**level)
+	require(window_bins & (window_bins - 1) == 0 and 0 < window_bins <= 2048,
+		'bins is not a power of two of at most 2,048')
+	require(window_bins * (4 + width * tracks) <= TARGET and rows > 0,
+		'a restarted level is wider than the target or has no rows')
+	windows = -(-total // window_bins)
+	pages = -(-windows // PER_PAGE)
+	sections.append((index, index + windows * 40 + pages * 16))
+	stream = file.bytes[source[0]:source[0] + size]
+	extents = []
+	for p in range(pages):
+		at = index + p * PAGE_BYTES
+		count = min(PER_PAGE, windows - p * PER_PAGE)
+		page = file.bytes[at:at + 16 + 40 * count]
+		require(page[:4] == b'FWRP', 'a page lacks its magic')
+		first, n, crc_ = struct.unpack_from('<III', page, 4)
+		require((first, n) == (p * PER_PAGE, count), 'a page has the wrong range')
+		require(crc_of(page, 12) == crc_, 'a page fails its CRC-32')
+		level['pages'].append(at)
+		previous = None
+		for slot in range(count):
+			fields = struct.unpack_from('<10I', page, 16 + 40 * slot)
+			number = p * PER_PAGE + slot
+			low, high = number * window_bins, min(total, (number + 1) * window_bins)
+			lo, hi = numpy.searchsorted(ids, [low, high])
+			if fields[0] == 0:
+				require(not any(fields) and hi == lo, 'a window with no rows is not empty')
+				continue
+			n_rows, rank, ids_at, ids_size, ids_crc, ids_raw, sums_at, sums_size, \
+				sums_crc, sums_raw = fields
+			require((n_rows, rank) == (hi - lo, lo), 'a window has the wrong rows')
+			require(ids_at + ids_size <= sums_at, 'ids and sums fragments overlap')
+			if previous is not None:
+				require(rank == previous[1] + previous[0] and ids_at >= previous[2] +
+					previous[3] and sums_at >= previous[6] + previous[7],
+					'windows are out of order')
+			previous = fields
+			extents += [(ids_at, ids_at + ids_size), (sums_at, sums_at + sums_size)]
+			got_ids = numpy.frombuffer(fragment(stream, ids_at, ids_size, ids_crc,
+				ids_raw, 4 * n_rows), dtype='<u4')
+			got_sums = numpy.frombuffer(fragment(stream, sums_at, sums_size,
+				sums_crc, sums_raw, width * tracks * n_rows), dtype='<f8' if k else
+				'<f4').reshape(n_rows, tracks)
+			require(numpy.array_equal(got_ids, ids[lo:hi]), 'a fragment holds other bin numbers')
+			require(got_sums.tobytes() == sums[lo:hi].astype(got_sums.dtype).tobytes(),
+				'a fragment holds other sums')
+			level['windows'][number] = Window(number, at + 16 + 40 * slot, n_rows,
+				rank, ids_at, ids_size, sums_at, sums_size, got_ids, got_sums)
+	extents.sort()
+	require(all(a[1] <= b[0] for a, b in zip(extents, extents[1:])), 'two fragments overlap')
+	return Level(**level)
+
+
 def read_index(path):
-	file = v1.File(path)
+	file = format_reference.File(path)
 	locator = file.metadata.get(KEY)
 	if not file.header.optional & 2 or locator is None:
 		return None
-	require(isinstance(locator, dict), 'invalid locator')
-	if locator.get('version') != 2:
+	if not isinstance(locator, dict) or locator.get('version') != 2:
 		return None
-	offset = locator.get('offset')
-	require(type(offset) is int and locator.get('length') == 256 and
-		128 <= offset <= file.header.chroms - 256, 'root outside data region')
+	root = locator.get('offset')
+	require(type(root) is int and locator.get('length') == ROOT_BYTES and
+		128 <= root <= file.header.chroms - ROOT_BYTES, 'the root lies outside the data region')
+	require(file.header.chroms - root <= INDEX_LIMIT, 'the index is longer than 16 MiB')
 	data = file.bytes
-	root = data[offset:offset + 256]
-	require(root[:8] == b'FWRSUM1\0', 'invalid root magic')
-	version, length, crc, directory, groups, per_page, target = \
-		struct.unpack_from('<HHIQIII', root, 8)
-	require(version == 2 and length == 256, 'invalid root version/size')
-	check_crc(root, crc, 'root', 12)
-	require(not any(root[36:64]) and not any(root[192:]), 'nonzero root reserved bytes')
-	if root[64:192] != data[:128]:
+	raw = data[root:root + ROOT_BYTES]
+	require(raw[:8] == b'FWRSUM1\0', 'the root lacks its magic')
+	version, size, crc, directory, groups, per_page, target = \
+		struct.unpack_from('<HHIQIII', raw, 8)
+	require((version, size) == (2, ROOT_BYTES), 'the root has the wrong version or size')
+	require(crc_of(raw, 12) == crc, 'the root fails its CRC-32')
+	require(not any(raw[36:64]) and not any(raw[192:]), 'the root has nonzero reserved bytes')
+	if raw[64:192] != data[:128]:
 		return None
-	require(directory == offset + 256 and groups == file.header.n_groups and
-		per_page == 102 and target == 32768, 'invalid root fields')
-	minimum = directory + groups * 32
-	require(minimum <= file.header.chroms, 'truncated group directory')
-	regions = [(offset, minimum)]
-
-	def inside(at, size):
-		require(minimum <= at <= file.header.chroms - size and size > 0,
-			'directory section outside data region')
-		regions.append((at, at + size))
-		return data[at:at + size]
-
-	out = {'offset': offset, 'header': data[:128], 'groups': []}
+	require((directory, groups, per_page, target) == (root + ROOT_BYTES,
+		file.header.n_groups, PER_PAGE, TARGET), 'the root has wrong dimensions')
+	sections = [(root, directory + 32 * groups)]
+	out = []
 	for g in range(groups):
-		entry = data[directory + g * 32:directory + (g + 1) * 32]
-		catalog_at, count, catalog_crc, group, tracks, entry_crc, reserved = \
+		entry = data[directory + 32 * g:directory + 32 * g + 32]
+		catalog, n_levels, levels_crc, group, tracks, crc, reserved = \
 			struct.unpack('<QIIIIII', entry)
-		check_crc(entry, entry_crc, 'group locator', 24)
-		require(group == g and tracks == len(file.group_tracks[g]) and
-			1 <= count <= 13 and reserved == 0, 'invalid group locator')
-		catalog = inside(catalog_at, count * 32)
-		check_crc(catalog, catalog_crc, 'level catalog')
-		old_levels = source_levels(file, g)
-		require(count == len(old_levels), 'level count differs from legacy record')
-		group_out = {'group': g, 'tracks': tracks, 'levels': []}
-		for k in range(count):
-			source, index_at, n, size, source_crc, span = struct.unpack_from(
-				'<QQIIII', catalog, k * 32)
-			old_at, old_n, old_size, old_crc, summary = old_levels[k]
-			require((source, n, size, source_crc) == (old_at, old_n, old_size,
-				old_crc), 'source descriptor differs from legacy record')
-			level_out = {'level': k, 'factor': 4 ** k, 'source_offset': source,
-				'source_rows': n, 'source_bytes': size, 'source_crc': source_crc,
-				'window_bins': span, 'index_offset': index_at, 'windows': None}
-			group_out['levels'].append(level_out)
-			if index_at == 0:
-				require(span == 0, 'legacy level has a window size')
-				continue
-			width = 4 if k == 0 else 8
-			require(span > 0 and span <= 2048 and span & (span - 1) == 0 and
-				n > 0 and summary is not None and (4 + width * tracks) <= target,
-				'invalid indexed level')
-			require(span * (4 + width * tracks) <= target, 'window exceeds decoded target')
-			total = sum(-(-int(tiles) // (4 ** k)) for tiles in numpy.diff(file.tile_offsets))
-			windows = -(-total // span)
-			n_pages = -(-windows // 102)
-			encoded = inside(index_at, windows * 40 + n_pages * 16)
-			ids, sums = summary
-			stream = data[source:source + size]
-			level_out['windows'] = []
-			level_out['window_count'] = windows
-			level_out['page_offsets'] = []
-			fragments = []
-			at = 0
-			for first_window in range(0, windows, 102):
-				page_count = min(102, windows - first_window)
-				page_size = 16 + page_count * 40
-				page = encoded[at:at + page_size]
-				require(page[:4] == b'FWRP', 'invalid descriptor page magic')
-				first, page_n, page_crc = struct.unpack_from('<III', page, 4)
-				require((first, page_n) == (first_window, page_count), 'invalid page range')
-				check_crc(page, page_crc, 'descriptor page', 12)
-				level_out['page_offsets'].append(index_at + at)
-				for slot in range(page_count):
-					window = first_window + slot
-					fields = struct.unpack_from('<10I', page, 16 + slot * 40)
-					n_rows, first_row, id_at, id_size, id_crc, id_raw_crc, \
-						value_at, value_size, value_crc, value_raw_crc = fields
-					lo, hi = numpy.searchsorted(ids, [window * span, min(total,
-						(window + 1) * span)])
-					require(n_rows == hi - lo, 'window row count differs from legacy')
-					if n_rows == 0:
-						require(not any(fields), 'nonzero empty-window descriptor')
-						continue
-					require(first_row == lo and first_row + n_rows <= n,
-						'invalid source row rank')
-					require(id_at + id_size <= value_at, 'ID and sum fragments overlap')
-					raw_ids = fragment(stream, id_at, id_size, id_crc, id_raw_crc,
-						ids[lo:hi].astype('<u4').tobytes())
-					raw_sums = fragment(stream, value_at, value_size, value_crc,
-						value_raw_crc, sums[lo:hi].astype('<f4' if k == 0 else '<f8').tobytes())
-					fragments.extend([(id_at, id_at + id_size), (value_at, value_at + value_size)])
-					level_out['windows'].append({'window': window, 'n': n_rows,
-						'first_source_row': first_row, 'ids_relative_offset': id_at,
-						'ids_compressed_bytes': id_size, 'ids_crc': id_crc,
-						'ids_raw_crc': id_raw_crc, 'sums_relative_offset': value_at,
-						'sums_compressed_bytes': value_size, 'sums_crc': value_crc,
-						'sums_raw_crc': value_raw_crc,
-						'ids': numpy.frombuffer(raw_ids, dtype='<u4').copy(),
-						'sums': numpy.frombuffer(raw_sums, dtype='<f4' if k == 0 else
-							'<f8').reshape(n_rows, tracks).copy()})
-				at += page_size
-			fragments.sort()
-			require(all(a[1] <= b[0] for a, b in zip(fragments, fragments[1:])),
-				'overlapping fragments')
-		out['groups'].append(group_out)
-	regions.sort()
-	require(all(a[1] <= b[0] for a, b in zip(regions, regions[1:])),
-		'overlapping directory sections')
-	return out
+		require(crc_of(entry, 24) == crc, 'a locator fails its CRC-32')
+		require((group, tracks, reserved) == (g, len(file.group_tracks[g]), 0) and
+			1 <= n_levels <= 13, 'a locator holds the wrong group, tracks or levels')
+		require(n_levels == 1 or file.header.optional & 1, 'zoom levels need optional bit 0')
+		require(128 <= catalog and catalog + 32 * n_levels <= file.header.chroms,
+			'a catalog lies outside the data region')
+		sections.append((catalog, catalog + 32 * n_levels))
+		raw_catalog = data[catalog:catalog + 32 * n_levels]
+		require(zlib.crc32(raw_catalog) == levels_crc, 'a catalog fails its CRC-32')
+		sources = streams(file, g)
+		require(len(sources) == n_levels, 'the catalog has another number of levels')
+		levels = []
+		for k in range(n_levels):
+			source, index, rows, size, source_crc, bins = struct.unpack_from(
+				'<QQIIII', raw_catalog, 32 * k)
+			require((source, rows, size, source_crc) == sources[k][:4],
+				'a catalog entry is not the version 1 stream')
+			levels.append(read_level(file, k, sources[k], bins, index, tracks,
+				sections))
+		out.append(Group(directory + 32 * g, catalog, levels))
+	sections.sort()
+	require(all(a[1] <= b[0] and b[1] <= file.header.chroms for a, b in
+		zip(sections, sections[1:] + [(file.header.chroms, file.header.chroms)])),
+		'two structures overlap or pass the chromosome table')
+	return Index(root, data[:128], out, sections)

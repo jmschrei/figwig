@@ -93,13 +93,12 @@ from .bigwig import _Windows
 from .writer import _check_chrom_sizes
 from .writer import _check_engine
 from .writer import _compress_blocks
-from ._summary_index import METADATA_KEY as _SUMMARY_INDEX_KEY
-from ._summary_index import OPTIONAL_BIT as _OPTIONAL_SUMMARY_INDEX
-from ._summary_index import VERSION as _SUMMARY_INDEX_VERSION
-from ._summary_index import SummaryIndex
-from ._summary_index import SummaryIndexReader
-from ._summary_index import SummaryIndexError
-from ._summary_index import merge_ranges as _summary_ranges
+from . import _summary_index
+from ._summary_index import _Layout
+from ._summary_index import _SummaryIndex
+from ._summary_index import _SummaryIndexError
+from ._summary_index import _SummaryIndexReader
+from ._summary_index import _merge_ranges
 
 
 _FIGWIG_MAGIC = int.from_bytes(b'FIGW', 'little')
@@ -172,7 +171,8 @@ _HEADER = numpy.dtype([('magic', '<u4'), ('version', '<u2'), ('flags', '<u2'),
 # Feature bits a reader must know to read the file (`required`) or may
 # ignore (`optional`). No required bit is defined, so a reader refuses any
 # set. Optional bit 0 announces each group's zoom section, bit 1 the
-# summary restart directory; other optional bits are ignored.
+# regional summary index (`_summary_index.OPTIONAL_BIT`); other optional
+# bits are ignored.
 _KNOWN_REQUIRED = 0
 _OPTIONAL_ZOOMS = 1
 _MAX_ZOOMS = 12  # levels, each 4 times coarser than the last
@@ -727,12 +727,14 @@ class FigWigWriter:
 		with `append=True` and 0 otherwise. Default is None.
 
 	summary_index: bool, optional
-		Write the optional regional summary index for readers
-		that support it, preserving the ordinary v1 summary streams and
-		values. Small levels and levels beyond its allocation budget stay
-		ordinary. Not supported with `append=True`; ordinary append clears
-		the feature bit and preserves the stale metadata locator. Default
-		is False. See docs/summary_restarts.rst for the extension contract.
+		Write the optional regional summary index, which lets a reader that
+		supports it inflate only the pieces of the summaries and zoom levels
+		that a region needs. They hold the same values, in zlib streams
+		restarted at the edges of windows of bins. Small levels and levels
+		beyond the index's allocation budget stay ordinary. Not supported with
+		`append=True`; an ordinary append clears the feature bit and keeps the
+		stale metadata locator. Default is False. The layout is "The regional
+		summary index" of docs/format.rst.
 	"""
 
 	def __init__(self, path: str | os.PathLike, chrom_sizes: dict | list | None,
@@ -747,7 +749,7 @@ class FigWigWriter:
 		if append and summary_index:
 			raise ValueError('summary_index=True is not supported with append=True.')
 		self.summary_index = summary_index
-		self._summary_index = None
+		self._index_builder = None
 		self._pool = None
 		self._partial = None
 		self._length = None
@@ -2044,8 +2046,8 @@ class FigWigWriter:
 			+ stream + self._zoom_section(tiles, sums, g)
 
 	def _summary_stream(self, g, level, bins, sums):
-		if self._summary_index is not None:
-			return self._summary_index.compress(g, level, bins, sums)
+		if self._index_builder is not None:
+			return self._index_builder.compress(g, level, bins, sums)
 		return zlib.compress(bins.astype('<u4').tobytes() + sums.astype(
 			'<f4' if level == 0 else '<f8').tobytes(), 6)
 
@@ -2308,7 +2310,7 @@ class FigWigWriter:
 					track['dtype'] = _infer_dtype(nonzero, low, high, flags)
 
 			if self.summary_index and self._summaries:
-				self._summary_index = SummaryIndex([len(g) for g in self._groups],
+				self._index_builder = _SummaryIndex([len(g) for g in self._groups],
 					[self._n_tiles] + [grid[1] for grid in self._zoom_grids])
 
 			def record_of(g):
@@ -2329,8 +2331,8 @@ class FigWigWriter:
 					body = runs.tobytes() + struct.pack('<II', len(live), len(stream)) \
 						+ stream
 					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
-				if self._summary_index is not None:
-					self._summary_index.raw_sizes[g] = len(record)
+				if self._index_builder is not None:
+					self._index_builder.raw_sizes[g] = len(record)
 				return record + self._summary_record(g)
 
 			# Each group's record deflates its live tiles and summary, which
@@ -2339,11 +2341,12 @@ class FigWigWriter:
 				records = [record_of(g) for g in range(len(self._groups))]
 			else:
 				records = list(self._pool.map(record_of, range(len(self._groups))))
-			index_size = self._summary_index.size() if self._summary_index else 0
+			index_size = self._index_builder.size() if self._index_builder else 0
 			index_at = self._file.tell()
 			if index_size:
-				self._metadata[_SUMMARY_INDEX_KEY] = {'version': _SUMMARY_INDEX_VERSION, 'offset':
-					index_at, 'length': 256}
+				self._metadata[_summary_index.METADATA_KEY] = {
+					'version': _summary_index.VERSION, 'offset': index_at,
+					'length': _summary_index.ROOT_BYTES}
 				self._file.seek(index_at + index_size)
 			chroms_offset = self._file.tell()
 			chrom_table = b''.join(struct.pack('<H', len(name.encode())) +
@@ -2385,7 +2388,7 @@ class FigWigWriter:
 			header['version'] = _VERSION
 			header['flags'] = _FLAG_TRACKS if self.order == 'tracks' else 0
 			header['optional'] = _OPTIONAL_ZOOMS | (
-				_OPTIONAL_SUMMARY_INDEX if index_size else 0)
+				_summary_index.OPTIONAL_BIT if index_size else 0)
 			header['tile'] = self.tile
 			header['codec'] = _CODEC_NONE if self.level == 0 else _CODEC_ZLIB
 			header['level'] = self.level
@@ -2403,7 +2406,7 @@ class FigWigWriter:
 			header['header_crc'] = _header_crc(header.tobytes())
 			if index_size:
 				self._file.seek(index_at)
-				self._file.write(self._summary_index.serialize(index_at, directory,
+				self._file.write(self._index_builder.serialize(index_at, directory,
 					header.tobytes()))
 			if self._length is not None:
 				# The header is the one write over the file as it was, so
@@ -2419,7 +2422,7 @@ class FigWigWriter:
 			if self._partial is not None:
 				os.replace(self._partial, self.path)
 				self._partial = None
-			self._summary_index = None
+			self._index_builder = None
 		finally:
 			self._abandon()
 
@@ -2747,7 +2750,7 @@ class FigWigReader:
 		self._summary_at = [None] * n_groups
 		self._zoom_levels = [None] * n_groups
 		self._zoom_factors = None
-		self._summary_restart = None
+		self._regional = None
 		self._runs = [None] * n_groups
 		self._index_lock = threading.Lock()
 		self._pool = None
@@ -2789,7 +2792,7 @@ class FigWigReader:
 		state['_index'] = [None] * len(self._index)
 		state['_summary_at'] = [None] * len(self._index)
 		state['_zoom_levels'] = [None] * len(self._index)
-		state['_summary_restart'] = None
+		state['_regional'] = None
 		state['_runs'] = [None] * len(self._index)
 		state['_pool'] = None
 		state.pop('_pinned', None)
@@ -2797,7 +2800,6 @@ class FigWigReader:
 
 	def __setstate__(self, state):
 		self.__dict__.update(state)
-		self._summary_restart = None
 		self._index_lock = threading.Lock()
 
 	def _check_file(self):
@@ -3102,42 +3104,77 @@ class FigWigReader:
 		self._zoom_levels[g] = levels
 		return levels
 
-	def _summary_parts(self, g, level, ranges, total):
+	def _summary_read(self, fd):
+		"""A `read(offset, size)` over an open file for the summary index,
+		which refuses a read outside the file."""
+
+		def read(offset, size):
+			if not 128 <= offset <= self._file_size - size or size < 0:
+				raise _SummaryIndexError('a read lies outside the file.')
+			data = _pread(fd, size, offset)
+			if len(data) != size:
+				raise _SummaryIndexError('the file is truncated.')
+			return data
+
+		return read
+
+	def _regional_index(self, fd):
+		"""The file's regional summary index, opened on first use, or None when
+		it has none to use: another extension version, or a root whose copy of
+		the header is not the file's."""
+
+		if self._regional is None:
+			layout = _Layout(self._identity[2], self._tables_at, self._file_size,
+				self._directory, [len(group) for group in self._groups],
+				(self._lengths + self.tile - 1) // self.tile, self.order,
+				(_BLOCK if self.order == 'tracks' else _RUN).itemsize,
+				bool(self._optional & _OPTIONAL_ZOOMS))
+			index = _SummaryIndexReader.open(self._summary_read(fd),
+				self._metadata.get(_summary_index.METADATA_KEY), layout)
+			with self._index_lock:
+				if self._regional is None:
+					self._regional = index if index is not None else False
+		return self._regional or None
+
+	def _summary_index_bytes(self):
+		"""The bytes of the file's current regional summary index, from its
+		root to the chromosome table, or 0 when the file has none, the one it
+		has is stale or unknown, or its root cannot be read."""
+
+		if not self._optional & _summary_index.OPTIONAL_BIT:
+			return 0
+		fd = _open_read(self.path)
+		try:
+			if self._regional_index(fd) is None:
+				return 0
+			return int(self._tables_at) - int(self._metadata[
+				_summary_index.METADATA_KEY]['offset'])
+		except _SummaryIndexError:
+			return 0
+		finally:
+			os.close(fd)
+
+	def _summary_parts(self, g, level, ranges, fd=None):
 		"""Yield a group's stored sums for bin ranges, or its ordinary full level.
 
-		Whole-genome reads keep the legacy whole-stream checks. A valid
-		accelerator locates other reads without inflating the raw index or
-		unrequested zoom levels. The caller has checked the file identity.
+		With `fd`, an open descriptor of the file, which the caller opens when
+		a read might use the index, a valid index locates the pieces without
+		inflating the raw index or unrequested zoom levels. Whole-genome reads
+		keep the whole-stream checks of version 1. The caller has checked the file
+		identity.
 		"""
 
-		if self._optional & _OPTIONAL_SUMMARY_INDEX and ranges != [(0, total)] \
-				and self._summary_restart is not False:
-			fd = _open_read(self.path)
-			try:
-				def read(offset, size):
-					if not 128 <= offset <= self._file_size - size or size < 0:
-						raise SummaryIndexError('The summary restart index reads outside the file.')
-					data = _pread(fd, size, offset)
-					if len(data) != size:
-						raise SummaryIndexError('The summary restart index is truncated.')
-					return data
-
-				if self._summary_restart is None:
-					index = SummaryIndexReader.open(read, self._metadata.get(
-						_SUMMARY_INDEX_KEY), self._identity[2], self._tables_at,
-						self._directory, [len(group) for group in self._groups],
-						(self._lengths + self.tile - 1) // self.tile, self.order)
-					with self._index_lock:
-						if self._summary_restart is None:
-							self._summary_restart = index if index is not None else False
-				index = self._summary_restart
-				if index is not False:
-					levels = index.levels(read, g)
-					if level < len(levels) and levels[level].size:
-						yield from index.rows(read, g, level, ranges)
-						return
-			finally:
-				os.close(fd)
+		try:
+			index = self._regional_index(fd) if fd is not None else None
+			if index is not None:
+				read = self._summary_read(fd)
+				levels = index.levels(read, g)
+				if level < len(levels) and levels[level].source_bytes:
+					yield from index.rows(read, g, level, ranges)
+					return
+		except _SummaryIndexError as error:
+			raise _SummaryIndexError("{}: the regional summary index cannot be read: "
+				"{}".format(self.path, error)) from None
 		if level == 0:
 			summary = self._tile_sums_of(g)
 		else:
@@ -3152,30 +3189,60 @@ class FigWigReader:
 		yield summary
 
 	def _summary_bins(self, ids, level, ranges, total):
-		"""Dense requested bins in caller order; no genome-sized intermediate."""
+		"""Dense requested bins in caller order, from the stored sums or the
+		pieces of the index that hold them; no genome-sized intermediate.
 
-		lengths = [b - a for a, b in ranges]
-		width = sum(lengths)
+		`ranges` is an (n, 2) array or a list of bin ranges, each equal to or
+		disjoint from the others, as the ranges of whole chromosomes and of
+		merged intervals are: their bins are the columns of the output in turn,
+		and a repeated range repeats its columns.
+		"""
+
+		bounds = numpy.asarray(ranges, dtype=numpy.int64).reshape(-1, 2)
+		lengths = bounds[:, 1] - bounds[:, 0]
+		width = int(lengths.sum())
 		if len(ids) * width * (8 if level else 4) > _MAX_DENSE_BYTES:
 			raise ValueError('The requested tile sums exceed the dense allocation limit.')
 		out = numpy.zeros((len(ids), width), dtype=numpy.float64 if level else numpy.float32)
-		wanted = _summary_ranges(ranges)
-		positions = numpy.concatenate([[0], numpy.cumsum(lengths)])
-		parts = sorted((a, b, int(at)) for (a, b), at in zip(ranges, positions))
-		firsts = numpy.array([a for a, _, _ in parts])
-		ends = numpy.maximum.accumulate([b for _, b, _ in parts])
-		for g in numpy.unique(self._group_of[ids]).tolist():
-			channels = numpy.flatnonzero(self._group_of[ids] == g)
-			slots = self._slot_of[ids[channels]]
-			for bins, sums in self._summary_parts(g, level, wanted, total):
-				if not len(bins):
-					continue
-				lo = numpy.searchsorted(ends, bins[0], side='right')
-				hi = numpy.searchsorted(firsts, bins[-1], side='right')
-				for first, end, at in parts[lo:hi]:
-					a, b = numpy.searchsorted(bins, [first, end])
-					out[numpy.ix_(channels, bins[a:b].astype(numpy.int64) - first + at)] = \
-						sums[a:b, slots].T
+		wanted = _merge_ranges(bounds)
+		columns = numpy.cumsum(lengths) - lengths
+		# A repeated range is filled once, where it first appears, and copied.
+		live = numpy.flatnonzero(lengths > 0)
+		live = live[numpy.argsort(bounds[live, 0], kind='stable')]
+		again = numpy.concatenate([[False], bounds[live[1:], 0] == bounds[live[:-1], 0]])
+		kept = live[~again]
+		starts, ends, firsts = bounds[kept, 0], bounds[kept, 1], columns[kept]
+		# The index serves a read of less than the whole genome, from one descriptor.
+		fd = None
+		if self._optional & _summary_index.OPTIONAL_BIT and wanted != [(0, total)] \
+				and self._regional is not False:
+			fd = _open_read(self.path)
+		try:
+			for g in numpy.unique(self._group_of[ids]).tolist():
+				channels = numpy.flatnonzero(self._group_of[ids] == g)
+				slots = self._slot_of[ids[channels]]
+				for bins, sums in self._summary_parts(g, level, wanted, fd):
+					# The stored bins ascend, so the rows inside each range are a slice.
+					lows = numpy.searchsorted(bins, starts.astype(bins.dtype))
+					counts = numpy.searchsorted(bins, ends.astype(bins.dtype)) - lows
+					inside = int(counts.sum())
+					if inside == 0:
+						continue
+					shift = numpy.repeat(firsts - starts, counts)
+					if inside == len(bins):
+						cols, values = bins.astype(numpy.int64) + shift, sums[:, slots]
+					else:
+						rows = numpy.arange(inside) + numpy.repeat(lows - (numpy.cumsum(
+							counts) - counts), counts)
+						cols, values = bins[rows].astype(numpy.int64) + shift, sums[
+							numpy.ix_(rows, slots)]
+					out[numpy.ix_(channels, cols)] = values.T
+		finally:
+			if fd is not None:
+				os.close(fd)
+		for i, source in zip(live[again], kept[numpy.cumsum(~again) - 1][again]):
+			out[:, columns[i]:columns[i] + lengths[i]] = \
+				out[:, columns[source]:columns[source] + lengths[source]]
 		return out
 
 	def tile_sums(self, tracks: str | int | list | None = None, chroms: str |
@@ -3243,12 +3310,11 @@ class FigWigReader:
 			offsets, n_bins = self._tile_offsets, self._n_tiles
 		else:
 			offsets, n_bins = _zoom_grid(self._lengths, self.tile, 4 ** level)
-		ranges = []
 		span = self.tile * 4 ** level
-		for name in names:
-			tid = self._tids[name]
-			first = int(offsets[tid])
-			ranges.append((first, first + -(-int(self._lengths[tid]) // span)))
+		tids = numpy.array([self._tids[name] for name in names], dtype=numpy.int64)
+		firsts = numpy.asarray(offsets)[tids].astype(numpy.int64)
+		ranges = numpy.column_stack([firsts, firsts + -(-self._lengths[tids].astype(
+			numpy.int64) // span)])
 		out = self._summary_bins(ids, level, ranges, n_bins)
 		return out[0] if single else out
 
@@ -3611,12 +3677,12 @@ class FigWigReader:
 		self._check_file()
 		offsets = self._tile_offsets[numpy.array([self._tids[name] for name in names])][codes]
 		lo, hi = offsets + first, offsets + last
-		ranges = _summary_ranges(zip(lo[whole], hi[whole]))
+		ranges = _merge_ranges(numpy.column_stack([lo[whole], hi[whole]]))
 		# Read the union, including each whole tile once, without the gaps
 		# between distant intervals. Ordinary files retain the full-level path.
 		try:
 			every = self._summary_bins(ids, 0, ranges, self._n_tiles)
-		except SummaryIndexError:
+		except _SummaryIndexError:
 			raise
 		except ValueError:
 			return None

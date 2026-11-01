@@ -31,6 +31,8 @@ from figwig.__main__ import main  # noqa: E402
 from .reads import write_bam  # noqa: E402
 from .reads import write_chrom_sizes  # noqa: E402
 from .reads import write_intervals  # noqa: E402
+from .summary_files import read_regions  # noqa: E402
+from .summary_reference import read_index  # noqa: E402
 
 ENV = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
 	MKL_NUM_THREADS="1")
@@ -1739,3 +1741,34 @@ def test_coverage_command_line(tmp_path, coverage_bam, sizes):
 		capture_output=True, text=True, timeout=600)
 	assert result.returncode == 0, result.stderr
 	assert len(FigWigReader(name + ".fw").tracks) == 2
+
+
+def test_summary_index_is_written_when_asked(tmp_path, bam, sizes, small_windows,
+	watched):
+	"""With -t 16 the 1,900 bases are 115 bins, 15 windows of 8, and a read of
+	chr2 alone is 5 of them, through the index."""
+
+	indexed = bam2fw(tmp_path / "indexed", [bam], sizes, "-u", "-t", "16",
+		"--summary-index")
+	plain = bam2fw(tmp_path / "plain", [bam], sizes, "-u", "-t", "16")
+	assert any(level.window_bins for group in read_index(indexed).groups for level in
+		group.levels)
+	assert read_index(plain) is None
+	assert FigWigReader(indexed).tile_sums().tobytes() == \
+		FigWigReader(plain).tile_sums().tobytes()
+	regions, used = read_regions(indexed, watched)
+	assert used and regions == read_regions(plain, watched)[0]
+
+
+def test_summary_index_is_written_for_cells_too(tmp_path, fragments, sizes,
+	small_windows, watched):
+	"""The cells' writer is a second call of FigWigWriter in bam2fw."""
+
+	path = bam2fw(tmp_path / "indexed", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-t", "16", "--summary-index")
+	plain = bam2fw(tmp_path / "plain", [fragments], sizes, "--barcode-column", "4",
+		"-f", "-t", "16")
+	assert any(level.window_bins for group in read_index(path).groups for level in
+		group.levels)
+	regions, used = read_regions(path, watched)
+	assert used and regions == read_regions(plain, watched)[0]

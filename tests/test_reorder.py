@@ -8,9 +8,14 @@ import numpy
 import pytest
 
 from figwig import FigWigReader
+from figwig import FigWigWriter
 
 from figwig.__main__ import main
 
+from . import format_reference
+from .summary_files import read_regions
+from .summary_reference import KEY
+from .summary_reference import read_index
 from .test_figwig import CHROM_SIZES
 from .test_figwig import reference_tracks
 from .test_figwig import write_reference
@@ -91,3 +96,78 @@ def test_existing_output_is_refused_without_force(tmp_path, fw):
 	main(['reorder', fw, out, '--order', 'positions', '-f'])
 	main(['reorder', out, out, '--order', 'tracks'])
 	assert FigWigReader(out).order == 'tracks'
+
+
+##
+# The regional summary index
+##
+
+def restarted(path):
+	index = read_index(path)
+	return index is not None and any(level.window_bins for group in index.groups for
+		level in group.levels)
+
+
+@pytest.mark.parametrize('flags, input_has_one, output_has_one', [
+	([], True, True),
+	([], False, False),
+	(['--summary-index'], False, True),
+	(['--no-summary-index'], True, False),
+])
+def test_reorder_writes_an_index_as_asked_or_as_its_input_has_one(tmp_path,
+	summary_counts, watched, flags, input_has_one, output_has_one):
+	source = summary_counts[1 if input_has_one else 0]
+	other = 'tracks' if FigWigReader(source).order == 'positions' else 'positions'
+	out = tmp_path / 'out.fw'
+	# An input in track order has no tile of its own, so the tile is given.
+	main(['reorder', str(source), str(out), '--order', other, '-t', '16'] + flags)
+	assert restarted(out) == output_has_one
+	assert FigWigReader(out).tile_sums().tobytes() == \
+		FigWigReader(source).tile_sums().tobytes()
+	# Each chromosome read alone, which goes through the index where there is one.
+	regions, used = read_regions(out, watched)
+	assert used == output_has_one and regions == read_regions(source, watched)[0]
+
+
+def test_reorder_writes_a_new_index_where_the_header_announces_a_damaged_one(
+	tmp_path, summary_counts, watched):
+	"""The header says the input has an index, and reordering reads the values,
+	not the index: a root that fails its checksum does not make the output lose
+	the index it would have had."""
+
+	damaged = tmp_path / 'damaged.fw'
+	data = bytearray(summary_counts[1].read_bytes())
+	data[read_index(summary_counts[1]).root + 40] ^= 1
+	damaged.write_bytes(data)
+	other = 'tracks' if FigWigReader(damaged).order == 'positions' else 'positions'
+	out = tmp_path / 'out.fw'
+	main(['reorder', str(damaged), str(out), '--order', other, '-t', '16'])
+	assert restarted(out)
+	assert FigWigReader(out).tile_sums().tobytes() == \
+		FigWigReader(summary_counts[1]).tile_sums().tobytes()
+	regions, used = read_regions(out, watched)
+	assert used and regions == read_regions(summary_counts[1], watched)[0]
+
+
+def test_reorder_of_an_appended_file_writes_no_index(tmp_path, summary_counts):
+	"""An append clears optional bit 1 and keeps the metadata key: the header says
+	the file has no index, and reorder follows the header, not the leftover key."""
+
+	path = tmp_path / 'grown.fw'
+	path.write_bytes(summary_counts[1].read_bytes())
+	with FigWigWriter(path, None, ['extra'], append=True, engine='zlib', n_jobs=1):
+		pass
+	assert KEY in format_reference.File(path).metadata
+	other = 'tracks' if FigWigReader(path).order == 'positions' else 'positions'
+	out = tmp_path / 'out.fw'
+	main(['reorder', str(path), str(out), '--order', other, '-t', '16'])
+	assert format_reference.File(out).header.optional & 2 == 0 and not restarted(out)
+	assert KEY not in format_reference.File(out).metadata
+
+
+def test_reorder_in_place_keeps_the_index(tmp_path, summary_counts):
+	path = tmp_path / 'same.fw'
+	path.write_bytes(summary_counts[1].read_bytes())
+	other = 'tracks' if FigWigReader(path).order == 'positions' else 'positions'
+	main(['reorder', str(path), str(path), '--order', other, '-t', '16'])
+	assert restarted(path) and FigWigReader(path).order == other

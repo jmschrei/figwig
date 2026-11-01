@@ -7,13 +7,15 @@ order.
 A file in position order reads windows across many tracks fast and a file
 in track order reads a few tracks over the genome fast; this reads every
 nonzero base of the input, chromosome by chromosome, and writes it in the
-order asked for, with the same tracks, attributes and genome.
+order asked for, with the same tracks, attributes and genome, and with a
+regional summary index when the input's header announces one.
 """
 
 import argparse
 import os
 import sys
 
+from . import _summary_index
 from .figwig import _DEFAULT_GROUPS
 from .figwig import _DEFAULT_TILE
 from ._tables import _exit
@@ -42,6 +44,11 @@ def _parser(prog):
 		"compression level, or 0 for uncompressed chunks. Default is the "
 		"input's level when the output is in the same order, and otherwise 6 "
 		"in position order and 0 in track order.")
+	parser.add_argument('--summary-index', action=argparse.BooleanOptionalAction,
+		default=None, help="Write the optional regional summary index, which "
+		"lets a reader decode the tile sums of one chromosome or interval "
+		"without inflating a whole level (--no-summary-index leaves it out). "
+		"Default is to write one when the input's header announces one.")
 	parser.add_argument('-p', '--parallel', default=1, type=int, help="The "
 		"number of threads. Default is 1.")
 	parser.add_argument('-f', '--force', action='store_true', help="Write "
@@ -52,12 +59,15 @@ def _parser(prog):
 
 
 def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
-	verbose=False):
+	verbose=False, summary_index=None):
 	"""Write the figwig file `path` as `output` in `order`. The tile, the
 	groups and, for an output in the input's order, the level default to the
 	input's, so that a file written again keeps its layout; an input in
-	track order gives the position-order defaults. The output may be the
-	input's own path, which holds the input until the output is complete."""
+	track order gives the position-order defaults. The output has a regional
+	summary index when `summary_index` is True, or None and the input's header
+	announces one.
+	The output may be the input's own path, which holds the input until the
+	output is complete."""
 
 	reader = FigWigReader(path)
 	tracks = [{key: value for key, value in track.items() if key != 'group'}
@@ -74,10 +84,13 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 		tile = _DEFAULT_TILE
 	if groups is None:
 		groups = _DEFAULT_GROUPS
+	if summary_index is None:
+		summary_index = bool(reader._optional & _summary_index.OPTIONAL_BIT)
 	total = 0
 	with FigWigWriter(output, reader.chrom_sizes, tracks, genome=reader.genome,
 			attributes=reader.attributes, tile=tile, groups=groups, level=level,
-			n_jobs=n_jobs, order=order, zooms=len(reader.zooms)) as writer:
+			n_jobs=n_jobs, order=order, zooms=len(reader.zooms),
+			summary_index=summary_index) as writer:
 		for chrom in reader.chrom_sizes:
 			entries = reader.read_entries(chroms=[chrom], n_jobs=n_jobs)
 			if len(entries.values) > 0:
@@ -100,6 +113,6 @@ def main(argv=None, prog='figwig reorder'):
 			_refuse_existing(args.output, '-f', besides=[args.figwig])
 		_reorder(args.figwig, args.output, args.order, tile=args.tile,
 			groups=args.groups, level=args.level, n_jobs=args.parallel,
-			verbose=args.verbose)
+			verbose=args.verbose, summary_index=args.summary_index)
 	except (ValueError, TypeError, OSError) as e:
 		raise _exit(prog, e)

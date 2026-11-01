@@ -141,7 +141,6 @@ uninstalled.
    writing
    figwig
    format
-   summary_restarts
    threads
    benchmarks
 

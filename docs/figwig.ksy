@@ -12,11 +12,16 @@ doc: |
   the index. This definition is the one in docs/format.rst of the figwig
   repository, which is the normative specification; it parses the header,
   every table, the index with its runs, live tiles, block records,
-  summaries and zoom levels, and the bytes of every chunk and block. The
+  summaries and zoom levels, and the bytes of every chunk and block, and
+  the optional regional summary index of a file that has one. The
   chunk and block payload types take the parameters the index does not
   hold by itself: a chunk's kind byte and its group's number of tracks,
   which come from the metadata's track records (JSON, outside Kaitai's
-  reach), and the tile size from the header. tests/test_kaitai.py parses
+  reach), and the tile size from the header. The optional regional
+  summary index is found through an offset in the metadata (JSON again),
+  so summary_index takes the root's offset as a parameter, and
+  summary_page takes the number of descriptors the page holds; docs/format.rst
+  says how to find both. tests/test_kaitai.py parses
   the test files with the parser compiled from this file and compares
   them with the reference reader.
 seq:
@@ -99,7 +104,10 @@ types:
         doc: Feature bits a reader must know; none is defined in version 1.
       - id: optional
         type: u4
-        doc: Feature bits a reader may ignore; bit 0 says each record ends with a zoom section.
+        doc: |
+          Feature bits a reader may ignore. Bit 0 says each record ends with
+          a zoom section. Bit 1 says the file has a regional summary index,
+          found through the metadata key org.figwig.summary-restarts.
       - id: header_crc
         type: u4
         doc: CRC-32 of these 128 bytes with this field as 0.
@@ -110,6 +118,8 @@ types:
         value: flags & 1 != 0
       has_zooms:
         value: optional & 1 != 0
+      has_summary_index:
+        value: optional & 2 != 0
   chrom_table:
     seq:
       - id: entries
@@ -339,6 +349,151 @@ types:
         process: zlib
         type: block(num_entries, kind)
         if: _root.header.codec == 1
+  summary_index:
+    doc: |
+      The optional regional summary index, announced by header optional
+      bit 1: the root and one locator per group. The root's offset is the
+      "offset" of the metadata's org.figwig.summary-restarts object, JSON
+      outside Kaitai's reach. A level catalog is a locator's levels; a
+      descriptor page is parsed by summary_page.
+    params:
+      - id: root_offset
+        type: u8
+    instances:
+      root:
+        pos: root_offset
+        type: summary_root
+      locators:
+        pos: root.directory_offset
+        type: summary_locator
+        repeat: expr
+        repeat-expr: root.n_groups
+  summary_root:
+    doc: The 256-byte root of the index.
+    seq:
+      - id: magic
+        contents: ['FWRSUM1', 0]
+      - id: version
+        type: u2
+        doc: The extension's own version, 2.
+      - id: len_root
+        type: u2
+        doc: 256.
+      - id: crc
+        type: u4
+        doc: CRC-32 of these 256 bytes with this field as 0.
+      - id: directory_offset
+        type: u8
+        doc: Offset of the group locators, this root's offset plus 256.
+      - id: n_groups
+        type: u4
+        doc: The header's number of groups.
+      - id: descriptors_per_page
+        type: u4
+        doc: 102.
+      - id: window_target
+        type: u4
+        doc: Decoded bytes a window targets, 32768.
+      - id: reserved_a
+        size: 28
+      - id: header_snapshot
+        size: 128
+        doc: The file's final 128-byte header; an index whose snapshot differs from the header is stale.
+      - id: reserved_b
+        size: 64
+  summary_locator:
+    doc: A group's 32-byte locator in the index directory.
+    seq:
+      - id: levels_offset
+        type: u8
+        doc: Offset of the group's level catalog.
+      - id: n_levels
+        type: u4
+        doc: 1 to 13, the base summary then each zoom level.
+      - id: levels_crc
+        type: u4
+        doc: CRC-32 of the catalog.
+      - id: group
+        type: u4
+      - id: n_tracks
+        type: u4
+      - id: crc
+        type: u4
+        doc: CRC-32 of these 32 bytes with this field as 0.
+      - id: reserved
+        type: u4
+    instances:
+      levels:
+        pos: levels_offset
+        type: summary_level
+        repeat: expr
+        repeat-expr: n_levels
+  summary_level:
+    doc: A level's entry in a catalog; its position gives the level, 0 the base summary.
+    seq:
+      - id: source_offset
+        type: u8
+        doc: Offset of the level's version 1 zlib stream.
+      - id: index_offset
+        type: u8
+        doc: Offset of the first descriptor page, 0 for an ordinary level.
+      - id: source_rows
+        type: u4
+      - id: source_bytes
+        type: u4
+      - id: source_crc
+        type: u4
+      - id: window_bins
+        type: u4
+        doc: A power of two up to 2048, 0 for an ordinary level.
+  summary_page:
+    doc: |
+      A descriptor page, at index_offset + 4096 * p for page p. It holds
+      min(102, windows - 102 * p) descriptors, where windows is the level's
+      bins over the genome divided by window_bins, rounded up.
+    params:
+      - id: num_windows
+        type: u4
+    seq:
+      - id: magic
+        contents: 'FWRP'
+      - id: first_window
+        type: u4
+      - id: count
+        type: u4
+      - id: crc
+        type: u4
+        doc: CRC-32 of the page's bytes with this field as 0.
+      - id: windows
+        type: summary_window
+        repeat: expr
+        repeat-expr: num_windows
+  summary_window:
+    doc: One window's descriptor, all zero for a window with no rows.
+    seq:
+      - id: n_rows
+        type: u4
+      - id: first_source_row
+        type: u4
+      - id: ids_offset
+        type: u4
+        doc: Offset of the compressed ID fragment from the first byte of the level's zlib stream, at least 2 because of the stream's header.
+      - id: ids_bytes
+        type: u4
+      - id: ids_crc
+        type: u4
+        doc: CRC-32 of the compressed fragment.
+      - id: ids_raw_crc
+        type: u4
+        doc: CRC-32 of the decoded fragment.
+      - id: sums_offset
+        type: u4
+      - id: sums_bytes
+        type: u4
+      - id: sums_crc
+        type: u4
+      - id: sums_raw_crc
+        type: u4
   summary:
     doc: The tiles of a group with a nonzero sum, and each track's float32 sum over them.
     seq:

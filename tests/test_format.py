@@ -23,11 +23,15 @@ from figwig.figwig import _HEADER
 from . import format_reference as spec
 from .format_fixtures import TILE
 from .format_fixtures import write_all
+from .summary_reference import read_index
 
 
 @pytest.fixture(scope='module')
-def files(tmp_path_factory):
-	return write_all(tmp_path_factory.mktemp('format'))
+def files(tmp_path_factory, summary_signal):
+	paths = write_all(tmp_path_factory.mktemp('format'))
+	paths['indexed'] = summary_signal['positions'][1]
+	paths['indexed_tracks'] = summary_signal['tracks'][1]
+	return paths
 
 
 def identical(a, b):
@@ -58,8 +62,21 @@ def test_header_layout_matches_the_specification():
 	assert spec.STATS.itemsize == 32
 
 
+@pytest.mark.parametrize('name', ['indexed', 'indexed_tracks'])
+def test_indexed_fixtures_hold_restarted_levels(files, name):
+	"""The two fixtures that test the regional summary index have one: bit 1
+	set, the locator in the metadata, and restarted and ordinary levels."""
+
+	file = spec.File(files[name])
+	assert file.header.optional == 3 and file.header.version == 1
+	levels = [level for group in read_index(files[name]).groups for level in
+		group.levels]
+	assert any(level.window_bins for level in levels)
+	assert any(not level.window_bins for level in levels)
+
+
 @pytest.mark.parametrize('name', ['zlib', 'stored', 'tracks', 'tracks_zlib',
-	'appended', 'merged', 'blocks', 'entries'])
+	'appended', 'merged', 'blocks', 'entries', 'indexed', 'indexed_tracks'])
 def test_reference_reader_agrees_with_figwig(files, name):
 	"""Every table, index record, summary, zoom level and value the
 	specification's reader finds is what FigWigReader finds."""
