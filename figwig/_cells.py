@@ -697,13 +697,17 @@ def _finish(parts, presorted, chroms, cell_bits, tile_bits, threads):
 	from concurrent.futures import as_completed
 
 	shift = _POSITION_BITS + cell_bits
-	edges = numpy.arange(len(chroms) + 1, dtype=numpy.int64) << shift
+	edges = numpy.arange(1, len(chroms), dtype=numpy.int64) << shift
 	pool = ThreadPoolExecutor(threads)
 	try:
 		def cut(keys):
 			if not presorted:
 				keys.sort()
-			return numpy.searchsorted(keys, edges)
+			# The last chromosome's edge, len(chroms) << shift, is 2**63 when
+			# len(chroms) is a power of two and wraps in int64, so it ends at
+			# len(keys): every key's slot is below len(chroms).
+			return numpy.concatenate(([0], numpy.searchsorted(keys, edges),
+				[len(keys)]))
 
 		bounds = list(pool.map(cut, parts))
 		pieces = [[] for _ in chroms]

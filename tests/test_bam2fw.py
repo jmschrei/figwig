@@ -539,6 +539,38 @@ def test_too_many_cells_for_the_key(tmp_path, fragments, sizes, monkeypatch):
 	assert len(FigWigReader(out).tracks) == 8
 
 
+@pytest.mark.parametrize("with_cells", [False, True])
+@pytest.mark.parametrize("n_chroms", [1, 2, 3, 4, 5, 7, 8, 9, 16, 17, 32, 33])
+def test_barcode_column_keeps_every_chromosome(tmp_path, n_chroms, with_cells):
+	"""A key's chromosome part is the slot shifted past the cell and the
+	position, and the cuts between chromosomes include one past the last
+	slot, which is 2**63 and wraps in int64 when the number of chromosomes
+	is a power of two (issue 37). Every chromosome has its own counts."""
+
+	chroms = ["chr{}".format(i + 1) for i in range(n_chroms)]
+	sizes = str(write_chrom_sizes(tmp_path / "sizes.txt", [(chrom, 1000) for
+		chrom in chroms]))
+	rows = []
+	for i, chrom in enumerate(chroms):
+		rows += [(chrom, 100 + 10 * j, 200 + 10 * j, "AAAC-1") for j in
+			range(i % 3 + 1)]
+		rows += [(chrom, 300, 400, "CCCG-1")] * (i % 2 + 1)
+	fragments = str(write_intervals(tmp_path / "fragments.tsv", rows))
+	flags = ["--barcode-column", "4", "-f", "-u"]
+	if with_cells:
+		table = tmp_path / "cells.tsv"
+		table.write_text("barcode\nAAAC-1\nCCCG-1\n")
+		flags += ["--cells", str(table)]
+
+	path = bam2fw(tmp_path, [fragments], sizes, *flags)
+	reader = FigWigReader(path)
+	assert [track["name"] for track in reader.tracks] == ["AAAC-1", "CCCG-1"]
+	for i, chrom in enumerate(chroms):
+		y = reader.read([chrom], [0], 1000, dtype="int64")[0]
+		# Each end of a fragment counts once, so two per fragment.
+		assert y.sum(axis=1).tolist() == [2 * (i % 3 + 1), 2 * (i % 2 + 1)], chrom
+
+
 def test_malformed_fragments_files(tmp_path, sizes):
 	import pysam
 
