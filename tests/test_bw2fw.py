@@ -21,6 +21,9 @@ from figwig import write_bigwig
 
 from figwig.__main__ import main
 
+from .summary_files import read_regions
+from .summary_reference import read_index
+
 ENV = dict(os.environ, OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1",
 	MKL_NUM_THREADS="1")
 CHROM_SIZES = {'chr1': 300_000, 'chr2': 120_000, 'chrM': 16_569}
@@ -347,3 +350,28 @@ def test_missing_inputs_are_messages(tmp_path, bigwigs):
 	table.write_text("file name assay\n{} a ATAC\n".format(bigwigs[0]))
 	with pytest.raises(SystemExit, match="one column; a table is tab-separated"):
 		main(['bw2fw', '-o', out, '-m', str(table), bigwigs[0]])
+
+
+def test_summary_index_is_written_when_asked(tmp_path, bigwigs, small_windows,
+	watched):
+	"""The default of -z is 0, so the index has one level a group, and the read of
+	each chromosome alone, 2 to 19 bins of 29 in windows of 8, goes through it."""
+
+	indexed, plain = str(tmp_path / 'indexed.fw'), str(tmp_path / 'plain.fw')
+	main(['bw2fw', '-o', indexed, '--summary-index'] + bigwigs[:2])
+	main(['bw2fw', '-o', plain] + bigwigs[:2])
+	assert any(level.window_bins for group in read_index(indexed).groups for level in
+		group.levels)
+	assert read_index(plain) is None
+	assert FigWigReader(indexed).tile_sums().tobytes() == \
+		FigWigReader(plain).tile_sums().tobytes()
+	regions, used = read_regions(indexed, watched)
+	assert used and regions == read_regions(plain, watched)[0]
+
+
+def test_summary_index_cannot_be_asked_of_an_append(tmp_path, bigwigs):
+	out = str(tmp_path / 'grow.fw')
+	main(['bw2fw', '-o', out, bigwigs[0]])
+	with pytest.raises(SystemExit, match="--summary-index is not supported with "
+			"--append"):
+		main(['bw2fw', '-o', out, '--append', '--summary-index', bigwigs[1]])

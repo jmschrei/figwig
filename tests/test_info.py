@@ -19,6 +19,9 @@ from figwig.figwig import _VERSION
 from figwig.info import _describe
 from figwig.info import _shown
 
+from .summary_files import repair
+from .summary_files import write_signal
+from .summary_reference import read_index
 from .test_figwig import TRACKS
 from .test_figwig import reference_tracks
 from .test_figwig import write_reference
@@ -83,6 +86,47 @@ def test_values_are_shown_on_one_printable_line(tmp_path):
 	assert 'attribute\tline\tx\\x0dy' in lines
 	assert any(line.startswith('bad\\x0aname\t') and line.endswith(
 		'{"depth": 2}') for line in lines)
+
+
+@pytest.mark.parametrize('how', ['stale', 'corrupt'])
+def test_an_index_that_cannot_be_used_counts_as_unused_bytes(tmp_path, how):
+	"""A stale index (the root's copy of the header is not the file's) or one
+	whose root fails its checksum is not read, so its bytes are not its own."""
+
+	path = tmp_path / 'damaged.fw'
+	path.write_bytes(write_signal(tmp_path / 'indexed.fw').read_bytes())
+	root = read_index(path).root
+	data = bytearray(path.read_bytes())
+	data[root + (64 + 28 if how == 'stale' else 40)] ^= 1
+	if how == 'stale':
+		repair(data, root, 256, 12)
+	path.write_bytes(data)
+	lines = _describe(FigWigReader(path), count_bytes=True)
+	assert not any(line.startswith('summary index bytes') for line in lines)
+	unused = int([line for line in lines if line.startswith('unused bytes')][0]
+		.split('\t')[1])
+	assert unused > 256
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_summary_index_is_counted_apart_from_unused_bytes(tmp_path, order):
+	"""The regional summary index lies in the data region and is not unused;
+	after an append, which clears its bit, its bytes are unused."""
+
+	path = write_signal(tmp_path / 'indexed.fw', order)
+	fields = {line.split('\t')[0]: line.split('\t')[1:] for line in _describe(
+		FigWigReader(path), count_bytes=True) if '\t' in line}
+	index = int(fields['summary index bytes'][0])
+	assert index > 0 and int(fields['unused bytes'][0]) == 0
+	assert int(fields['chunk bytes'][0]) + int(fields['table and index bytes'][
+		0]) + index + 128 == os.path.getsize(path)
+
+	with FigWigWriter(path, None, ['more'], append=True, engine='zlib') as writer:
+		writer.write('chrB', [0], [[[1.0] * 10]])
+	lines = _describe(FigWigReader(path), count_bytes=True)
+	assert not any(line.startswith('summary index bytes') for line in lines)
+	unused = [line for line in lines if line.startswith('unused bytes')][0]
+	assert int(unused.split('\t')[1]) >= index
 
 
 def test_unused_bytes_after_an_append(tmp_path, ref):

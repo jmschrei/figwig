@@ -84,6 +84,11 @@ def _parser(prog):
 	parser.add_argument('-l', '--level', default=1, type=int, help="The "
 		"compression level, or 0 to store the chunks uncompressed. Default is "
 		"1.")
+	parser.add_argument('--summary-index', action='store_true', help="Write "
+		"the optional regional summary index, which lets a reader decode the "
+		"tile sums of one chromosome or interval without inflating a whole "
+		"level. It adds a few percent to the file and takes effect on levels "
+		"of more than 64 KiB. Default is off.")
 	parser.add_argument('--force', action='store_true', help="Write over a "
 		"figwig file at <-n>.fw, which is refused without it.")
 	parser.add_argument('-v', '--verbose', action='store_true')
@@ -435,7 +440,8 @@ def _cells_main(args, prog, cores, chrom_sizes):
 
 		with FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 				genome=args.genome, tile=args.tile, groups=groups, level=args.level,
-				n_jobs=cores, zooms=args.zooms) as writer:
+				n_jobs=cores, zooms=args.zooms,
+				summary_index=args.summary_index) as writer:
 			writer._copies = False
 			offset = 0
 			for counts, barcodes in zip(files, barcodes_per_file):
@@ -587,7 +593,8 @@ def main(argv=None, prog='figwig bam2fw'):
 	try:
 		with FigWigWriter(args.name + '.fw', chrom_sizes, tracks,
 				genome=args.genome, tile=args.tile, groups=groups, level=args.level,
-				n_jobs=cores, zooms=args.zooms) as writer:
+				n_jobs=cores, zooms=args.zooms,
+				summary_index=args.summary_index) as writer:
 			# The arrays `_write_counts` makes are the writer's to keep.
 			writer._copies = False
 			per_file = len(groups) // len(files)

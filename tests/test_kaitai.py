@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import zlib
 
 import kaitaistruct
 import numpy
@@ -22,6 +23,7 @@ import pytest
 from . import format_reference as spec
 from .format_fixtures import write_all
 from .kaitai_figwig import Figwig
+from .summary_reference import read_index
 
 
 KSY = 'docs/figwig.ksy'
@@ -29,8 +31,11 @@ GENERATED = 'tests/kaitai_figwig.py'
 
 
 @pytest.fixture(scope='module')
-def files(tmp_path_factory):
-	return write_all(tmp_path_factory.mktemp('kaitai'))
+def files(tmp_path_factory, summary_signal):
+	paths = write_all(tmp_path_factory.mktemp('kaitai'))
+	paths['indexed'] = summary_signal['positions'][1]
+	paths['indexed_tracks'] = summary_signal['tracks'][1]
+	return paths
 
 
 def regenerate(root, outdir):
@@ -104,7 +109,7 @@ def decode(parsed, kind_byte, n_tracks, tile, data):
 
 
 @pytest.mark.parametrize('name', ['zlib', 'stored', 'tracks', 'tracks_zlib',
-	'appended', 'merged', 'blocks', 'entries'])
+	'appended', 'merged', 'blocks', 'entries', 'indexed', 'indexed_tracks'])
 def test_kaitai_parser_agrees_with_the_reference_reader(files, name):
 	path = files[name]
 	file = spec.File(path)
@@ -204,3 +209,74 @@ def test_definition_is_the_runtime_version_the_parser_needs():
 	assert tuple(int(x) for x in kaitaistruct.__version__.split('.')[:2]) >= \
 		(0, 10)
 	assert sys.version_info >= (3, 10)
+
+
+@pytest.mark.parametrize('name', ['indexed', 'indexed_tracks'])
+def test_kaitai_parses_the_summary_index_as_the_reference_reader_finds_it(
+	files, name):
+	"""summary_index and summary_page of docs/figwig.ksy find the root, the
+	locators, the catalogs and the descriptors that summary_reference.py
+	reads from "The regional summary index" of docs/format.rst, and the
+	checksums of the fragments are those of the bytes."""
+
+	path = files[name]
+	data = path.read_bytes()
+	index = read_index(path)
+	stream = kaitaistruct.KaitaiStream(io.BytesIO(data))
+	assert Figwig(stream).header.has_summary_index
+	parsed = Figwig.SummaryIndex(index.root, stream)
+	root = parsed.root
+	assert (root.version, root.len_root, root.descriptors_per_page,
+		root.window_target) == (2, 256, 102, 32768)
+	assert root.directory_offset == index.root + 256
+	assert root.n_groups == len(index.groups)
+	assert bytes(root.header_snapshot) == index.header
+	assert zlib.crc32(data[index.root:index.root + 256][:12] + bytes(4) +
+		data[index.root + 16:index.root + 256]) == root.crc
+	windows = 0
+	for locator, group in zip(parsed.locators, index.groups):
+		assert locator.levels_offset == group.catalog
+		assert locator.n_levels == len(group.levels)
+		for entry, level in zip(locator.levels, group.levels):
+			for field in ENTRY_FIELDS:
+				assert getattr(entry, field) == getattr(level, field), field
+			windows += check_pages(stream, data, level)
+	assert windows
+
+
+# The fields of a catalog entry and of a descriptor, named alike in docs/format.rst,
+# docs/figwig.ksy and the reference reader.
+ENTRY_FIELDS = ['source_offset', 'index_offset', 'source_rows', 'source_bytes',
+	'source_crc', 'window_bins']
+DESCRIPTOR_FIELDS = ['n_rows', 'first_source_row', 'ids_offset', 'ids_bytes',
+	'sums_offset', 'sums_bytes']
+
+
+def check_pages(stream, data, level):
+	"""Parse each page of `level` with summary_page and compare every
+	descriptor with the reference reader's window, or with zeros, and the
+	checksums with those of the bytes."""
+
+	checked = 0
+	count = -(-level.total // level.window_bins) if level.window_bins else 0
+	body = data[level.source_offset:level.source_offset + level.source_bytes]
+	for p, at in enumerate(level.pages):
+		stream.seek(at)
+		n = min(102, count - 102 * p)
+		page = Figwig.SummaryPage(n, stream)
+		assert (page.first_window, page.count) == (102 * p, n)
+		for slot, window in enumerate(page.windows):
+			found = level.windows.get(102 * p + slot)
+			if found is None:
+				assert not any(getattr(window, field) for field in DESCRIPTOR_FIELDS)
+				continue
+			for field in DESCRIPTOR_FIELDS:
+				assert getattr(window, field) == getattr(found, field), field
+			ids = body[found.ids_offset:found.ids_offset + found.ids_bytes]
+			sums = body[found.sums_offset:found.sums_offset + found.sums_bytes]
+			assert (window.ids_crc, window.ids_raw_crc, window.sums_crc,
+				window.sums_raw_crc) == (zlib.crc32(ids), zlib.crc32(
+				found.ids.astype('<u4').tobytes()), zlib.crc32(sums),
+				zlib.crc32(found.sums.tobytes()))
+			checked += 1
+	return checked

@@ -60,10 +60,13 @@ def _describe(reader, count_bytes=False):
 			else:
 				live += int(reader._runs[g]['bytes'].astype('int64').sum())
 		tables = int(reader._file_size) - int(reader._tables_at)
+		summary_index = reader._summary_index_bytes()
 		lines.append("chunk bytes\t{}".format(live))
 		lines.append("table and index bytes\t{}".format(tables))
+		if summary_index:
+			lines.append("summary index bytes\t{}".format(summary_index))
 		lines.append("unused bytes\t{}".format(int(reader._file_size) - 128 - live
-			- tables))
+			- tables - summary_index))
 		if size > reader._file_size:
 			lines.append("bytes past the end\t{}".format(size - int(
 				reader._file_size)))

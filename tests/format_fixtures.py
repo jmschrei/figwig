@@ -4,8 +4,9 @@
 """The files tests/test_format.py and tests/test_kaitai.py read: small
 figwig files written by `FigWigWriter` so that every chunk kind, every
 element type, both orders, both codecs, zoom levels, chromosome edges,
-several runs per group, an append, a merge and chunks written from entries
-are among them."""
+several runs per group, an append, a merge and chunks written from entries are
+among them. The files with a regional summary index are `summary_signal` of
+conftest.py."""
 
 import numpy
 

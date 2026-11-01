@@ -767,6 +767,37 @@ fold change, peaks                 0.33 s      0.070 s
 fold change, gene bodies           1.55 s      0.26 s
 =================================  ==========  ==========
 
+Regional summaries
+~~~~~~~~~~~~~~~~~~
+
+The same reads of the same 64 integer tracks, written without and with
+``summary_index=True`` (:ref:`regional summaries <regional-summaries>`): three
+chromosomes of 200, 80 and 20 Mb, half of the tiles of 1,024 bases nonzero in
+each track, 8 tracks per group and 6 zoom levels, in position order and in track
+order. One thread, a new reader for each read, the minimum of 15, in
+milliseconds (``claude_comments/2026-11-01-regional-summaries/``,
+``make_indexed.py`` and ``bench_index.py``):
+
+=======================================  ==========  ==========  ==========  ==========
+read                                     position,   position,   track,      track,
+                                         plain       indexed     plain       indexed
+=======================================  ==========  ==========  ==========  ==========
+``tile_sums``, chr3 (20 Mb of 300)       225         19          150         31
+``tile_sums``, chr2 (80 Mb of 300)       246         75          160         104
+``tile_sums``, chr2, level 2             131         8.6         116         19
+``tile_sums``, the whole genome          262         280         173         214
+``tile_sums``, the whole genome, 2       132         152         117         132
+4 integer ``sums`` of 200 kb             81          23          7.5         1.6
+``read``, 16 windows of 2,048 bases      14.3        14.3        0.47        0.46
+the file                                 123.1 MB    125.5 MB    91.5 MB     94.4 MB
+=======================================  ==========  ==========  ==========  ==========
+
+A read of part of the genome inflates only the pieces of the summary that hold
+its bins, and is faster the smaller the part. A read of the whole genome inflates
+every stream whole, and the restart points make the streams larger, so it is 7%
+slower in position order and 24% in track order at level 0, and 13% to 15% at
+level 2. Raw reads are the same, and the files are 1.9% and 3.1% larger.
+
 Dense float tracks and the layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

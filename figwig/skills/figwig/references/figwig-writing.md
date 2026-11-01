@@ -1,10 +1,18 @@
 # Writing figwig files
 
-`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None)`
+`FigWigWriter(path, chrom_sizes, tracks, genome=None, attributes=None, tile=None, groups=8, level=None, engine='auto', n_jobs=8, order=None, append=False, zooms=None, summary_index=False)`
 with `write(chroms, starts, values, ends=None, tracks=None)` and
 `write_sparse(chroms, positions, tracks, values)`; `write_figwig` writes one
 call's worth. `tile` None is 16,384, `order` None is `'positions'`, `level`
 None is 6 (0 in track order), `zooms` None is 0 (the file's with `append`).
+
+`summary_index=True` (default off) also writes the regional summary index of the
+format page; `append=True` cannot create it, and an append clears it. On
+the command line it is `--summary-index` on `bw2fw`, `bam2fw`, `reorder` and
+`merge`, the last two keeping an input's index by default. It adds a few
+percent to the file and speeds up reads of part of the genome, while a read of
+the whole genome is slower and raw reads are unchanged; a level under 64 KiB
+stays ordinary, so a small file gets none.
 
 ```python
 import numpy

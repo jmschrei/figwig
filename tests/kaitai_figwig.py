@@ -1,16 +1,3 @@
-# kaitai_figwig.py
-# Generated from docs/figwig.ksy by kaitai-struct-compiler 0.10, then
-# re-indented with tabs by tests/test_kaitai.py's `regenerate()`:
-#
-#   kaitai-struct-compiler -t python --outdir <dir> docs/figwig.ksy
-#
-# Do not edit by hand; edit docs/figwig.ksy and regenerate. The test
-# checks that this file is the compiler's output when the compiler is on
-# the PATH.
-# ruff: noqa
-
-# This is a generated file! Please edit source .ksy file and use kaitai-struct-compiler to rebuild
-
 import kaitaistruct
 from kaitaistruct import KaitaiStruct
 from kaitaistruct import KaitaiStream
@@ -28,11 +15,16 @@ class Figwig(KaitaiStruct):
 	the index. This definition is the one in docs/format.rst of the figwig
 	repository, which is the normative specification; it parses the header,
 	every table, the index with its runs, live tiles, block records,
-	summaries and zoom levels, and the bytes of every chunk and block. The
+	summaries and zoom levels, and the bytes of every chunk and block, and
+	the optional regional summary index of a file that has one. The
 	chunk and block payload types take the parameters the index does not
 	hold by itself: a chunk's kind byte and its group's number of tracks,
 	which come from the metadata's track records (JSON, outside Kaitai's
-	reach), and the tile size from the header. tests/test_kaitai.py parses
+	reach), and the tile size from the header. The optional regional
+	summary index is found through an offset in the metadata (JSON again),
+	so summary_index takes the root's offset as a parameter, and
+	summary_page takes the number of descriptors the page holds; docs/format.rst
+	says how to find both. tests/test_kaitai.py parses
 	the test files with the parser compiled from this file and compares
 	them with the reference reader.
 	"""
@@ -44,6 +36,38 @@ class Figwig(KaitaiStruct):
 
 	def _read(self):
 		self.header = Figwig.Header(self._io, self, self._root)
+
+	class SummaryLocator(KaitaiStruct):
+		"""A group's 32-byte locator in the index directory."""
+		def __init__(self, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self._read()
+
+		def _read(self):
+			self.levels_offset = self._io.read_u8le()
+			self.n_levels = self._io.read_u4le()
+			self.levels_crc = self._io.read_u4le()
+			self.group = self._io.read_u4le()
+			self.n_tracks = self._io.read_u4le()
+			self.crc = self._io.read_u4le()
+			self.reserved = self._io.read_u4le()
+
+		@property
+		def levels(self):
+			if hasattr(self, '_m_levels'):
+				return self._m_levels
+
+			_pos = self._io.pos()
+			self._io.seek(self.levels_offset)
+			self._m_levels = []
+			for i in range(self.n_levels):
+				self._m_levels.append(Figwig.SummaryLevel(self._io, self, self._root))
+
+			self._io.seek(_pos)
+			return getattr(self, '_m_levels', None)
+
 
 	class Chunk(KaitaiStruct):
 		"""A chunk's decoded bytes, by its kind byte, for a group of n_tracks tracks."""
@@ -223,6 +247,70 @@ class Figwig(KaitaiStruct):
 
 
 
+	class SummaryWindow(KaitaiStruct):
+		"""One window's descriptor, all zero for a window with no rows."""
+		def __init__(self, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self._read()
+
+		def _read(self):
+			self.n_rows = self._io.read_u4le()
+			self.first_source_row = self._io.read_u4le()
+			self.ids_offset = self._io.read_u4le()
+			self.ids_bytes = self._io.read_u4le()
+			self.ids_crc = self._io.read_u4le()
+			self.ids_raw_crc = self._io.read_u4le()
+			self.sums_offset = self._io.read_u4le()
+			self.sums_bytes = self._io.read_u4le()
+			self.sums_crc = self._io.read_u4le()
+			self.sums_raw_crc = self._io.read_u4le()
+
+
+	class SummaryIndex(KaitaiStruct):
+		"""The optional regional summary index, announced by header optional
+		bit 1: the root and one locator per group. The root's offset is the
+		"offset" of the metadata's org.figwig.summary-restarts object, JSON
+		outside Kaitai's reach. A level catalog is a locator's levels; a
+		descriptor page is parsed by summary_page.
+		"""
+		def __init__(self, root_offset, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self.root_offset = root_offset
+			self._read()
+
+		def _read(self):
+			pass
+
+		@property
+		def root(self):
+			if hasattr(self, '_m_root'):
+				return self._m_root
+
+			_pos = self._io.pos()
+			self._io.seek(self.root_offset)
+			self._m_root = Figwig.SummaryRoot(self._io, self, self._root)
+			self._io.seek(_pos)
+			return getattr(self, '_m_root', None)
+
+		@property
+		def locators(self):
+			if hasattr(self, '_m_locators'):
+				return self._m_locators
+
+			_pos = self._io.pos()
+			self._io.seek(self.root.directory_offset)
+			self._m_locators = []
+			for i in range(self.root.n_groups):
+				self._m_locators.append(Figwig.SummaryLocator(self._io, self, self._root))
+
+			self._io.seek(_pos)
+			return getattr(self, '_m_locators', None)
+
+
 	class Dense(KaitaiStruct):
 		"""Every value of the tile, track after track."""
 		def __init__(self, code, n_tracks, tile, _io, _parent=None, _root=None):
@@ -381,6 +469,23 @@ class Figwig(KaitaiStruct):
 			return getattr(self, '_m_value', None)
 
 
+	class SummaryLevel(KaitaiStruct):
+		"""A level's entry in a catalog; its position gives the level, 0 the base summary."""
+		def __init__(self, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self._read()
+
+		def _read(self):
+			self.source_offset = self._io.read_u8le()
+			self.index_offset = self._io.read_u8le()
+			self.source_rows = self._io.read_u4le()
+			self.source_bytes = self._io.read_u4le()
+			self.source_crc = self._io.read_u4le()
+			self.window_bins = self._io.read_u4le()
+
+
 	class ZoomLevel(KaitaiStruct):
 		"""Level k, from 1, sums the tile sums over bins of 4**k tiles."""
 		def __init__(self, _io, _parent=None, _root=None):
@@ -477,6 +582,30 @@ class Figwig(KaitaiStruct):
 				self._io.seek(_pos)
 
 			return getattr(self, '_m_next', None)
+
+
+	class SummaryRoot(KaitaiStruct):
+		"""The 256-byte root of the index."""
+		def __init__(self, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self._read()
+
+		def _read(self):
+			self.magic = self._io.read_bytes(8)
+			if not self.magic == b"\x46\x57\x52\x53\x55\x4D\x31\x00":
+				raise kaitaistruct.ValidationNotEqualError(b"\x46\x57\x52\x53\x55\x4D\x31\x00", self.magic, self._io, u"/types/summary_root/seq/0")
+			self.version = self._io.read_u2le()
+			self.len_root = self._io.read_u2le()
+			self.crc = self._io.read_u4le()
+			self.directory_offset = self._io.read_u8le()
+			self.n_groups = self._io.read_u4le()
+			self.descriptors_per_page = self._io.read_u4le()
+			self.window_target = self._io.read_u4le()
+			self.reserved_a = self._io.read_bytes(28)
+			self.header_snapshot = self._io.read_bytes(128)
+			self.reserved_b = self._io.read_bytes(64)
 
 
 	class Chrom(KaitaiStruct):
@@ -603,6 +732,39 @@ class Figwig(KaitaiStruct):
 
 			self._m_has_zooms = (self.optional & 1) != 0
 			return getattr(self, '_m_has_zooms', None)
+
+		@property
+		def has_summary_index(self):
+			if hasattr(self, '_m_has_summary_index'):
+				return self._m_has_summary_index
+
+			self._m_has_summary_index = (self.optional & 2) != 0
+			return getattr(self, '_m_has_summary_index', None)
+
+
+	class SummaryPage(KaitaiStruct):
+		"""A descriptor page, at index_offset + 4096 * p for page p. It holds
+		min(102, windows - 102 * p) descriptors, where windows is the level's
+		bins over the genome divided by window_bins, rounded up.
+		"""
+		def __init__(self, num_windows, _io, _parent=None, _root=None):
+			self._io = _io
+			self._parent = _parent
+			self._root = _root if _root else self
+			self.num_windows = num_windows
+			self._read()
+
+		def _read(self):
+			self.magic = self._io.read_bytes(4)
+			if not self.magic == b"\x46\x57\x52\x50":
+				raise kaitaistruct.ValidationNotEqualError(b"\x46\x57\x52\x50", self.magic, self._io, u"/types/summary_page/seq/0")
+			self.first_window = self._io.read_u4le()
+			self.count = self._io.read_u4le()
+			self.crc = self._io.read_u4le()
+			self.windows = []
+			for i in range(self.num_windows):
+				self.windows.append(Figwig.SummaryWindow(self._io, self, self._root))
+
 
 
 	class TrackOffsets(KaitaiStruct):

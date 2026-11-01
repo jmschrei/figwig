@@ -52,6 +52,11 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 | `read_entries(tracks, chroms)` | every nonzero base of tracks over chromosomes, `SparseEntries` |
 | `channels="channel", items="read"` on `read`, `bins=` and `sums` | `(n, items, channels, width)`, the tracks arranged by two attributes, each item needing every channel once |
 
+In a file written with `summary_index=True`, `tile_sums(chroms=...)` and integer
+`sums` inflate only the pieces of the summary that the chromosomes or intervals
+need (the whole level when a query wants about half of it or more); the values
+are the same, and a file without the index is read whole as before.
+
 - Mixed tracks come back in the narrowest type holding every one exactly
   (float32 for uint8 + float32, float64 for uint32 + float32). `dtype=`
   asks for another and raises for an integer type that cannot hold a

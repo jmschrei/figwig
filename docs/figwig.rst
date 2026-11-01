@@ -334,6 +334,65 @@ tile sums are, and the default is none; they cost a few hundred kilobytes
 per level for six tracks and are announced by a header bit that a reader
 without them ignores.
 
+.. _regional-summaries:
+
+Regional summaries
+^^^^^^^^^^^^^^^^^^
+
+A summary or zoom level is one compressed stream, so the tile sums of one
+chromosome cost the inflating of the whole stream of every group they touch.
+``summary_index=True`` on ``FigWigWriter`` or ``write_figwig``, or
+``--summary-index`` on ``figwig bw2fw`` and ``bam2fw``, restarts the compressor
+inside those streams and records where, so that a reader inflates only the
+pieces that hold the bins it wants, in windows of 32 KiB decoded bytes and at
+most 2,048 bins. It is off by default, adds a few percent to the file, changes
+no value or summary, and is announced by a header bit that a reader without it
+ignores: the file is read, whole, as any other. Reads of part of the genome get
+faster, by more the smaller the part; a read of the whole genome is slower,
+since it inflates every stream whole and the restart points make the streams
+larger; raw reads do not change (:doc:`benchmarks` has the numbers). The layout
+is "The regional summary index" of :doc:`format`.
+
+.. code-block:: python
+
+    with FigWigWriter("tracks.fw", chrom_sizes, tracks, tile=1024,
+                      zooms=4, summary_index=True) as writer:
+        writer.write("chr1", [0], values)
+
+A reader needs no flag:
+
+.. code-block:: python
+
+    reader = FigWigReader("tracks.fw")
+    chr1 = reader.tile_sums(chroms="chr1", level=1)
+    totals = reader.sums("chr1", [100_001, 8_000_003],
+                         [120_007, 8_020_009], tracks="counts")
+
+``tile_sums`` allocates only the bins of the chromosomes asked for, in their
+order, with repeats. Integer ``sums`` reads the tile sums of the whole tiles
+inside each interval, from the pieces that hold them, and the values at its two
+ends from the raw data, and falls back to raw values where a stored tile sum
+reaches 2**24 or the largest value times the longest interval reaches 2**53.
+Float ``sums``, ``read(..., bins=...)`` and the counting of NaN bases use raw
+values. A reader keeps the index's checked catalogs and nothing else: no open
+file, no decoded window, and a pickle drops them. A query that wants about half
+of a level or more reads the level whole, with its checksums.
+
+A level gets restart points only when it is large enough to gain from them and
+its pages fit the index's 16 MiB budget; the rules are in the format page. A
+file that keeps no summaries (``n_tracks * n_tiles * 4`` over 2**28) has no
+index, and if no level qualifies, none is written: no root, no key, no bit.
+``summary_index=True`` with ``append=True`` raises before the file is opened,
+and an append to an indexed file clears the bit, so the appended file has no
+index until it is written again, with ``figwig reorder --order <its order>
+--summary-index``.
+
+``figwig reorder`` and ``merge`` write a new file with an index, built over the
+new file, when the header of their input (of the first file, for ``merge``)
+announces one, which a file whose levels were all too small for it does not;
+``--no-summary-index`` leaves it out and ``--summary-index`` writes one for an
+input that has none.
+
 Writing
 -------
 

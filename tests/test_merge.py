@@ -10,10 +10,16 @@ import numpy
 import pytest
 
 from figwig import FigWigReader
+from figwig import FigWigWriter
 from figwig import write_figwig
 
 from figwig.__main__ import main
 
+from .summary_files import write_counts
+from . import format_reference
+from .summary_files import read_regions
+from .summary_reference import KEY
+from .summary_reference import read_index
 from .test_figwig import CHROM_SIZES
 from .test_figwig import reference_tracks
 from .test_figwig import write_reference
@@ -114,3 +120,50 @@ def test_existing_output_is_refused_without_force(tmp_path):
 		tile=64, level=1)
 	with pytest.raises(SystemExit, match="level 1 where the first file has"):
 		main(['merge', '-o', str(tmp_path / 'm.fw'), a, other])
+
+
+##
+# The regional summary index
+##
+
+def test_merge_of_an_appended_file_writes_no_index(tmp_path, summary_counts):
+	"""The header of the first file says it has no index after an append, though
+	the metadata key stays; the merged file follows the header."""
+
+	path = tmp_path / 'grown.fw'
+	path.write_bytes(summary_counts[1].read_bytes())
+	with FigWigWriter(path, None, ['extra'], append=True, engine='zlib', n_jobs=1):
+		pass
+	assert KEY in format_reference.File(path).metadata
+	out = tmp_path / 'merged.fw'
+	main(['merge', '-o', str(out), str(path)])
+	assert format_reference.File(out).header.optional & 2 == 0
+	assert KEY not in format_reference.File(out).metadata and read_index(out) is None
+
+
+@pytest.mark.parametrize('first_has_one', [True, False])
+@pytest.mark.parametrize('flags, wanted', [
+	([], None), (['--summary-index'], True), (['--no-summary-index'], False)])
+def test_merge_writes_an_index_as_asked_or_as_its_first_file_has_one(tmp_path,
+	summary_counts, watched, first_has_one, flags, wanted):
+	"""With no flag the merged file has an index when the first file has one,
+	whatever the second has, as it keeps the first file's zoom levels."""
+
+	first = summary_counts[1 if first_has_one else 0]
+	order = FigWigReader(first).order
+	second = write_counts(tmp_path / 'second.fw', order, indexed=not
+		first_has_one, prefix='d')
+	out = tmp_path / 'merged.fw'
+	main(['merge', '-o', str(out), str(first), str(second)] + flags)
+	has_one = read_index(out) is not None and any(level.window_bins for group in
+		read_index(out).groups for level in group.levels)
+	assert has_one == (first_has_one if wanted is None else wanted)
+	merged, source = FigWigReader(out), FigWigReader(first)
+	assert [t['name'] for t in merged.tracks] == ['c0', 'c1', 'c2', 'c3', 'd0',
+		'd1', 'd2', 'd3']
+	assert merged.tile_sums(tracks=['c0', 'c1', 'c2', 'c3']).tobytes() == \
+		source.tile_sums().tobytes()
+	# Each chromosome of the first file's tracks read alone, through the index
+	# where the merged file has one.
+	regions, used = read_regions(out, watched, tracks=['c0', 'c1', 'c2', 'c3'])
+	assert used == has_one and regions == read_regions(first, watched)[0]
