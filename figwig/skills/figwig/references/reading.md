@@ -1,6 +1,6 @@
 # Reading bigWigs
 
-`BigWigReader(path).read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False, *, engine='auto')`
+`BigWigReader(path).read(chroms, starts, width, out=None, n_jobs=8, missing=0.0, keep_nan=False, *, oob=nan, engine='auto')`
 and `read_bigwig(bigwigs, chroms, starts, width, ...)`, where `bigwigs` is
 one path or reader (result `(n, width)`) or a list, even of one (result
 `(n, len(bigwigs), width)`, channel `i` from `bigwigs[i]`). Always float32.
@@ -42,11 +42,13 @@ print(y.shape)
 | covered by an interval | the interval's float32 value, copied, never computed |
 | covered by no interval | `missing`, 0.0 unless given |
 | covered by an interval whose value is NaN | `missing`, or NaN with `keep_nan=True` |
-| past the end of its chromosome | NaN, whatever `missing` is |
+| past the end of its chromosome | `oob`, NaN unless given, whatever `missing` is |
 | on a chromosome the file does not have | `missing`, with one `UserWarning` per read |
 
 Defaults match pybigtools' `values()`; `missing=numpy.nan` matches pyBigWig's.
-Pass NaN when a measured 0 must be told from no data. No zoom levels are
+Pass NaN when a measured 0 must be told from no data. `oob=0.0` fills the
+bases a window runs off a chromosome's end with 0 instead of NaN, and leaves NaN
+for an interval whose value is NaN (`keep_nan=True`). No zoom levels are
 used: binned values are a reshape, `y.reshape(len(y), -1, 32).mean(axis=-1)`
 (`numpy.nanmean` if windows pass chromosome ends).
 

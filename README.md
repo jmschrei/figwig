@@ -252,8 +252,9 @@ print(y.sum(axis=1))
 Window `j` covers `[starts[j], starts[j] + width)` on `chroms[j]`, 0-based as
 in BED files, and is written into row `j`, whatever order the windows are
 given in. A base that no interval covers is `missing`, 0 unless given, and a
-base past the end of its chromosome is NaN. A `BigWigReader` reads the file's
-index once and keeps it, and can be pickled to DataLoader workers.
+base past the end of its chromosome is NaN, or `oob` if given. A
+`BigWigReader` reads the file's index once and keeps it, and can be pickled to
+DataLoader workers.
 
 #### Reading several bigWigs into one array
 

@@ -133,6 +133,32 @@ def test_past_chromosome_end_is_nan(dense_bw):
 	assert numpy.isnan(X[1]).all()
 
 
+@pytest.mark.parametrize('oob', [0.0, -1.0, 3, numpy.float32(2.5)])
+def test_past_chromosome_end_is_oob(dense_bw, oob):
+	"""`oob` fills the bases past the end of a chromosome, and nothing else,
+	in both readers; a window on an absent chromosome stays `missing`."""
+
+	path, chroms = dense_bw
+	length = chroms['chrM']
+	X = BigWigReader(path).read('chrM', [length - 10, length + 3], 20)
+	Y = BigWigReader(path).read('chrM', [length - 10, length + 3], 20,
+		oob=oob)
+	assert_identical(Y[0, :10], X[0, :10])
+	assert (Y[0, 10:] == numpy.float32(oob)).all()
+	assert (Y[1] == numpy.float32(oob)).all()
+
+	Z = read_bigwig([path, path], 'chrM', [length - 10], 20, oob=oob)
+	assert_identical(Z[0, 0], Y[0])
+	assert_identical(Z[0, 1], Y[0])
+
+	with pytest.warns(UserWarning, match='chromosomes not in'):
+		W = read_bigwig(path, 'absent', [0], 4, missing=1, oob=oob)
+	assert (W == 1).all()
+
+	with pytest.raises(TypeError, match='oob must be a number'):
+		read_bigwig(path, 'chrM', [0], 4, oob='nan')
+
+
 def test_uncovered_bases_are_zero(tmp_path):
 	path = tmp_path / 'gaps.bw'
 	write_bigwig(path, {'chr1': 1000}, [('chr1', 100, 110, 2.5),
