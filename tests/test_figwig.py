@@ -1233,6 +1233,179 @@ def test_sparse_read_matches_dense(fw, ref, read_batching):
 	assert empty.shape == (0, 5, 10) and len(empty.values) == 0
 
 
+@pytest.mark.parametrize('ascending', [True, False])
+def test_sparse_read_sorts_on_threads(fw, read_batching, monkeypatch, ascending):
+	"""A sparse read's entries, sorted from its tasks' parts by a counting
+	sort cut among threads, or by keys where a bucket's offsets would not
+	ascend, are those one thread gives, in the same type."""
+
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(22)
+	chroms, starts = random_windows(rng, 300, 150)
+	picks = (None, ['negative', 'atac_plus', 'signal'])
+	ones = [reader.read(chroms, starts, 150, tracks=tracks, sparse=True,
+		n_jobs=1) for tracks in picks]
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_GATHER_ROW_BYTES', 1 << 20)
+	if not ascending:
+		monkeypatch.setattr(figwig.figwig, '_bucket_ascending', lambda *a: False)
+	for tracks, one in zip(picks, ones):
+		several = reader.read(chroms, starts, 150, tracks=tracks, sparse=True,
+			n_jobs=4)
+		for a, b in zip((one.rows, one.channels, one.offsets, one.values), (
+				several.rows, several.channels, several.offsets, several.values)):
+			assert a.dtype == b.dtype
+			numpy.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize('n_threads', [1, 4])
+def test_sparse_gather_sorts_offsets_that_do_not_ascend(fw, monkeypatch,
+	n_threads):
+	"""Parts whose offsets ascend within each (row, channel) are sorted by
+	the counting sort alone; parts whose offsets do not are still sorted by
+	row, channel and offset."""
+
+	class Task:
+		def __init__(self, rows, channels, offsets, values):
+			self.entries = (numpy.array(rows), numpy.array(channels),
+				numpy.array(offsets), numpy.array(values, dtype=numpy.float32))
+
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_GATHER_ROW_BYTES', 1 << 20)
+	reader = FigWigReader(fw)
+	ascending = [([0, 0, 1], [0, 1, 0], [1, 4, 2], [1, 2, 3]), ([0, 1, 1], [0,
+		0, 1], [5, 3, 0], [4, 5, 6])]
+	descending = [([0, 1], [0, 1], [8, 2], [1, 2]), ([0, 1], [0, 1], [3, 1],
+		[3, 4])]
+	# The one pair out of order straddles the threads' halves of the check.
+	straddling = [([0, 0], [0, 1], [5, 7], [1, 2]), ([0, 1], [1, 1], [3, 1],
+		[3, 4])]
+	for parts in (ascending, descending, straddling):
+		found = reader._gather([Task(*part) for part in parts], [], 2, 2, 10,
+			numpy.dtype('float32'), n_threads)
+		rows, channels, offsets, values = (numpy.concatenate([part[k] for part in
+			parts]) for k in range(4))
+		order = numpy.lexsort((offsets, channels, rows))
+		for a, b in zip((found.rows, found.channels, found.offsets, found.values),
+				(rows[order], channels[order], offsets[order], numpy.array(values,
+				dtype=numpy.float32)[order])):
+			numpy.testing.assert_array_equal(a, b)
+		assert found.values.dtype == numpy.float32 and found.shape == (2, 2, 10)
+
+
+@pytest.mark.parametrize('n_windows', [2, 50, 1000])
+def test_sparse_gather_counts_are_bounded(fw, monkeypatch, n_windows):
+	"""The counting sort's runs, a row of buckets each, take no more than
+	one row and a byte per entry, however many threads there are, and sort
+	as one thread does."""
+
+	shapes = []
+	starts_of = figwig.figwig._bucket_starts
+
+	def spy(counts):
+		shapes.append(counts.shape)
+		return starts_of(counts)
+
+	class Task:
+		def __init__(self, rows, offsets):
+			self.entries = (rows, numpy.zeros(len(rows), dtype=numpy.int64),
+				offsets, numpy.ones(len(rows), dtype=numpy.float32))
+
+	monkeypatch.setattr(figwig.figwig, '_GATHER_PER_THREAD', 1)
+	monkeypatch.setattr(figwig.figwig, '_bucket_starts', spy)
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(3)
+	rows = numpy.sort(rng.integers(0, n_windows, 4096))
+
+	def tasks():
+		return [Task(rows[a:a + 64], numpy.arange(a, a + 64)) for a in range(0,
+			4096, 64)]
+
+	n_buckets = n_windows * 4
+	one = reader._gather(tasks(), [], n_windows, 4, 100, numpy.dtype('float32'), 1)
+	found = reader._gather(tasks(), [], n_windows, 4, 100, numpy.dtype('float32'),
+		8)
+	runs, buckets = shapes[-1]
+	assert buckets == n_buckets and (runs - 1) * n_buckets * 8 <= 4096
+	assert runs == {2: 8, 50: 3, 1000: 1}[n_windows]
+	for a, b in zip((one.rows, one.channels, one.offsets, one.values), (
+			found.rows, found.channels, found.offsets, found.values)):
+		numpy.testing.assert_array_equal(a, b)
+
+
+def test_batch_cuts_are_the_planners_loop():
+	"""The kernel that cuts a read's chunks into batches gives the batches
+	and bytes of the loop the planner ran before, binned or not, and finds
+	a window cut inside a batch where the loop did."""
+
+	from figwig._figwig_kernels import _batch_cuts
+
+	def loop(bounds, live, cap, most, continues, binned):
+		firsts, totals, cut_inside, a = [0], [], False, 0
+		while a < len(bounds):
+			total_bytes, n_live, b = 0, 0, a
+			while b < len(bounds) and (b == a or (total_bytes + bounds[b] <= cap
+					and n_live < most)):
+				total_bytes += int(bounds[b])
+				n_live += int(live[b])
+				b += 1
+			if binned:
+				while b < len(bounds) and continues[b - 1]:
+					if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+						cut_inside = True
+						break
+					total_bytes += int(bounds[b])
+					n_live += int(live[b])
+					b += 1
+			totals.append(total_bytes)
+			firsts.append(b)
+			a = b
+		return firsts, totals, cut_inside
+
+	rng = numpy.random.default_rng(7)
+	seen = set()
+	for trial in range(300):
+		n = int(rng.integers(0, 60))
+		bounds = rng.integers(8, 400, n).astype(numpy.int64)
+		live = rng.integers(0, 2, n).astype(numpy.int64)
+		continues = rng.random(n) < 0.6
+		cap, most = int(rng.integers(8, 1200)), int(rng.integers(1, 9))
+		for binned in (False, True):
+			firsts, totals, cut_inside = _batch_cuts(bounds, live, cap, most,
+				continues if binned else numpy.zeros(0, dtype=bool), binned)
+			expected = loop(bounds, live, cap, most, continues, binned)
+			assert (firsts.tolist(), totals.tolist(), bool(cut_inside)) == expected
+			batches, cut = figwig.figwig._batch_cuts_loop(bounds, live, cap, most,
+				continues if binned else numpy.zeros(0, dtype=bool), binned)
+			assert [a for a, _, _ in batches] == expected[0][:-1]
+			assert ([0] + [b for _, b, _ in batches], [t for _, _, t in batches],
+				cut) == expected
+			seen.add(bool(cut_inside))
+	assert seen == {False, True}
+
+
+@pytest.mark.parametrize('bins', [None, 7])
+def test_reads_plan_alike_by_loop_and_kernel(fw, read_batching, monkeypatch,
+	bins):
+	"""A read whose groups' chunks are cut into batches by the planner's
+	loop or by its kernel gives the same values, dense, sparse or binned."""
+
+	reader = FigWigReader(fw)
+	rng = numpy.random.default_rng(31)
+	chroms, starts = random_windows(rng, 120, 147)
+	found = []
+	for limit in (0, 10 ** 9):
+		monkeypatch.setattr(figwig.figwig, '_PLAN_LOOP_CHUNKS', limit)
+		dense = reader.read(chroms, starts, 147, bins=bins, n_jobs=3)
+		listed = reader.read(chroms, starts, 147, sparse=True, n_jobs=3)
+		found.append((dense, listed))
+	(a, s), (b, t) = found
+	numpy.testing.assert_array_equal(a, b)
+	for x, y in zip((s.rows, s.channels, s.offsets, s.values), (t.rows,
+			t.channels, t.offsets, t.values)):
+		numpy.testing.assert_array_equal(x, y)
+
+
 def test_labels_sum_tracks(fw, ref, read_batching):
 	rng = numpy.random.default_rng(21)
 	chroms, starts = random_windows(rng, 100, 150)
@@ -1303,6 +1476,72 @@ def test_read_entries(fw, ref):
 		numpy.isnan(everything.values).sum())
 	with pytest.raises(ValueError, match="not one of the file's chromosomes"):
 		reader.read_entries(chroms=['chr9'])
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('per_read', [1, 2])
+def test_read_entries_in_several_reads(fw, track_fw, monkeypatch, order,
+	per_read):
+	"""Chromosomes whose sort keys would pass the limit together are read a
+	few at a time, and give the entries one read of them all gives."""
+
+	reader = FigWigReader(fw if order == 'positions' else track_fw)
+	tracks = ['atac_plus', 'signal', 'negative']
+	one = reader.read_entries(tracks=tracks, n_jobs=2)
+	widest = max(reader.chrom_sizes.values())
+	monkeypatch.setattr(figwig.figwig, '_SPARSE_KEYS', per_read * len(tracks) *
+		widest)
+	calls = []
+	read = FigWigReader.read
+
+	def counted(self, chroms, *args, **kwargs):
+		calls.append(len(chroms))
+		return read(self, chroms, *args, **kwargs)
+
+	monkeypatch.setattr(FigWigReader, 'read', counted)
+	several = reader.read_entries(tracks=tracks, n_jobs=2)
+	n_chroms = len(reader.chrom_sizes)
+	assert calls == [min(per_read, n_chroms - a) for a in range(0, n_chroms,
+		per_read)]
+	for a, b in zip((one.chroms, one.positions, one.tracks, one.values), (
+			several.chroms, several.positions, several.tracks, several.values)):
+		assert a.dtype == b.dtype
+		numpy.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_read_entries_plans_within_the_longest_chromosome(fw, track_fw,
+	monkeypatch, order):
+	"""With no budget of its own, read_entries reads chromosomes together
+	only while their tiles stay within the longest chromosome's, and gives
+	the entries one read gives."""
+
+	reader = FigWigReader(fw if order == 'positions' else track_fw)
+	tracks = ['atac_plus', 'signal', 'negative']
+	one = reader.read_entries(tracks=tracks, n_jobs=2)
+	monkeypatch.setattr(figwig.figwig, '_ENTRIES_PAIRS', 0)
+	calls = []
+	read = FigWigReader.read
+
+	def counted(self, chroms, *args, **kwargs):
+		calls.append(len(chroms))
+		return read(self, chroms, *args, **kwargs)
+
+	monkeypatch.setattr(FigWigReader, 'read', counted)
+	several = reader.read_entries(tracks=tracks, n_jobs=2)
+	tiles = [-(-size // reader.tile) for size in reader.chrom_sizes.values()]
+	expected, total = [0], 0
+	for n in tiles:
+		if expected[-1] and total + n > max(tiles):
+			expected.append(0)
+			total = 0
+		expected[-1] += 1
+		total += n
+	assert calls == expected and len(expected) > 1
+	for a, b in zip((one.chroms, one.positions, one.tracks, one.values), (
+			several.chroms, several.positions, several.tracks, several.values)):
+		assert a.dtype == b.dtype
+		numpy.testing.assert_array_equal(a, b)
 
 
 ###
@@ -1537,6 +1776,251 @@ def test_entry_runs_are_the_changes_of_the_rows():
 	assert n_points == d and run_bytes == expected_bytes
 	numpy.testing.assert_array_equal(roffs[:d], expected_offs[:d])
 	assert_identical(rvals[:d], expected_vals[:d])
+
+
+@pytest.mark.parametrize('n_chunks', [1, 3, 8])
+def test_radix_order_is_a_stable_argsort(n_chunks):
+	"""The radix sort gives numpy's stable argsort and the sorted keys, for
+	keys of any width with many ties, whatever the number of chunks."""
+
+	from concurrent.futures import ThreadPoolExecutor
+	from figwig.figwig import _radix_order
+
+	rng = numpy.random.default_rng(n_chunks)
+	with ThreadPoolExecutor(4) as pool:
+		for bits in (1, 5, 16, 17, 31, 40, 63):
+			for n in (0, 1, 7, 5000):
+				keys = rng.integers(0, 1 << min(bits, 62), n, dtype=numpy.int64)
+				if bits == 63:
+					keys |= rng.integers(0, 2, n, dtype=numpy.int64) << 62
+				keys[::3] = keys[0] if n else 0
+				expected = numpy.argsort(keys, kind='stable')
+				order, sorted_keys = _radix_order(keys.copy(), bits, pool if
+					n_chunks > 1 else None, n_chunks)
+				numpy.testing.assert_array_equal(order, expected)
+				numpy.testing.assert_array_equal(sorted_keys, keys[expected])
+		order, _ = _radix_order(numpy.full(100, 5), 4, None, 1)
+		numpy.testing.assert_array_equal(order, numpy.arange(100))
+
+
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
+	monkeypatch, n_jobs):
+	"""Entries sorted by the radix sort, in one chunk or several, give the
+	file the numpy sort of the composite keys gives, byte for byte, over
+	several chromosomes and groups in one call, values of every kind, and
+	the same message for two entries on one base."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	# The radix sort, whatever order the keys come in.
+	monkeypatch.setattr(figwig.figwig, '_MERGE_RUNS', -1)
+	monkeypatch.setattr(figwig.figwig, '_MERGE_REACH', 1)
+	monkeypatch.setattr(figwig.figwig, '_MERGE_FAR', 10 ** 9)
+	original = FigWigWriter._radix_entries
+	radix, used = [True], []
+
+	def chosen(self, *args):
+		result = original(self, *args) if radix[0] else None
+		used.append(result is not None)
+		return result
+
+	monkeypatch.setattr(FigWigWriter, '_radix_entries', chosen)
+	rng = numpy.random.default_rng(5)
+	tracks = ['t{}'.format(i) for i in range(40)]
+	groups = [tracks[:1], tracks[1:9], tracks[9:30], tracks[30:]]
+	n = 6000
+	chroms = rng.choice(['chr1', 'chr2', 'chrM'], n)
+	sizes = numpy.array([CHROM_SIZES[c] for c in chroms])
+	positions = (rng.random(n) * sizes).astype(numpy.int64)
+	which = rng.integers(0, 40, n)
+	key = numpy.unique(numpy.stack([numpy.searchsorted(['chr1', 'chr2', 'chrM'],
+		chroms), which, positions]), axis=1, return_index=True)[1]
+	chroms, positions, which = chroms[key], positions[key], which[key]
+	values = {'int32': rng.integers(1, 50, len(key)).astype(numpy.int32),
+		'float16': rng.random(len(key)).astype(numpy.float16) + 1,
+		'>f8': (rng.random(len(key)) - 0.5).astype('>f8'),
+		'longdouble': (rng.random(len(key)) * 3).astype(numpy.longdouble),
+		'uint8': numpy.ones(len(key), dtype=numpy.uint8)}
+
+	def write(use_radix, vals, names=None):
+		radix[0] = use_radix
+		path = str(tmp_path / '{}.fw'.format(use_radix))
+		with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=groups,
+				n_jobs=n_jobs) as writer:
+			if names is None:
+				writer.write_sparse(chroms, positions, which, vals)
+			else:
+				for chrom in ['chr1', 'chr2', 'chrM']:
+					take = chroms == chrom
+					writer.write_sparse(chrom, positions[take], names[take], vals[
+						take])
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	for kind, vals in values.items():
+		assert write(True, vals) == write(False, vals), kind
+	names = numpy.array(tracks)[which]
+	assert write(True, values['int32'], names) == write(False, values['int32'],
+		names)
+
+	messages = []
+	for use_radix in (True, False):
+		radix[0] = use_radix
+		with FigWigWriter(str(tmp_path / 'c.fw'), CHROM_SIZES, tracks, tile=64,
+				groups=groups, n_jobs=n_jobs) as writer:
+			with pytest.raises(ValueError, match='both name base') as error:
+				writer.write_sparse(numpy.append(chroms, chroms[7]), numpy.append(
+					positions, positions[7]), numpy.append(which, which[7]),
+					numpy.ones(len(key) + 1))
+			messages.append(str(error.value))
+	assert messages[0] == messages[1]
+	assert used.count(True) == len(values) + 3 + 1
+
+
+@pytest.mark.parametrize('n_jobs', [1, 3])
+def test_write_sparse_sorts_by_either_sort_alike(tmp_path, monkeypatch, n_jobs):
+	"""Keys sorted by numpy's merge sort or by the radix sort give the same
+	file, byte for byte; on one thread, keys out of order over the whole
+	call go to the radix sort, and keys out of order only near each other,
+	or in a few runs, to the merge sort."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	rng = numpy.random.default_rng(12)
+	tracks = ['t{}'.format(i) for i in range(64)]
+	groups = [tracks[i:i + 4] for i in range(0, 64, 4)]
+
+	def in_position_order(positions, which):
+		order = numpy.lexsort((which, positions))
+		return positions[order], which[order]
+
+	# Each track over its own stretch, as reads are, in position order: keys
+	# out of order only near each other.
+	stretches = [numpy.sort(rng.choice(300, 150, replace=False)) + t * 70 for t in
+		range(64)]
+	local = in_position_order(numpy.concatenate(stretches), numpy.repeat(
+		numpy.arange(64), 150))
+	# Every track over the whole chromosome, in position order: each tile's
+	# keys go back to the first group's.
+	key = numpy.unique(rng.integers(0, 64 * CHROM_SIZES['chr1'], 20000))
+	far = in_position_order(key // 64, key % 64)
+	# Keys in order, in two runs.
+	p, t = far
+	order = numpy.lexsort((p % 64, t % 4, p // 64, t // 4))
+	half = len(order) // 2
+	runs = (numpy.concatenate([p[order][half:], p[order][:half]]),
+		numpy.concatenate([t[order][half:], t[order][:half]]))
+	inputs = {'local': local, 'far': far, 'runs': runs}
+	radix_runs = []
+	original = figwig.figwig._radix_order
+
+	def spy(*args):
+		radix_runs.append(True)
+		return original(*args)
+
+	monkeypatch.setattr(figwig.figwig, '_radix_order', spy)
+
+	def write(name, p, t, **constants):
+		with monkeypatch.context() as m:
+			for constant, value in constants.items():
+				m.setattr(figwig.figwig, constant, value)
+			path = str(tmp_path / '{}.fw'.format(name))
+			with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=groups,
+					n_jobs=n_jobs) as writer:
+				writer.write_sparse('chr1', p, t, numpy.arange(1, len(p) + 1))
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	for name, (p, t) in inputs.items():
+		del radix_runs[:]
+		chosen = write(name, p, t)
+		took_radix = len(radix_runs) > 0
+		merged = write(name + '_merge', p, t, _MERGE_RUNS=10 ** 9)
+		radix = write(name + '_radix', p, t, _MERGE_RUNS=-1, _MERGE_REACH=1,
+			_MERGE_FAR=10 ** 9)
+		assert chosen == merged == radix, name
+		if n_jobs == 1:
+			assert took_radix == (name == 'far'), name
+		else:
+			assert took_radix == (name != 'runs'), name
+
+
+def test_write_sparse_packs_group_batches_into_tasks(tmp_path, monkeypatch):
+	"""A call's group batches written inline, packed several to a pool task
+	or one to a task give the same file, byte for byte, over calls that
+	continue a group's runs of the file and calls that do not."""
+
+	rng = numpy.random.default_rng(9)
+	tracks = ['t{}'.format(i) for i in range(30)]
+	groups = [tracks[i:i + 3] for i in range(0, 30, 3)]
+	calls = []
+	for chrom in ('chr1', 'chr2'):
+		for lo, hi in ((0, 1600), (1600, 2432), (2432, CHROM_SIZES[chrom])):
+			key = numpy.unique(rng.integers(0, 30 * (hi - lo), 900))
+			calls.append((chrom, lo + key % (hi - lo), key // (hi - lo), rng.integers(
+				1, 9, len(key)).astype(numpy.int32)))
+
+	def write(name, n_jobs, per_thread):
+		monkeypatch.setattr(figwig.figwig, '_BATCHES_PER_THREAD', per_thread)
+		path = str(tmp_path / name)
+		with FigWigWriter(path, CHROM_SIZES, tracks, tile=64, groups=layout,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, which, values in calls:
+				order = numpy.argsort(positions, kind='stable')
+				writer.write_sparse(chrom, positions[order], which[order], values[
+					order])
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	# Ten groups, whose batches interleave in the file, and one group cut
+	# into batches of a few tiles, whose chunks follow one another.
+	for layout, per_batch in ((groups, 1 << 20), ([tracks], 64)):
+		monkeypatch.setattr(figwig.figwig, '_ENTRIES_PER_BATCH', per_batch)
+		monkeypatch.setattr(figwig.figwig, '_BATCH_BYTES', 1 << 25 if per_batch >
+			64 else 8 * per_batch)
+		inline = write('inline.fw', 1, 8)
+		assert write('packed.fw', 3, 1) == inline
+		assert write('single.fw', 3, 1 << 40) == inline
+		reader = FigWigReader(str(tmp_path / 'packed.fw'))
+		for chrom, positions, which, values in calls:
+			y = reader.read([chrom] * len(positions), positions, 1, dtype='int64')
+			numpy.testing.assert_array_equal(y[numpy.arange(len(positions)), which,
+				0], values)
+
+
+def test_track_order_packs_block_flushes_into_tasks(tmp_path, monkeypatch):
+	"""Tracks' blocks in track order written inline, packed several to a
+	pool task or one to a task give the same file, byte for byte, with
+	blocks cut where a track's entries pass a block and where its
+	chromosome changes."""
+
+	monkeypatch.setattr(figwig.figwig, '_BLOCK_ENTRIES', 40)
+	rng = numpy.random.default_rng(10)
+	tracks = ['c{}'.format(i) for i in range(25)]
+	calls = []
+	for chrom in ('chr1', 'chr2', 'chrM'):
+		key = numpy.unique(rng.integers(0, 25 * CHROM_SIZES[chrom], 1500))
+		positions, which = key % CHROM_SIZES[chrom], key // CHROM_SIZES[chrom]
+		order = numpy.argsort(positions, kind='stable')
+		cut = len(order) // 2
+		for part in (order[:cut], order[cut:]):
+			calls.append((chrom, positions[part], which[part], rng.integers(1, 9,
+				len(part)).astype(numpy.int32)))
+
+	def write(name, n_jobs, per_thread):
+		monkeypatch.setattr(figwig.figwig, '_BATCHES_PER_THREAD', per_thread)
+		path = str(tmp_path / name)
+		with FigWigWriter(path, CHROM_SIZES, tracks, order='tracks', level=6,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, which, values in calls:
+				writer.write_sparse(chrom, positions, which, values)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	inline = write('inline.fw', 1, 8)
+	assert write('packed.fw', 3, 1) == inline
+	assert write('single.fw', 3, 1 << 40) == inline
+	entries = FigWigReader(str(tmp_path / 'packed.fw')).read_entries()
+	assert len(entries.values) == sum(len(call[1]) for call in calls)
 
 
 def test_write_sparse_arguments(tmp_path):

@@ -2514,3 +2514,170 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 				out_offsets, out_values)
 
 	return k_out
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_keys(positions, track_ids, tids, multi, group_of, slot_of, n_groups,
+	shift, slot_bits, tile_bits, reach, keys, lo, hi):
+	"""The sort keys of entries lo to hi of a write_sparse call: from high
+	bits to low, the chromosome and group, the tile, the track's slot in its
+	group and the offset in the tile, each in its own bits. Returns how many
+	keys are below the one before, and how many are below the one `reach`
+	before."""
+
+	mask = (numpy.int64(1) << shift) - 1
+	descents = 0
+	far = 0
+	last = numpy.int64(-1)
+	for i in range(lo, hi):
+		p = positions[i]
+		t = track_ids[i]
+		high = (tids[i] if multi else tids[0]) * n_groups + group_of[t]
+		key = ((((high << tile_bits) | (p >> shift)) << slot_bits) | slot_of[t]
+			) << shift | (p & mask)
+		keys[i] = key
+		if key < last:
+			descents += 1
+		if i - lo >= reach and key < keys[i - reach]:
+			far += 1
+		last = key
+	return descents, far
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_counts(keys, lo, hi, shift, mask, counts):
+	"""How many of keys lo to hi hold each value of the digit at `shift`."""
+
+	for i in range(lo, hi):
+		counts[(keys[i] >> shift) & mask] += 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_scatter(keys, order, first, lo, hi, shift, mask, starts, keys_out,
+	order_out):
+	"""Moves keys lo to hi, and their places in the input (their own when
+	`first`), to the slots `starts` gives each digit, in order, so that
+	equal digits keep the order they came in."""
+
+	for i in range(lo, hi):
+		d = (keys[i] >> shift) & mask
+		j = starts[d]
+		starts[d] = j + 1
+		keys_out[j] = keys[i]
+		order_out[j] = i if first else order[i]
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_gather(keys, order, values, multi, shift, slot_bits, tile_bits,
+	n_groups, lo, hi, positions_out, slots_out, values_out, groups_out,
+	tids_out):
+	"""Entries lo to hi in sorted order: the position, slot, group and
+	chromosome from each sorted key, and the value (as float64) from the
+	entry it came from."""
+
+	mask = (numpy.int64(1) << shift) - 1
+	slot_mask = (numpy.int64(1) << slot_bits) - 1
+	tile_mask = (numpy.int64(1) << tile_bits) - 1
+	for i in range(lo, hi):
+		k = keys[i]
+		positions_out[i] = (((k >> (shift + slot_bits)) & tile_mask) << shift) | (
+			k & mask)
+		slots_out[i] = (k >> shift) & slot_mask
+		high = k >> (shift + slot_bits + tile_bits)
+		groups_out[i] = high % n_groups
+		if multi:
+			tids_out[i] = high // n_groups
+		values_out[i] = values[order[i]]
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_counts(rows, channels, n_channels, counts):
+	"""How many entries of a sparse read's part fall in each (row,
+	channel)."""
+
+	for i in range(rows.shape[0]):
+		counts[rows[i] * n_channels + channels[i]] += 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_starts(counts):
+	"""Each run's counts of entries per bucket, (runs, buckets), turned in
+	place into where its entries of each bucket start: bucket by bucket,
+	and run by run within a bucket. Returns `counts`."""
+
+	total = 0
+	for b in range(counts.shape[1]):
+		for r in range(counts.shape[0]):
+			c = counts[r, b]
+			counts[r, b] = total
+			total += c
+	return counts
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_scatter(rows, channels, offsets, values, n_channels, starts,
+	out_rows, out_channels, out_offsets, out_values):
+	"""Moves a part's entries to the slots `starts` gives each (row,
+	channel), in order, so that a bucket keeps the order its parts and
+	their entries came in."""
+
+	for i in range(rows.shape[0]):
+		b = rows[i] * n_channels + channels[i]
+		j = starts[b]
+		starts[b] = j + 1
+		out_rows[j] = rows[i]
+		out_channels[j] = channels[i]
+		out_offsets[j] = offsets[i]
+		out_values[j] = values[i]
+
+
+@numba.njit(nogil=True, cache=True)
+def _bucket_ascending(rows, channels, offsets, lo, hi):
+	"""Whether entries lo to hi, and the one before lo, have ascending
+	offsets wherever two in a row share a row and channel."""
+
+	for i in range(max(lo, 1), hi):
+		if rows[i] == rows[i - 1] and channels[i] == channels[i - 1] and \
+				offsets[i] <= offsets[i - 1]:
+			return False
+	return True
+
+
+@numba.njit(nogil=True, cache=True)
+def _batch_cuts(bounds, live, cap, most, continues, binned):
+	"""Where a read's planner cuts a group's chunks into batches: each
+	batch takes chunks while its bytes stay within `cap` and its live
+	chunks below `most`, at least one; a binned read's batch then takes the
+	chunks of a window it is inside, up to twice those, and marks a window
+	cut inside a batch when it stops short. Returns each batch's first
+	chunk and its bytes, with the end appended to the firsts, and whether
+	a window was cut inside."""
+
+	n = bounds.shape[0]
+	firsts = [0]
+	totals = [0]
+	totals.pop()
+	cut_inside = False
+	a = 0
+	while a < n:
+		total_bytes = 0
+		n_live = 0
+		b = a
+		while b < n and (b == a or (total_bytes + bounds[b] <= cap and n_live <
+				most)):
+			total_bytes += bounds[b]
+			n_live += live[b]
+			b += 1
+		if binned:
+			while b < n and continues[b - 1]:
+				if total_bytes + bounds[b] > 2 * cap or n_live >= 2 * most:
+					cut_inside = True
+					break
+				total_bytes += bounds[b]
+				n_live += live[b]
+				b += 1
+		totals.append(total_bytes)
+		firsts.append(b)
+		a = b
+	return numpy.array(firsts, dtype=numpy.int64), numpy.array(totals,
+		dtype=numpy.int64), cut_inside

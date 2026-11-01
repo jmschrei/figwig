@@ -576,9 +576,10 @@ most 2**29 values (tracks times tile), which rules out one group of every
 read, and a group per read costs a planning step per group on every read.
 On the m6A calls of 90,543 Fiber-seq reads in groups of 1,024 (position
 order, tile 16,384, 62 MB), summing every read over 8,192 windows of
-2,048 bases took 0.42 s and listing the calls in 1,024 windows 0.16 s,
-against 3.8 s and 3.5 s at best from a scipy CSR matrix per chromosome
-held in memory, and 15.7 s and 7.1 s from the same file in track order;
+2,048 bases took 0.22 s on one thread and listing the calls in 1,024
+windows 0.14 s, against 3.8 s and 3.5 s at best from a scipy CSR matrix
+per chromosome held in memory, and 15.7 s and 7.1 s from the same file in
+track order;
 ``sums(..., paired=True)`` gives each read's total over its own span,
 2.7 s for the 90,543 reads against 5.8 s from the matrix
 (:doc:`benchmarks`). A read may also be its own "chromosome", of its
