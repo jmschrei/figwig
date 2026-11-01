@@ -1661,7 +1661,7 @@ def test_coverage_of_bgzf_and_gzip_beds_and_of_several_files(tmp_path,
 	doubled = {chrom: {s: 2 * v for s, v in strands.items()} for chrom, strands
 		in pileup().items()}
 	main(["bam2bw", coverage_bam, coverage_bam, "-s", sizes, "-n", str(tmp_path /
-		"two" / "both"), "-c"])
+		"two" / "both"), "-c"], fast_exit=False)
 	assert_coverage([str(tmp_path / "two" / "both.+.bw"), str(tmp_path / "two" /
 		"both.-.bw")], doubled, ["+", "-"])
 	table = tmp_path / "files.tsv"
