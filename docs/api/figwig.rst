@@ -2,4 +2,4 @@ figwig
 ======
 
 .. automodule:: figwig.figwig
-	:members: FigWigReader, read_figwig, FigWigWriter, write_figwig, SparseWindows, SparseEntries
+	:members: FigWigReader, is_figwig, read_figwig, FigWigWriter, write_figwig, SparseWindows, SparseEntries

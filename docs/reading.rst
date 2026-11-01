@@ -118,14 +118,14 @@ base                                        value
 covered by an interval                      the interval's value
 covered by no interval                      ``missing``, 0.0 unless given
 covered by an interval whose value is NaN   ``missing``, or NaN with ``keep_nan=True``
-past the end of its chromosome              NaN
+past the end of its chromosome              ``oob``, NaN unless given
 on a chromosome the file does not have      ``missing``, with a warning
 ==========================================  ===================================
 
 The first four rows are what pybigtools' ``values(chrom, start, end,
-missing=missing)`` gives, cast to float32, and the tests check figwig against
-it bit for bit. pybigtools raises for a chromosome the file does not have.
-pyBigWig's ``values()`` gives NaN for a base that no interval covers, which
+missing=missing, oob=oob)`` gives, cast to float32, and the tests check
+figwig against it bit for bit. pybigtools raises for a chromosome the file
+does not have. pyBigWig's ``values()`` gives NaN for a base that no interval covers, which
 ``missing=numpy.nan`` matches, and raises for a window that runs past the end
 of its chromosome or is on a chromosome the file does not have.
 
