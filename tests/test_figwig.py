@@ -2408,6 +2408,29 @@ def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 		assert_identical(many, one)
 
 
+def test_write_sparse_declared_dtypes_take_any_value_type(tmp_path):
+	"""Values of a byte order, float16 or longdouble, which the range kernel
+	does not take, are checked as float64, as `_check_values_fit` checks
+	them: the same file as from int64 values, and the same error."""
+
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'}]
+	positions, which = [3, 7, 9, 2], [0, 0, 1, 1]
+	values = numpy.array([5, 200, -30, 7])
+	reference = str(tmp_path / 'r.fw')
+	with FigWigWriter(reference, {'chr1': 100}, tracks) as writer:
+		writer.write_sparse('chr1', positions, which, values)
+	for dtype in ('>i4', '>i8', '>f8', 'float16', 'longdouble'):
+		path = str(tmp_path / 'v.fw')
+		with FigWigWriter(path, {'chr1': 100}, tracks) as writer:
+			writer.write_sparse('chr1', positions, which, values.astype(dtype))
+		assert pathlib.Path(path).read_bytes() == pathlib.Path(
+			reference).read_bytes(), dtype
+		with FigWigWriter(path, {'chr1': 100}, tracks) as writer:
+			with pytest.raises(ValueError, match="'a' is uint8, and a value is "
+					"outside 0 to 255"):
+				writer.write_sparse('chr1', [3], [0], numpy.array([300], dtype=dtype))
+
+
 def test_track_order_plan_in_slices(tmp_path, monkeypatch):
 	"""A track-order read pairs its windows with the blocks of tracks a
 	slice of tracks at a time, holding only the windows each track's

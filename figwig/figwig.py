@@ -1681,8 +1681,11 @@ class FigWigWriter:
 			highs = numpy.full(len(self.tracks), -numpy.inf)
 			marked = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
 			marked[declared] = True
-			bad = _declared_ranges(numpy.ascontiguousarray(track_ids), values,
-				marked, lows, highs)
+			# The kernel takes native ints, float32 and float64; other values are
+			# checked as float64, as `_check_values_fit` checks them.
+			bad = _declared_ranges(numpy.ascontiguousarray(track_ids), values if
+				values.dtype.isnative and values.dtype.char not in 'eg' else
+				values.astype(numpy.float64), marked, lows, highs)
 			if bad >= 0:
 				_check_values_fit(self.tracks[int(track_ids[bad])]['name'],
 					self.tracks[int(track_ids[bad])]['dtype'], values[bad:bad + 1])
