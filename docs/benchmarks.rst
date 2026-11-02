@@ -954,19 +954,21 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - 15.7 / 15.8 / 16.0
      - 3.8 / 4.0
    * - calls of every read in 1,024 windows (``sparse=True``)
-     - 0.14 / 0.18 / 0.24
+     - 0.14 / 0.13 / 0.13
      - 7.1 / 7.2 / 7.2
      - 27 / 3.5
    * - each read over its own span (``sums(paired=True)``)
-     - 2.7 / 2.7 / 2.7
+     - 3.0 / 1.6 / 2.0
      - 9.6 / 9.7 / 9.6
      - 5.8 / 6.8
 
 One group of every read is refused, since a chunk holds at most 2**29
 values, and a group per read made the sum over 8,192 windows take 230 s,
 each read paying a planning step per group; groups of consecutive reads
-are the layout. These reads do not gain from threads, since each touches
-few chunks and the work is the planning.
+are the layout. A sum over every read and the sparse values gain little
+from threads, since each read touches few chunks and the work is the
+planning; the paired sums run their batches of reads side by side on the
+threads.
 
 To a GPU
 ~~~~~~~~

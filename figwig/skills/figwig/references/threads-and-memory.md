@@ -10,13 +10,19 @@ stable, and the last section measures the numbers where they matter.
   of a few hundred windows gets one or two threads whatever `n_jobs` is;
   reading every window in one call gains up to 8 to 32 threads. A reused
   reader beats a path, which re-reads the index on every call.
-- figwig files: one thread per 64 chunks touched, up to `n_jobs`, with the
-  pool kept between reads, and batches cut so that each thread gets at
-  least two, however large the chunks. Gains end near 8 threads for sparse
+- figwig files: one thread per 64 chunks touched, up to `n_jobs`, but no
+  more than one per 256 KB of chunks decoded and per 2 MB of dense output
+  (at least 4 where asked for; a read summed per bin over fewer windows
+  than threads keeps them all), with the pool kept between reads, and
+  batches cut so that each thread gets at least two, however large the
+  chunks, and a read of many small groups gets no batches of a chunk or
+  two; on a read of several groups each thread takes the next batch as it
+  ends one. Gains end near 8 threads for sparse
   reads and continue to 32 for dense float tracks, which read at the
-  defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. Sums
-  in position order take no copy of the output per thread; track order
-  takes one per thread, which the 8 GiB guard counts.
+  defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. `sums`
+  run every group at once, and `paired=True` sums its batches of integer
+  tracks side by side in position order. Sums in position order take no copy of the output per
+  thread; track order takes one per thread, which the 8 GiB guard counts.
 - In DataLoader workers pass `n_jobs=1`; `num_workers` is the parallelism.
 
 ## Writing
@@ -28,8 +34,8 @@ stable, and the last section measures the numbers where they matter.
   gaining to 32. Zoom levels add a pass over the data, 2 to 4x
   the time of a write without them, and their memory grows with threads.
 - figwig files: whole tiles encode on the pool, in up to one task per
-  thread of at least 4 MB of tiles per call, partial tiles and
-  intervals on the calling thread, so write windows for speed; the writer
+  thread of at least 4 MB of tiles per call, and intervals and partial
+  tiles there too, but a tile a call continues or leaves open; the writer
   holds about 0.5 GB plus two to three times one call's values, so aim for
   calls of a few hundred MB. `bw2fw` stops gaining near `-p 8`; the
   track-order writer does not gain.
