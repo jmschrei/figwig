@@ -2356,7 +2356,7 @@ def _bin_into(dst, src, src0, s0, s1, bins, nan_mode):
 @numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins,
-	pair_stops, nan_mode):
+	pair_stops, nan_mode, pair_tracks=None):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
@@ -2386,6 +2386,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	per chunk, or one without a scratch tile, bins each pair's bases
 	straight into its row. `nan_mode` is what a NaN base adds to a binned
 	sum, as `_pick` takes it.
+
+	With `pair_tracks`, pair q reads track pair_tracks[q] of the chunk alone
+	into channel 0 of its row, as `sums(..., paired=True)` does.
 	"""
 
 	width = out.shape[2] * bins
@@ -2394,6 +2397,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	selected = numpy.flatnonzero(slots >= 0)
 	targets = numpy.unique(slots[selected])
 	n_pairs = pair_chunks.shape[0]
+	paired = pair_tracks is not None
+	alone = numpy.full(n_tracks if paired else 0, -1, dtype=numpy.int64)
+	only = numpy.zeros(1, dtype=numpy.int64)
 	decoded = -1
 	q = 0
 	while q < n_pairs:
@@ -2424,8 +2430,8 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		# tile, from which each window is copied or binned; otherwise each
 		# pair is decoded on its own, binned straight into its row when
 		# summing, which needs no scratch however many tracks there are.
-		via_scratch = scratch.shape[0] > 0 and q1 - q >= _SCRATCH_PAIRS and (
-			bins > 1 or kind != _DENSE)
+		via_scratch = not paired and scratch.shape[0] > 0 and q1 - q >= \
+			_SCRATCH_PAIRS and (bins > 1 or kind != _DENSE)
 		if via_scratch and chunk != decoded:
 			base = pair_bases[q]
 			if accumulate:
@@ -2445,6 +2451,16 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			stop = start + width if pair_stops.shape[0] == 0 else pair_stops[r]
 			b = min(stop, base + tile)
 			if b <= a:
+				continue
+			if paired:
+				t = pair_tracks[r]
+				alone[t] = 0
+				only[0] = t
+				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
+					alone, only, base, start, a, b, out[row], accumulate or bins > 1,
+					bool(False), row, int(0), empty, empty, empty, empty_values, bins,
+					nan_mode)
+				alone[t] = -1
 				continue
 			if not via_scratch:
 				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,

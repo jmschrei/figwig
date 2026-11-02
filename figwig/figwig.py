@@ -4418,6 +4418,24 @@ class FigWigReader:
 				"{}.".format(starts.shape, ids.shape))
 		names, codes = _chrom_codes(chroms, len(starts))
 		chroms = numpy.array(names)[codes]
+
+		# Integer tracks whose sums stay below 2**53 sum exactly in any order,
+		# so all their intervals are read at once, each paired with its own
+		# track's chunks or blocks alone, for the same sums. Anything a read
+		# would raise on goes the batched way below, which raises as before.
+		width = int((ends - starts).max()) if len(starts) else 0
+		if len(starts) and nan in _NAN_MODES and (self._dtype_codes[ids] <
+				_DTYPES.index('float32')).all() and all(name in self._tids for name
+				in names) and starts.min() >= 0 and int(starts.max()) <= 2 ** 32 - 1 - \
+				max(width, 1):
+			peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]),
+				numpy.abs(self.stats['max'][ids])).max())
+			if peak * width < 2.0 ** 53:
+				unique = numpy.unique(ids)
+				out = self._read(chroms, starts, max(width, 1), unique.tolist(), None,
+					dtype, n_jobs, False, None, max(width, 1), ends, nan, pairs=ids)
+				return out[:, 0, 0]
+
 		order = numpy.lexsort((ids, self._group_of[ids]))
 		sorted_ids = ids[order]
 		# A batch starts at every _PAIRED_TRACKS-th distinct track, and at
@@ -4491,11 +4509,13 @@ class FigWigReader:
 		return peak * terms < limit
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
-		labels, bins, stops, nan='propagate'):
+		labels, bins, stops, nan='propagate', pairs=None):
 		"""`read`, with `stops` the windows' ends when they differ in
 		length (`sums`), and then `width` the longest and `bins` equal to
 		it, so that each window's sum is its one bin; `nan` is what a NaN
-		base does to a binned sum."""
+		base does to a binned sum. With `pairs`, a track id per window of
+		the tracks given, window j reads track pairs[j] alone into one
+		channel, as `_paired_sums` asks."""
 
 		n_jobs = _check_n_jobs(n_jobs)
 		if nan not in _NAN_MODES:
@@ -4508,6 +4528,7 @@ class FigWigReader:
 			raise ValueError("nan= cannot be given with labels, whose sums run "
 				"over tracks.")
 		ids, single = self._select(tracks)
+		single = single and pairs is None
 		windows = _Windows(chroms, starts, width)
 		n, width = windows.n, windows.width
 
@@ -4546,7 +4567,7 @@ class FigWigReader:
 			n_channels = int(labels.max()) + 1 if labels.size else 0
 			single = False
 		else:
-			n_channels = len(ids)
+			n_channels = len(ids) if pairs is None else 1
 
 		dtype = self._dtype(ids, dtype, summing)
 		shape = (n, out_width) if single else (n, n_channels, out_width)
@@ -4568,13 +4589,18 @@ class FigWigReader:
 		if labels is not None:
 			first_channel = {i: int(labels[c]) for i, c in first_channel.items()
 				if labels[c] >= 0}
+		elif pairs is not None:
+			first_channel = dict.fromkeys(first_channel, 0)
 
 		# The tasks come first, since the threads and the copies follow
 		# them; they get their output once it is allocated.
 		mode = 'list' if sparse else 'sum' if summing else 'dense'
 		accumulate = labels is not None
 		cut_inside = False
-		if self.order == 'positions':
+		if self.order == 'positions' and pairs is not None:
+			tasks, n_threads, cut_inside = self._plan_paired(pairs, tids, starts,
+				lengths, width, mode, bins or 1, stops, nan_mode, n_jobs)
+		elif self.order == 'positions':
 			read_ids = numpy.array(list(first_channel), dtype=numpy.int64)
 			groups_read = numpy.unique(self._group_of[read_ids]).tolist()
 			tiles = _window_tiles(self.tile, self._tile_offsets, tids, starts,
@@ -4644,6 +4670,10 @@ class FigWigReader:
 					tasks, cut_inside = plan(n_threads, read_bytes)
 			else:
 				tasks, cut_inside = plan(n_threads, read_bytes)
+		elif pairs is not None:
+			tasks = self._plan_paired_tracks(pairs, tids, starts, lengths, width,
+				mode, bins or 1, n_jobs, stops, nan_mode)
+			n_threads = max(1, min(n_jobs, len(tasks)))
 		else:
 			self._load_indexes(list(first_channel), n_jobs)
 			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
@@ -4654,9 +4684,10 @@ class FigWigReader:
 		# a window's two tiles fill different bases, and a binned read's
 		# batches are not cut inside a window unless a window is longer than
 		# a batch may grow; then, and in track order, where a track's blocks
-		# are spread over the tasks, each thread sums into its own copy.
-		buffers = n_threads if summing and n_threads > 1 and (self.order ==
-			'tracks' or cut_inside) else 0
+		# are spread over the tasks, each thread sums into its own copy. A
+		# paired read in track order keeps each window's blocks in one task.
+		buffers = n_threads if summing and n_threads > 1 and ((self.order ==
+			'tracks' and pairs is None) or cut_inside) else 0
 
 		inner = None
 		if not sparse:
@@ -5123,6 +5154,113 @@ class FigWigReader:
 
 		return tasks
 
+	def _plan_paired(self, pairs, tids, starts, lengths, width, mode, bins,
+		stops, nan_mode, n_jobs):
+		"""The tasks of a position-order read in which window j reads track
+		pairs[j] alone: each group's windows are those of its own tracks,
+		planned as `_plan` plans a read, and each pair carries the slot of
+		its window's track. Returns (tasks, threads, whether a batch was cut
+		inside a window)."""
+
+		groups = self._group_of[pairs]
+		groups_read = numpy.unique(groups).tolist()
+		by_group = numpy.argsort(groups, kind='stable')
+		edges = numpy.searchsorted(groups[by_group], numpy.array(groups_read +
+			[len(self._groups)]))
+		planned = []
+		for k, g in enumerate(groups_read):
+			mine = by_group[edges[k]:edges[k + 1]]
+			tiles = _window_tiles(self.tile, self._tile_offsets, tids[mine],
+				starts[mine], lengths[mine], width, None if stops is None else
+				stops[mine])
+			planned.append((g, mine, (mine[tiles[0]],) + tiles[1:]))
+		n_chunks = sum(len(tiles[2]) for _, _, tiles in planned)
+		n_threads = self._threads(n_jobs, n_chunks)
+		self._load_indexes(groups_read, n_threads)
+		if n_threads > _MIN_READ_THREADS:
+			read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for g, _,
+				tiles in planned) + 8 * n_chunks
+			n_threads = min(n_threads, max(_MIN_READ_THREADS, read_bytes //
+				_THREAD_READ_BYTES))
+		most = _batch_chunks(n_chunks, n_threads)
+		tasks, cut_inside = [], False
+		for g, mine, tiles in planned:
+			slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
+			slots[self._slot_of[pairs[mine]]] = 0
+			batch, cut = self._plan(g, slots, tiles, starts, width, None, mode,
+				False, bins, most, stops, nan_mode, n_threads)
+			for task in batch:
+				task.pair_tracks = self._slot_of[pairs[task.pair_rows]]
+			tasks.extend(batch)
+			cut_inside |= cut
+		if len(tasks) < n_threads:
+			tasks, cut = _split_tasks(tasks, n_threads, bins > 1)
+			cut_inside |= cut
+		return tasks, n_threads, cut_inside
+
+	def _plan_paired_tracks(self, pairs, tids, starts, lengths, width, mode,
+		bins, n_jobs, stops, nan_mode):
+		"""The tasks of a track-order read in which window j reads track
+		pairs[j] alone into channel 0: every window is paired at once with
+		the blocks of its own track that it overlaps, and the windows are
+		batched whole, so that a window's blocks are summed in one task, in
+		their order, and the tasks write disjoint rows."""
+
+		ids = numpy.unique(pairs)
+		self._load_indexes(ids.tolist(), n_jobs)
+		indexes = [self._group_index(i) for i in ids.tolist()]
+		counts = numpy.array([len(blocks) for blocks in indexes],
+			dtype=numpy.int64)
+		if counts.sum() == 0:
+			return []
+		blocks = numpy.concatenate(indexes)
+
+		# A track's blocks lie in order of chromosome and position, so each
+		# (track, chromosome) is a run of them, numbered in order, and a key
+		# of that number and a position orders every block at once.
+		runs = numpy.repeat(numpy.arange(len(ids)), counts) * len(self._lengths) + \
+			blocks['chrom'].astype(numpy.int64)
+		change = numpy.concatenate([[False], runs[1:] != runs[:-1]])
+		heads = numpy.flatnonzero(change | (numpy.arange(len(runs)) == 0))
+		number = numpy.cumsum(change)
+		lasts = (number << 32) | blocks['last'].astype(numpy.int64)
+		firsts = (number << 32) | blocks['first'].astype(numpy.int64)
+
+		want = numpy.searchsorted(ids, pairs) * len(self._lengths) + tids
+		run = numpy.minimum(numpy.searchsorted(runs[heads], want), len(heads) - 1)
+		found = runs[heads][run] == want
+		ends = numpy.minimum(starts + width if stops is None else stops, lengths)
+		lo = numpy.searchsorted(lasts, (run << 32) | starts, side='left')
+		hi = numpy.searchsorted(firsts, (run << 32) | ends, side='left')
+		n_pairs = numpy.where(found & (ends > starts), numpy.maximum(hi - lo, 0),
+			0)
+
+		# The windows in order of track and start, each with its blocks.
+		windows = numpy.flatnonzero(n_pairs)
+		if len(windows) == 0:
+			return []
+		windows = windows[numpy.lexsort((starts[windows], want[windows]))]
+		per_window = n_pairs[windows]
+		total = int(per_window.sum())
+		at = numpy.concatenate([[0], numpy.cumsum(per_window)])
+		rows = numpy.repeat(windows, per_window)
+		which = numpy.repeat(lo[windows], per_window) + numpy.arange(total) - \
+			numpy.repeat(at[:-1], per_window)
+		bounds = blocks['raw'].astype(numpy.int64) + 8
+		firsts, _, _ = _batch_cuts(numpy.add.reduceat(bounds[which], at[:-1]),
+			per_window, _BATCH_BYTES, _batch_chunks(total, n_jobs), numpy.zeros(0,
+			dtype=numpy.bool_), False)
+
+		tasks = []
+		for a, b in zip(firsts[:-1].tolist(), firsts[1:].tolist()):
+			p0, p1 = int(at[a]), int(at[b])
+			unique, inverse = numpy.unique(which[p0:p1], return_inverse=True)
+			tasks.append(_BlockTask(self, blocks[unique], int(bounds[unique].sum()),
+				inverse, numpy.zeros(p1 - p0, dtype=numpy.int64), starts[rows[p0:p1]],
+				rows[p0:p1], None, width, mode, False, bins, _empty_pairs if stops is
+				None else stops[rows[p0:p1]], nan_mode))
+		return tasks
+
 	def _run(self, tasks, n_threads, summed=None, copies=False):
 		"""Run the tasks on up to `n_threads` threads, the first on this
 		thread when a kernel has not been compiled yet, so that each is
@@ -5531,7 +5669,7 @@ class _Task:
 
 	def __init__(self, reader, g, slots, gtiles, kinds, offsets, sizes, bound,
 		pair_chunks, pair_bases, pair_starts, pair_rows, out, width, mode,
-		accumulate, bins, crcs, pair_stops, nan_mode=0):
+		accumulate, bins, crcs, pair_stops, nan_mode=0, pair_tracks=None):
 		self.reader, self.g, self.slots = reader, g, slots
 		self.gtiles, self.kinds, self.crcs = gtiles, kinds, crcs
 		self.offsets, self.sizes, self.bound = offsets, sizes, bound
@@ -5542,6 +5680,7 @@ class _Task:
 		self.pair_stops = numpy.ascontiguousarray(pair_stops, dtype=numpy.int64)
 		self.out, self.width, self.mode = out, width, mode
 		self.accumulate, self.bins, self.nan_mode = accumulate, bins, nan_mode
+		self.pair_tracks = pair_tracks
 		self.entries = None
 
 	def split(self, parts, by_window=False):
@@ -5581,7 +5720,8 @@ class _Task:
 					self.pair_chunks[a:b], self.pair_bases[a:b], self.pair_starts[a:b],
 					self.pair_rows[a:b], self.out, self.width, self.mode,
 					self.accumulate, self.bins, self.crcs, self.pair_stops[a:b] if
-					len(self.pair_stops) else self.pair_stops, self.nan_mode))
+					len(self.pair_stops) else self.pair_stops, self.nan_mode, None if
+					self.pair_tracks is None else self.pair_tracks[a:b]))
 		return out, cut_inside
 
 	def run(self, fd):
@@ -5626,10 +5766,14 @@ class _Task:
 		if n_channels * reader.tile * 8 <= _SCRATCH_BYTES:
 			scratch = numpy.empty((n_channels, reader.tile), dtype=numpy.float64)
 
-		_read_tiles(reader.tile, data, positions, self.kinds, len(self.slots),
+		args = (reader.tile, data, positions, self.kinds, len(self.slots),
 			self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
 			self.pair_rows, self.out, self.accumulate, scratch, self.bins,
 			self.pair_stops, self.nan_mode)
+		if self.pair_tracks is None:
+			_read_tiles(*args)
+		else:
+			_read_tiles(*args, self.pair_tracks)
 
 
 class _BlockTask:
