@@ -4741,10 +4741,14 @@ class FigWigReader:
 			# against the output's type, since a sum can overflow a type
 			# that each track's values fit; sums into a float32 output are
 			# taken in float64, since a bin is added to base by base.
+			# Sums of integer tracks that stay below 2**24 are exact in float32
+			# as they are added, so they go straight into a float32 output.
 			inner = out
+			terms = (len(ids) if labels is not None else 1) * (bins or 1)
 			if summing and dtype.kind in 'iu':
 				inner = numpy.zeros(shape, dtype=numpy.int64)
-			elif summing and dtype != numpy.float64:
+			elif summing and dtype != numpy.float64 and not (dtype ==
+					numpy.float32 and self._exact_sums(ids, terms, 2.0 ** 24)):
 				inner = numpy.zeros(shape, dtype=numpy.float64)
 
 		if n == 0:
