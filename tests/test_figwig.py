@@ -3518,6 +3518,32 @@ def test_short_runs_read_as_written(runs_fw, read_batching):
 	assert_identical(rebuilt, numpy.nan_to_num(expected[:5]))
 
 
+def test_capped_float_sums_match_every_thread(tmp_path, monkeypatch):
+	"""A read takes fewer threads than it asks for when its bytes are few,
+	but sums of float tracks that every asked thread would cut a window of
+	are summed in a copy per thread, whose floats depend on the threads, so
+	that read takes them all: the sums are those of a read without the cap,
+	bit for bit."""
+
+	rng = numpy.random.default_rng(3)
+	path = str(tmp_path / 'f.fw')
+	length = 12_221
+	values = rng.lognormal(0, 4, (1, 6, length)) * rng.choice([-1, 1], (1, 6,
+		length))
+	values[:, :, rng.random(length) < 0.3] = 0
+	write_figwig(path, {'chr1': length}, [{'name': 't{}'.format(i), 'dtype':
+		'float64'} for i in range(6)], 'chr1', [0], values, tile=16, groups=[[
+		't0', 't1', 't2'], ['t3', 't4', 't5']])
+	starts = rng.integers(0, 12_000, 30)
+	ends = numpy.minimum(starts + rng.integers(1, 800, 30), length)
+	reader = FigWigReader(path)
+	got = {n_jobs: reader.sums('chr1', starts, ends, n_jobs=n_jobs) for n_jobs
+		in (8, 16, 32)}
+	monkeypatch.setattr(figwig.figwig, '_THREAD_READ_BYTES', 1)
+	for n_jobs, sums in got.items():
+		assert_identical(sums, reader.sums('chr1', starts, ends, n_jobs=n_jobs))
+
+
 def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
 	"""A read of a chromosome of dense chunks plans at least as many
 	batches as threads, each chunk in one batch, where one batch of

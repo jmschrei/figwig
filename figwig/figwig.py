@@ -4434,10 +4434,14 @@ class FigWigReader:
 		# In position order the batches are summed side by side on the
 		# threads, each on one: a batch is too small a read to spread over
 		# several. In track order they run one after another, since side by
-		# side they took longer the more threads there were.
+		# side they took longer the more threads there were, and so do
+		# batches whose sums are not exact in any order, since a batch's
+		# float sums depend on the threads it is read on.
 		n_jobs = _check_n_jobs(n_jobs)
+		width = int((ends - starts).max()) if len(starts) else 1
 		inner = 1 if n_jobs > 1 and len(batches) > 1 and self.order == \
-			'positions' else n_jobs
+			'positions' and self._exact_sums(numpy.unique(ids), max(width, 1)) \
+			else n_jobs
 
 		def one(batch):
 			mine = numpy.unique(ids[batch])
@@ -4473,6 +4477,18 @@ class FigWigReader:
 		for batch, sums in zip(batches, found):
 			out[batch] = sums
 		return out
+
+	def _exact_sums(self, ids, terms, limit=2.0 ** 53):
+		"""Whether sums of `terms` values of these tracks are exact in any
+		order: integer tracks, whose largest value times `terms` stays below
+		`limit`, 2**53 in float64."""
+
+		if len(ids) == 0 or (self._dtype_codes[ids] >= _DTYPES.index('float32')
+				).any():
+			return False
+		peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]), numpy.abs(
+			self.stats['max'][ids])).max())
+		return peak * terms < limit
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
 		labels, bins, stops, nan='propagate'):
@@ -4563,7 +4579,8 @@ class FigWigReader:
 			groups_read = numpy.unique(self._group_of[read_ids]).tolist()
 			tiles = _window_tiles(self.tile, self._tile_offsets, tids, starts,
 				lengths, width, stops)
-			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
+			n_threads = asked = self._threads(n_jobs, len(tiles[2]) * len(
+				groups_read))
 			self._load_indexes(groups_read, n_threads)
 			read_bytes = None
 			if n_threads > _MIN_READ_THREADS and (bins is None or stops is not
@@ -4578,37 +4595,55 @@ class FigWigReader:
 					'dense' else 0
 				n_threads = min(n_threads, max(_MIN_READ_THREADS, read_bytes //
 					_THREAD_READ_BYTES + out_bytes // _THREAD_OUT_BYTES))
-			tasks = []
 			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
-			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
-			# A plain read's batches are cut by the bytes of the whole read,
-			# not of each group, which for a read of many groups would be
-			# thousands of tasks of about a chunk each. A read with labels
-			# runs a group at a time, so its groups keep their own.
-			if n_threads > 1 and (bins or 1) == 1 and not accumulate and len(
-					groups_read) > 1:
-				if read_bytes is None:
-					read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for
-						g in groups_read) + 8 * len(tiles[2]) * len(groups_read)
-			else:
-				read_bytes = None
 			# The tracks read, grouped once: a scan per group would cost
 			# tracks times groups on a read of thousands of each.
 			by_group = numpy.argsort(self._group_of[read_ids], kind='stable')
 			edges = numpy.searchsorted(self._group_of[read_ids][by_group],
 				numpy.array(groups_read + [len(self._groups)]))
-			for k, g in enumerate(groups_read):
-				mine = by_group[edges[k]:edges[k + 1]]
-				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
-				slots[self._slot_of[read_ids[mine]]] = channels[mine]
-				planned, cut = self._plan(g, slots, tiles, starts, width, None, mode,
-					accumulate, bins or 1, most, stops, nan_mode, n_threads, read_bytes)
-				tasks.extend(planned)
-				cut_inside |= cut
-			if len(tasks) < n_threads:
-				tasks, cut = _split_tasks(tasks, n_threads, bins is not None and
-					bins > 1)
-				cut_inside |= cut
+
+			def plan(n_threads, read_bytes):
+				tasks, cut_inside = [], False
+				most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
+				# A plain read's batches are cut by the bytes of the whole read,
+				# not of each group, which for a read of many groups would be
+				# thousands of tasks of about a chunk each. A read with labels
+				# runs a group at a time, so its groups keep their own.
+				if n_threads > 1 and (bins or 1) == 1 and not accumulate and len(
+						groups_read) > 1:
+					if read_bytes is None:
+						read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum())
+							for g in groups_read) + 8 * len(tiles[2]) * len(groups_read)
+				else:
+					read_bytes = None
+				for k, g in enumerate(groups_read):
+					mine = by_group[edges[k]:edges[k + 1]]
+					slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
+					slots[self._slot_of[read_ids[mine]]] = channels[mine]
+					planned, cut = self._plan(g, slots, tiles, starts, width, None,
+						mode, accumulate, bins or 1, most, stops, nan_mode, n_threads,
+						read_bytes)
+					tasks.extend(planned)
+					cut_inside |= cut
+				if len(tasks) < n_threads:
+					tasks, cut = _split_tasks(tasks, n_threads, bins is not None and
+						bins > 1)
+					cut_inside |= cut
+				return tasks, cut_inside
+
+			# Sums with a window cut across tasks take a copy of the output per
+			# thread, and their floats depend on how many threads there are, so
+			# a read that would be cut on every thread it asked for takes them
+			# all, as main does, unless its sums are exact in any order.
+			if summing and n_threads < asked and not self._exact_sums(read_ids,
+					len(read_ids) * (bins or 1)):
+				tasks, cut_inside = plan(asked, read_bytes)
+				if cut_inside:
+					n_threads = asked
+				else:
+					tasks, cut_inside = plan(n_threads, read_bytes)
+			else:
+				tasks, cut_inside = plan(n_threads, read_bytes)
 		else:
 			self._load_indexes(list(first_channel), n_jobs)
 			tasks = self._plan_tracks(first_channel, tids, starts, lengths, width,
