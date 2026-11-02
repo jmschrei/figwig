@@ -2482,6 +2482,30 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 
 
 @numba.njit(nogil=True, cache=True)
+def _read_groups(tile, data, positions, lengths, kinds, chunk_at, n_tracks_of,
+	slots, slots_at, pair_chunks, pair_bases, pair_starts, pair_rows, out,
+	scratch, bins, failed):
+	"""`_check_chunks`, then `_read_tiles` adding into `out`, for each of
+	several groups in turn over one batch of their chunks: group j's chunks
+	are chunk_at[j] to chunk_at[j + 1] of the batch, its tracks' slots
+	slots_at[j] to slots_at[j + 1] of `slots`, and its pairs' chunks row j
+	of `pair_chunks`, the pairs being the same for every group. Returns the
+	first group a chunk of which fails its check, or -1."""
+
+	empty = numpy.zeros(0, dtype=numpy.int64)
+	for j in range(n_tracks_of.shape[0]):
+		c0, c1 = chunk_at[j], chunk_at[j + 1]
+		mine = slots[slots_at[j]:slots_at[j + 1]]
+		if c1 > c0 and _check_chunks(tile, data, positions[c0:c1], lengths[
+				c0:c1], kinds[c0:c1], n_tracks_of[j], mine, failed[c0:c1]) > 0:
+			return j
+		_read_tiles(tile, data, positions[c0:c1], kinds[c0:c1], n_tracks_of[j],
+			mine, pair_chunks[j], pair_bases, pair_starts, pair_rows, out,
+			bool(True), scratch, bins, empty, int(0))
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
 def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	pair_bases, pair_starts, pair_rows, width, fill, out_rows, out_channels,
 	out_offsets, out_values):

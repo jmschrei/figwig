@@ -2240,6 +2240,78 @@ def test_labels_sum_the_same_on_threads(cells, monkeypatch):
 			assert_identical(many, one)
 
 
+def test_labels_over_groups_run_in_bands(cells, tmp_path, monkeypatch):
+	"""A read with labels over several groups of integer tracks runs in
+	bands of windows, each band over every group: its sums equal a read on
+	one thread, which sums a group at a time, and the reference, with bins,
+	into float32 straight and into an integer type; float tracks, and a
+	read whose sums could round, sum a group at a time; a corrupt chunk
+	raises from a band as from a batch."""
+
+	ref, entries, paths = cells
+	reader = FigWigReader(paths['positions', 8])
+	rng = numpy.random.default_rng(51)
+	chroms, starts = random_windows(rng, 300, 320)
+	labels = rng.integers(-1, 4, 120)
+	planned = []
+	plan_bands = FigWigReader._plan_bands
+	monkeypatch.setattr(FigWigReader, '_plan_bands', lambda self, *args:
+		planned.append(len(plan_bands(self, *args))) or plan_bands(self, *args))
+	lengths = numpy.array([CHROM_SIZES[c] for c in chroms])
+	want = numpy.zeros((300, 4, 320))
+	for j, (c, s) in enumerate(zip(chroms, starts)):
+		for k in range(4):
+			want[j, k, :max(0, min(320, lengths[j] - s))] = ref[c][labels == k,
+				s:s + 320].sum(axis=0)
+	for kwargs in ({}, {'bins': 32}, {'dtype': 'float32'}, {'dtype': 'int32'},
+			{'bins': 32, 'dtype': 'float32'}):
+		one = reader.read(chroms, starts, 320, labels=labels, n_jobs=1, **kwargs)
+		many = reader.read(chroms, starts, 320, labels=labels, n_jobs=8,
+			**kwargs)
+		assert many.dtype == one.dtype
+		assert_identical(many, one)
+		bins = kwargs.get('bins', 1)
+		expected = want.reshape(300, 4, 320 // bins, bins).sum(axis=3)
+		if bins == 1 and many.dtype.kind == 'f':
+			# Bases past a chromosome's end read as NaN, and count 0 in bins.
+			past = numpy.arange(320)[None, :] >= (lengths - starts)[:, None]
+			expected[numpy.broadcast_to(past[:, None, :], expected.shape)] = numpy.nan
+		numpy.testing.assert_array_equal(many, expected.astype(many.dtype))
+	assert len(planned) == 5 and min(planned) > 1
+
+	planned.clear()
+	floats = str(tmp_path / 'floats.fw')
+	values = numpy.random.default_rng(52).random((1, 24, 3000)).astype(
+		numpy.float32)
+	write_figwig(floats, {'chr1': 3000}, ['f{}'.format(i) for i in range(24)],
+		'chr1', [0], values, tile=64, groups=8)
+	got = FigWigReader(floats).read('chr1', numpy.arange(0, 2600, 10), 320,
+		labels=numpy.arange(24) % 3, n_jobs=8, dtype='float64')
+	numpy.testing.assert_allclose(got[5, 1], values[0, 1::3, 50:370].astype(
+		numpy.float64).sum(axis=0), rtol=1e-12)
+	assert_identical(FigWigReader(floats).read('chr1', numpy.arange(0, 2600,
+		10), 320, labels=numpy.arange(24) % 3, n_jobs=8, dtype='float32'),
+		got.astype(numpy.float32))
+	assert planned == []
+
+	broken = str(tmp_path / 'broken.fw')
+	with FigWigWriter(broken, CHROM_SIZES, ['cell{}'.format(i) for i in range(
+			120)], tile=64, groups=8, level=0) as writer:
+		for chrom, (positions, which, values) in entries.items():
+			writer.write_sparse(chrom, positions, which, values)
+	kinds, sizes, raws, offsets, crcs = FigWigReader(broken)._group_index(3)
+	tile = int(numpy.flatnonzero(kinds)[5])
+	with open(broken, 'r+b') as handle:
+		handle.seek(int(offsets[tile]))
+		handle.write(b'\xff' * 8)
+	monkeypatch.setattr(figwig.figwig, '_CHUNKS_PER_THREAD', 1)
+	with pytest.raises(ValueError, match="tile {} of the group of 'cell24' is "
+			"corrupt".format(tile)):
+		FigWigReader(broken).read(['chr1'] * 40, numpy.arange(0, 4000, 100), 100,
+			labels=numpy.zeros(120, dtype=numpy.int64), n_jobs=8)
+	assert len(planned) == 1
+
+
 ###
 # The format's second round: groups in any order, exact integers, runs,
 # stored chunks, sums per bin, and the writer's and reader's guards

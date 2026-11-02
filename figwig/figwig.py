@@ -94,6 +94,7 @@ from ._figwig_kernels import _pread_runs
 from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
+from ._figwig_kernels import _read_groups
 from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
 from ._kernels import _compiled
@@ -4649,16 +4650,28 @@ class FigWigReader:
 							for g in groups_read) + 8 * len(tiles[2]) * len(groups_read)
 				else:
 					read_bytes = None
+				# A read with labels over several groups of integer tracks, whose
+				# sums are exact in any order, is cut into bands of windows that
+				# run side by side, where a group's tasks run at a time.
+				banded = accumulate and n_threads > 1 and len(groups_read) > 1 and \
+					self._exact_sums(read_ids, len(read_ids) * (bins or 1))
+				group_slots = []
 				for k, g in enumerate(groups_read):
 					mine = by_group[edges[k]:edges[k + 1]]
 					slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 					slots[self._slot_of[read_ids[mine]]] = channels[mine]
+					if banded:
+						group_slots.append(slots)
+						continue
 					planned, cut = self._plan(g, slots, tiles, starts, width, None,
 						mode, accumulate, bins or 1, most, stops, nan_mode, n_threads,
 						read_bytes)
 					tasks.extend(planned)
 					cut_inside |= cut
-				if len(tasks) < n_threads:
+				if banded:
+					tasks = self._plan_bands(groups_read, group_slots, tiles, tids,
+						starts, bins or 1, n_threads)
+				elif len(tasks) < n_threads:
 					tasks, cut = _split_tasks(tasks, n_threads, bins is not None and
 						bins > 1)
 					cut_inside |= cut
@@ -5161,6 +5174,56 @@ class FigWigReader:
 
 		return tasks
 
+	def _plan_bands(self, groups, group_slots, tiles, tids, starts, bins,
+		n_threads):
+		"""The tasks of a position-order read with labels over several
+		groups: its windows cut into bands of about equal counts in genome
+		order, a task per band with every group's chunks that the band's
+		windows touch. A band's windows are its own, so the bands' tasks run
+		side by side where a group's tasks ran a group at a time."""
+
+		rows, local, unique, first, inverse, total = tiles
+		n = len(starts)
+		place = self._tile_offsets[tids] * self.tile + starts
+		rank = numpy.empty(n, dtype=numpy.int64)
+		rank[numpy.argsort(place, kind='stable')] = numpy.arange(n)
+		n_bands = max(1, min(n, n_threads * _READ_BATCHES_PER_THREAD))
+		band = (rank * n_bands // max(n, 1))[rows]
+		order = numpy.argsort(band, kind='stable')
+		edges = numpy.searchsorted(band[order], numpy.arange(n_bands + 1))
+
+		# Every group's index over the read's tiles, a row per group.
+		index = [self._group_index(g) for g in groups]
+		kinds, sizes, raws, offsets, crcs = (numpy.stack([parts[k][unique] for
+			parts in index]) for k in range(5))
+		n_tracks_of = numpy.array([len(self._groups[g]) for g in groups],
+			dtype=numpy.int64)
+		slots = numpy.concatenate(group_slots)
+		slots_at = numpy.concatenate([[0], numpy.cumsum(n_tracks_of)])
+		groups = numpy.asarray(groups, dtype=numpy.int64)
+
+		tasks = []
+		for b in range(n_bands):
+			mine = order[edges[b]:edges[b + 1]]
+			if len(mine) == 0:
+				continue
+			distinct, at = numpy.unique(inverse[mine], return_inverse=True)
+			live = kinds[:, distinct] != 0
+			# Each pair's chunk among its own group's in the band.
+			number = numpy.cumsum(live, axis=1) - 1
+			pair_chunks = numpy.ascontiguousarray(numpy.where(live[:, at], number[:,
+				at], -1))
+			chunk_at = numpy.concatenate([[0], numpy.cumsum(live.sum(axis=1))])
+			bound = int((raws[:, distinct][live].astype(numpy.int64) + 8).sum())
+			tasks.append(_BandTask(self, groups, numpy.broadcast_to(unique[
+				distinct], live.shape)[live], kinds[:, distinct][live],
+				offsets[:, distinct][live], sizes[:, distinct][live].astype(
+				numpy.int64), crcs[:, distinct][live], bound, chunk_at, n_tracks_of,
+				slots, slots_at, pair_chunks, numpy.ascontiguousarray(local[mine] *
+				self.tile), numpy.ascontiguousarray(starts[rows[mine]]),
+				numpy.ascontiguousarray(rows[mine]), bins))
+		return tasks
+
 	def _plan_paired(self, pairs, tids, starts, lengths, width, mode, bins,
 		stops, nan_mode, n_jobs):
 		"""The tasks of a position-order read in which window j reads track
@@ -5294,6 +5357,8 @@ class FigWigReader:
 		# matter, or every read would start with a serial task.
 		if isinstance(tasks[0], _BlockTask):
 			kernels = (_read_blocks, _check_blocks)
+		elif isinstance(tasks[0], _BandTask):
+			kernels = (_read_groups,)
 		elif tasks[0].mode == 'list':
 			kernels = (_list_tiles, _check_chunks)
 		else:
@@ -5357,9 +5422,10 @@ class FigWigReader:
 				task.run(fd)
 
 			if summed is None or not copies:
-				if summed is None or not rest or isinstance(rest[0], _BlockTask) or (
-						not rest[0].accumulate and (len(rest) > len({task.g for task in
-						rest}) or sum(task.bound for task in rest) >= _POOL_BYTES)):
+				if summed is None or not rest or isinstance(rest[0], (_BlockTask,
+						_BandTask)) or (not rest[0].accumulate and (len(rest) > len({
+						task.g for task in rest}) or sum(task.bound for task in rest) >=
+						_POOL_BYTES)):
 					run_all(rest)
 				else:
 					a = 0
@@ -5781,6 +5847,50 @@ class _Task:
 			_read_tiles(*args)
 		else:
 			_read_tiles(*args, self.pair_tracks)
+
+
+class _BandTask:
+	"""One band of a position-order read with labels over several groups:
+	the windows of a stretch of the genome and every group's chunks they
+	touch, added into the output a group after another by one kernel call.
+	A window lies in one band, so the bands write their own rows and run
+	side by side."""
+
+	def __init__(self, reader, groups, gtiles, kinds, offsets, sizes, crcs,
+		bound, chunk_at, n_tracks_of, slots, slots_at, pair_chunks, pair_bases,
+		pair_starts, pair_rows, bins):
+		self.reader, self.groups, self.gtiles = reader, groups, gtiles
+		self.kinds, self.offsets, self.sizes, self.crcs = kinds, offsets, sizes, crcs
+		self.bound, self.chunk_at, self.n_tracks_of = bound, chunk_at, n_tracks_of
+		self.slots, self.slots_at, self.pair_chunks = slots, slots_at, pair_chunks
+		self.pair_bases, self.pair_starts = pair_bases, pair_starts
+		self.pair_rows, self.bins = pair_rows, bins
+		self.out, self.mode, self.accumulate = None, 'sum', True
+		self.entries = None
+
+	def run(self, fd):
+		reader = self.reader
+		if len(self.kinds) > 0:
+			data, positions, lengths = _load_batch(reader, fd, self.offsets,
+				self.sizes, self.kinds, self.bound, self.crcs)
+		else:
+			data = numpy.zeros(8, dtype=numpy.uint8)
+			positions = lengths = numpy.zeros(0, dtype=numpy.int64)
+		n_channels = self.out.shape[1]
+		scratch = numpy.zeros((0, 0), dtype=numpy.float64)
+		if n_channels * reader.tile * 8 <= _SCRATCH_BYTES:
+			scratch = numpy.empty((n_channels, reader.tile), dtype=numpy.float64)
+		failed = numpy.zeros(len(self.kinds), dtype=numpy.int64)
+		j = _read_groups(reader.tile, data, positions, lengths, self.kinds,
+			self.chunk_at, self.n_tracks_of, self.slots, self.slots_at,
+			self.pair_chunks, self.pair_bases, self.pair_starts, self.pair_rows,
+			self.out, scratch, self.bins, failed)
+		if j >= 0:
+			k = int(numpy.argmax(failed))
+			raise ValueError("a chunk of {} cannot be read: tile {} of the "
+				"group of {!r} is corrupt, or the file is truncated.".format(
+				reader.path, int(self.gtiles[k]), reader.tracks[reader._groups[
+				self.groups[j]][0]]['name']))
 
 
 class _BlockTask:
