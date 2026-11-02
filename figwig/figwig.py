@@ -4696,12 +4696,15 @@ class FigWigReader:
 		# cut inside a window. Where those tasks are fewer than the threads
 		# and hold at least _SPLIT_BYTES of chunks a part, each window is read
 		# instead as parts of whole bins, about a part per thread, each part a
-		# read of its own on the pool, and each bin is summed from the same
-		# tiles in the same order as in the whole window.
+		# read of its own on the pool. A part sums the same values as one
+		# thread, in its order unless windows overlap, where the whole read
+		# bins a chunk several share from a scratch tile: float sums can differ
+		# from one thread's, and from several threads' on main, in rounding.
 		if bins is not None and bins > 1 and stops is None and out is None and \
 				not sparse and self.order == 'positions' and 0 < n < n_jobs and \
-				width >= _SPLIT_TILES * self.tile and len(windows._bad) == 0 and all(
-				name in self._tids for name in windows.names):
+				n_channels > 0 and width >= _SPLIT_TILES * self.tile and len(
+				windows._bad) == 0 and all(name in self._tids for name in
+				windows.names):
 			groups = numpy.unique(self._group_of[ids]).tolist()
 			if len(groups) * n >= n_jobs:
 				groups = []
@@ -4721,10 +4724,19 @@ class FigWigReader:
 					parts)
 				part_starts = (windows.starts[:, None] + numpy.arange(parts) *
 					part).ravel()
-				got = numpy.concatenate(list(self._pool_for(n * parts).map(lambda k:
-					self._read(part_chroms[k:k + 1], part_starts[k:k + 1], part,
-					tracks, None, dtype, 1, False, labels, bins, None, nan).reshape(1,
-					-1, part // bins), range(n * parts))))
+				pool = self._pool_for(n * parts)
+				futures = [pool.submit(self._read, part_chroms[k:k + 1],
+					part_starts[k:k + 1], part, tracks, None, dtype, 1, False, labels,
+					bins, None, nan) for k in range(n * parts)]
+				try:
+					wait(futures)
+				except BaseException:
+					for future in futures:
+						future.cancel()
+					wait(futures)
+					raise
+				got = numpy.concatenate([future.result().reshape(1, -1, part //
+					bins) for future in futures])
 				got = got.reshape(n, parts, -1, part // bins)
 				return numpy.ascontiguousarray(got.transpose(0, 2, 1, 3).reshape(n,
 					got.shape[2], -1)[..., :out_width].reshape((n, out_width) if

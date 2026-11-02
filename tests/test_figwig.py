@@ -2378,18 +2378,19 @@ def test_labels_over_groups_run_in_bands(cells, tmp_path, monkeypatch):
 
 def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 	"""A few long windows summed per bin are read as parts of whole bins on
-	the threads, and give the sums of the whole windows to the bit: float
-	tracks with NaN under every nan mode, labels, one track, windows past a
-	chromosome's end, and a width whose bins do not split evenly."""
+	the threads, and give one thread's sums of the whole windows, to the
+	bit: integer tracks under every nan mode, labels, one track, windows
+	past a chromosome's end and a width whose bins do not split evenly, and
+	float tracks with NaN, of values that cancel, under every nan mode.
+	Labels that leave out every track give an empty result."""
 
 	path = str(tmp_path / 'b.fw')
 	rng = numpy.random.default_rng(53)
-	values = rng.lognormal(0, 3, (1, 6, 5000))
+	values = rng.integers(0, 50, (1, 6, 5000)).astype(numpy.float64)
 	values[:, :, rng.integers(0, 5000, 300)] = 0
-	values[0, 2, rng.integers(0, 5000, 40)] = numpy.nan
 	write_figwig(path, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
-		'float64' if i % 2 else 'float32'} for i in range(6)], 'chr1', [0],
-		values, tile=64, groups=3)
+		'int16' if i % 2 else 'uint8'} for i in range(6)], 'chr1', [0], values,
+		tile=64, groups=3)
 	reader = FigWigReader(path)
 	monkeypatch.setattr(figwig.figwig, '_SPLIT_BYTES', 1)
 	whole = FigWigReader._read
@@ -2405,6 +2406,25 @@ def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 		many = reader.read('chr1', starts, width, bins=bins, n_jobs=8, **kwargs)
 		assert len(calls) > 2 + len(starts) and set(calls[2:]) == {1}, calls
 		assert many.shape == one.shape and many.dtype == one.dtype
+		assert_identical(many, one)
+
+	empty = reader.read('chr1', [0], 4096, bins=64, labels=[-1] * 6, n_jobs=8)
+	assert empty.shape == (1, 0, 64)
+
+	floats = str(tmp_path / 'f.fw')
+	values = rng.lognormal(0, 4, (1, 4, 5000)) * rng.choice([-1, 1], (1, 4,
+		5000))
+	values[0, 1, rng.integers(0, 5000, 40)] = numpy.nan
+	write_figwig(floats, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'float64' if i % 2 else 'float32'} for i in range(4)], 'chr1', [0],
+		values, tile=64)
+	reader = FigWigReader(floats)
+	for kwargs in ({}, {'nan': 'skip'}, {'nan': 'count'}, {'labels': [0, 1, 0,
+			1]}):
+		calls.clear()
+		one = reader.read('chr1', [0], 4096, bins=16, n_jobs=1, **kwargs)
+		many = reader.read('chr1', [0], 4096, bins=16, n_jobs=8, **kwargs)
+		assert len(calls) > 3 and set(calls[2:]) == {1}, calls
 		assert_identical(many, one)
 
 
