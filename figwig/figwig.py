@@ -5129,23 +5129,31 @@ class FigWigReader:
 
 		def run_all(tasks_):
 			# The tasks in n_threads shares, so that a read on fewer threads
-			# than the pool has takes no more than it asked for, each share
-			# taking the next task as it finishes one, so that tasks of
-			# unequal sizes even out. Every share ends before the file is
-			# closed, and a failure stops the others taking more.
+			# than the pool has takes no more than it asked for. A group's
+			# tasks are cut to about equal bytes, and each share takes every
+			# n-th; the tasks of several groups are not, and each share takes
+			# the next task as it finishes one, so that they even out. Every
+			# share ends before the file is closed, and a failure stops the
+			# others taking more.
 			if pool is None or len(tasks_) <= 1:
 				for task in tasks_:
 					task.run(fd)
 				return
 
+			shares = min(n_threads, len(tasks_))
+			dealt = len({getattr(task, 'g', None) for task in tasks_}) == 1
 			queue = iter(tasks_)
 			lock = threading.Lock()
 			failed = []
 
-			def run_share():
+			def run_share(k):
+				mine = iter(tasks_[k::shares])
 				while not failed:
-					with lock:
-						task = next(queue, None)
+					if dealt:
+						task = next(mine, None)
+					else:
+						with lock:
+							task = next(queue, None)
 					if task is None:
 						return
 					try:
@@ -5154,8 +5162,7 @@ class FigWigReader:
 						failed.append(True)
 						raise
 
-			futures = [pool.submit(run_share) for _ in range(min(n_threads, len(
-				tasks_)))]
+			futures = [pool.submit(run_share, k) for k in range(shares)]
 			try:
 				wait(futures)
 			except BaseException:
