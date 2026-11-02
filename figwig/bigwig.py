@@ -837,7 +837,14 @@ def _run(reads, n_jobs):
 
 			pool = _shared_pool(n_threads)
 			futures = [pool.submit(share) for _ in range(n_threads)]
-			wait(futures)
+			try:
+				wait(futures)
+			except BaseException:
+				# An interrupt here stops the shares, which end before the
+				# files are closed.
+				failed.append(True)
+				wait(futures)
+				raise
 			for future in futures:
 				future.result()
 	finally:

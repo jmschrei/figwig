@@ -184,6 +184,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 			for i in members:
 				os.replace(partials[i], paths[i])
 		except BaseException as error:
+			reading.shutdown()
 			for writer in writers.values():
 				writer.__exit__(type(error), error, error.__traceback__)
 			for i in members:

@@ -4449,15 +4449,24 @@ class FigWigReader:
 		if inner == 1 and n_jobs > 1:
 			# In at most _MIN_READ_THREADS shares, since more took longer:
 			# 90,543 Fiber-seq reads took 1.5 s on 4 threads and 2.9 s on 32.
+			# A share stops at its first failing batch, and the first failing
+			# batch of all raises, as one after another the first would.
 			found = [None] * len(batches)
 			shares = min(n_jobs, _MIN_READ_THREADS)
+			errors = []
 
 			def share(k):
 				for j in range(k, len(batches), shares):
-					found[j] = one(batches[j])
+					try:
+						found[j] = one(batches[j])
+					except Exception as error:
+						errors.append((j, error))
+						return
 
 			list(self._pool_for(shares).map(share, range(min(shares, len(
 				batches)))))
+			if errors:
+				raise min(errors, key=lambda error: error[0])[1]
 		else:
 			found = [one(batch) for batch in batches]
 		out = numpy.zeros(len(starts), dtype=found[0].dtype)
@@ -5144,7 +5153,12 @@ class FigWigReader:
 
 			futures = [pool.submit(run_share) for _ in range(min(n_threads, len(
 				tasks_)))]
-			wait(futures)
+			try:
+				wait(futures)
+			except BaseException:
+				failed.append(True)
+				wait(futures)
+				raise
 			for future in futures:
 				future.result()
 
