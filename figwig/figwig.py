@@ -5326,6 +5326,7 @@ class FigWigReader:
 			lengths)
 		reach = int((every_end - starts).max())
 		by_start = numpy.lexsort((starts, tids))
+		by_chrom = numpy.argsort(tids, kind='stable')
 		placed = tids[by_start] * (1 << 34) + starts[by_start]
 		run_chroms = runs[heads] % n_chroms
 		tails = numpy.append(heads[1:], len(runs)) - 1
@@ -5334,6 +5335,8 @@ class FigWigReader:
 		high = numpy.searchsorted(placed, run_chroms * (1 << 34) + blocks['last'][
 			tails].astype(numpy.int64), side='right')
 		per_run = numpy.maximum(high - low, 0)
+		whole = (low == numpy.searchsorted(placed, run_chroms * (1 << 34))) & (
+			high == numpy.searchsorted(placed, (run_chroms + 1) * (1 << 34)))
 		limits = numpy.cumsum(per_run)
 		parts_rows, parts_blocks = [], []
 		r0 = 0
@@ -5346,10 +5349,16 @@ class FigWigReader:
 			if total == 0:
 				continue
 			run_of = numpy.repeat(numpy.arange(r_at, r1), counts)
-			windows = by_start[numpy.repeat(low[r_at:r1], counts) + numpy.arange(
-				total) - numpy.repeat(numpy.cumsum(counts) - counts, counts)]
-			mine = numpy.lexsort((windows, run_of))
-			run_of, windows = run_of[mine], windows[mine]
+			place = numpy.repeat(low[r_at:r1], counts) + numpy.arange(total) - \
+				numpy.repeat(numpy.cumsum(counts) - counts, counts)
+			# A run that every window on its chromosome can reach takes them
+			# in the windows' order, by_chrom's; the others are sorted to it.
+			from_whole = numpy.repeat(whole[r_at:r1], counts)
+			windows = numpy.where(from_whole, by_chrom[place], by_start[place])
+			if not from_whole.all():
+				part = numpy.flatnonzero(~from_whole)
+				windows[part] = windows[part][numpy.lexsort((windows[part],
+					run_of[part]))]
 			lo = numpy.searchsorted(lasts, (run_of << 32) | starts[windows],
 				side='left')
 			hi = numpy.searchsorted(firsts, (run_of << 32) | every_end[windows],
