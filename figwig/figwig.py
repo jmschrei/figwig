@@ -2938,11 +2938,18 @@ class FigWigWriter:
 				return record + self._summary_record(g)
 
 			# Each group's record deflates its live tiles and summary, which
-			# for thousands of groups is seconds on one thread.
+			# for thousands of groups is seconds on one thread; the groups go
+			# to the pool a few thousand at a time, since a track-order file
+			# of 90,000 reads made a task of each tiny record.
+			n_groups = len(self._groups)
 			if self._pool is None:
-				records = [record_of(g) for g in range(len(self._groups))]
+				records = [record_of(g) for g in range(n_groups)]
 			else:
-				records = list(self._pool.map(record_of, range(len(self._groups))))
+				cuts = numpy.linspace(0, n_groups, min(n_groups, 4 * self.n_jobs) +
+					1).astype(numpy.int64).tolist()
+				records = [record for part in self._pool.map(lambda k: [record_of(g)
+					for g in range(cuts[k], cuts[k + 1])], range(len(cuts) - 1)) for
+					record in part]
 			index_size = self._index_builder.size() if self._index_builder else 0
 			index_at = self._file.tell()
 			if index_size:
