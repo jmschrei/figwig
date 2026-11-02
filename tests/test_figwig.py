@@ -2312,6 +2312,37 @@ def test_labels_over_groups_run_in_bands(cells, tmp_path, monkeypatch):
 	assert len(planned) == 1
 
 
+def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
+	"""write_sparse checks the entries of tracks with a declared integer
+	dtype in one pass: the first entry, in the order given, whose value is
+	NaN or not an integer names its track, then the first declared track
+	with a value outside its dtype is named, and tracks without a declared
+	integer dtype take any value."""
+
+	path = str(tmp_path / 'd.fw')
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'},
+		{'name': 'c', 'dtype': 'float32'}, {'name': 'd'}]
+	for which, values, message in (
+			([0, 1, 1, 0], [3, numpy.nan, 1.5, 2], "'b' is int16, and a value is NaN"),
+			([1, 0, 1], [2, 2.5, numpy.nan], "'a' is uint8, and a value is not an "
+				"integer"),
+			([2, 3, 1, 0], [numpy.nan, 0.5, 40000, 300], "'a' is uint8, and a value "
+				"is outside 0 to 255"),
+			([2, 3, 1, 0], [numpy.nan, 0.5, -40000, 255], "'b' is int16, and a value "
+				"is outside -32768 to 32767"),
+			([1, 0], numpy.array([5, 256]), "'a' is uint8, and a value is outside")):
+		with pytest.raises(ValueError, match=message):
+			with FigWigWriter(path, {'chr1': 100}, tracks, tile=64) as writer:
+				writer.write_sparse('chr1', numpy.arange(len(which)) * 3, which,
+					numpy.asarray(values))
+	with FigWigWriter(path, {'chr1': 100}, tracks, tile=64) as writer:
+		writer.write_sparse('chr1', [0, 3, 6, 9, 12], [0, 1, 2, 3, 1],
+			numpy.array([255, -32768, numpy.nan, 0.25, 32767]))
+	y = FigWigReader(path).read('chr1', [0], 13, dtype='float64')[0]
+	assert y[[0, 1, 1, 3], [0, 3, 12, 9]].tolist() == [255, -32768, 32767, 0.25]
+	assert numpy.isnan(y[2, 6])
+
+
 ###
 # The format's second round: groups in any order, exact integers, runs,
 # stored chunks, sums per bin, and the writer's and reader's guards

@@ -60,6 +60,7 @@ from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
+from ._figwig_kernels import _declared_ranges
 from ._figwig_kernels import _sorted_tile_sums
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
@@ -1663,20 +1664,18 @@ class FigWigWriter:
 				.format(j, names[codes[j]], positions[j]))
 
 		# Declared dtypes are checked over all their tracks' entries at once,
-		# with each track's range found in one pass.
+		# with each track's range found in one pass of a kernel.
 		declared = ids[self._declared_integers()[ids]].tolist()
 		if declared:
-			mask = numpy.isin(track_ids, declared)
-			block = values[mask].astype(numpy.float64)
-			if numpy.isnan(block).any() or (block != numpy.floor(block)).any():
-				bad = numpy.flatnonzero(mask)[numpy.flatnonzero(numpy.isnan(block) |
-					(block != numpy.floor(block)))[0]]
-				_check_values_fit(self.tracks[int(track_ids[bad])]['name'],
-					self.tracks[int(track_ids[bad])]['dtype'], values[bad:bad + 1])
 			lows = numpy.full(len(self.tracks), numpy.inf)
 			highs = numpy.full(len(self.tracks), -numpy.inf)
-			numpy.minimum.at(lows, track_ids[mask], block)
-			numpy.maximum.at(highs, track_ids[mask], block)
+			marked = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
+			marked[declared] = True
+			bad = _declared_ranges(numpy.ascontiguousarray(track_ids), values,
+				marked, lows, highs)
+			if bad >= 0:
+				_check_values_fit(self.tracks[int(track_ids[bad])]['name'],
+					self.tracks[int(track_ids[bad])]['dtype'], values[bad:bad + 1])
 			for i in declared:
 				info = numpy.iinfo(self.tracks[i]['dtype'])
 				if lows[i] < info.min or highs[i] > info.max:

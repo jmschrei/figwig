@@ -624,6 +624,28 @@ def _sorted_tile_sums(positions, values, tile, tiles, sums):
 
 
 @numba.njit(nogil=True, cache=True)
+def _declared_ranges(tracks, values, declared, lows, highs):
+	"""Each declared track's lowest and highest value among the entries,
+	into `lows` and `highs`, in one pass; entry k is of track tracks[k], and
+	declared[t] whether track t has a declared integer dtype. Returns the
+	first entry of a declared track whose value is NaN or not an integer, as
+	soon as it is found, or -1."""
+
+	for k in range(tracks.shape[0]):
+		t = tracks[k]
+		if not declared[t]:
+			continue
+		v = numpy.float64(values[k])
+		if v != v or v != numpy.floor(v):
+			return k
+		if v < lows[t]:
+			lows[t] = v
+		if v > highs[t]:
+			highs[t] = v
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
 def _any_infinite(values):
 	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
 	pass without a branch, which vectorizes."""
