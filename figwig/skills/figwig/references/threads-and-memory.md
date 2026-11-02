@@ -20,8 +20,16 @@ stable, and the last section measures the numbers where they matter.
   ends one. Gains end near 8 threads for sparse
   reads and continue to 32 for dense float tracks, which read at the
   defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. `sums`
-  run every group at once, and `paired=True` sums its batches of integer
-  tracks side by side in position order. Sums in position order take no copy of the output per
+  run every group at once; `paired=True` over integer tracks and short
+  intervals is one read, and otherwise sums its batches of integer tracks
+  side by side in position order; `labels=` over several groups of integer
+  tracks runs in bands of windows side by side; a few long windows summed
+  per bin (a browser's view) are read as parts of whole bins, whose float
+  sums differ from one thread's only in rounding. The indexes a read needs
+  load on the calling thread while each spans fewer than 131,072 tiles, and
+  from the first that spans more on up to 8 threads, each holding the one
+  it lays out (a browser session of six genome-wide groups peaks at 169 MB
+  on 8 threads, against 146 MB one at a time). Sums in position order take no copy of the output per
   thread; track order takes one per thread, which the 8 GiB guard counts.
 - In DataLoader workers pass `n_jobs=1`; `num_workers` is the parallelism.
 

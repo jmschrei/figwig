@@ -70,8 +70,19 @@ group's batches at once, since each group's tracks have their own cells,
 unless each group has one batch and together they hold less than 1 MB of
 chunks. In track order sums take a copy of the output per thread, which the
 8 GiB guard counts. In position order ``sums(..., paired=True)`` sums its
-batches of tracks side by side, a thread each, where their sums are exact
-in any order, as integer tracks' are.
+batches of tracks side by side, a thread each, where their sums are exact in
+any order, as integer tracks' are, and over integer tracks and intervals of
+a few tiles each it is one read, each interval with its own track's chunks
+alone. A read with labels over several groups of integer tracks runs in
+bands of windows side by side, where it ran a group at a time. A few long
+windows summed per bin, as a genome browser's views are, are read as parts
+of whole bins, a part per thread, whose float sums differ from one thread's
+only in rounding. The indexes a read needs load on the calling thread
+while each spans fewer than 131,072 tiles, since threads that lay out small
+indexes mostly wait for each other, and from the first that spans more the
+rest load on up to 8 threads, each holding the one it lays out: a process
+running a browser's session over six genome-wide count tracks peaked at
+169 MB on 8 threads, where loading them one at a time peaked at 146 MB.
 
 Writing
 -------
