@@ -2160,6 +2160,70 @@ def test_track_order_blocks_and_calls(tmp_path, ref, monkeypatch):
 		reader.stats['nonzero'][0]),)
 
 
+# The tile sums of a value beyond float32 overflow as they are cast, on main
+# too.
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_track_order_tracks_encode_together(tmp_path, monkeypatch):
+	"""Many tracks' blocks, encoded a task of tracks at a time, give one
+	file at any n_jobs, with or without blocks encoded before a call ends,
+	and a value beyond float32 raises, naming its track."""
+
+	monkeypatch.setattr(figwig.figwig, '_BLOCK_ENTRIES', 16)
+	rng = numpy.random.default_rng(12)
+	sizes = {'chr1': 4000, 'chr2': 900}
+	tracks = [{'name': 't{}'.format(i), 'dtype': dtype} for i, dtype in
+		enumerate(['uint8', 'float32', 'int16', None] * 10)]
+	calls = []
+	for chrom, length in sizes.items():
+		span = length // 3
+		for c in range(3):
+			key = numpy.unique(rng.integers(0, 40 * span, int(rng.integers(2000,
+				6000))))
+			ids = key // span
+			values = rng.integers(1, 100, len(key)).astype(numpy.float64)
+			values[ids % 4 == 1] += 0.5
+			calls.append((chrom, c * span + key % span, ids, values))
+
+	def write(path, n_jobs, flagged=None):
+		with FigWigWriter(path, sizes, tracks, order='tracks', level=6,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, ids, values in calls:
+				if flagged is not None:
+					values = numpy.where(ids == flagged, 1e39, values)
+				writer.write_sparse(chrom, positions, ids, values)
+
+	paths = []
+	for n_jobs, entries in ((1, 1 << 20), (1, 50), (4, 1 << 20)):
+		monkeypatch.setattr(figwig.figwig, '_BLOCK_JOB_ENTRIES', entries)
+		paths.append(str(tmp_path / 'f{}-{}.fw'.format(n_jobs, entries)))
+		write(paths[-1], n_jobs)
+	data = [pathlib.Path(path).read_bytes() for path in paths]
+	assert data[0] == data[1] == data[2]
+
+	# Each block record spans exactly its own entries of its track.
+	reader = FigWigReader(paths[0])
+	assert reader.stats['nonzero'].sum() == sum(len(c[1]) for c in calls)
+	names = list(sizes)
+	for t in range(len(tracks)):
+		blocks = reader._read_track_index(t)
+		for block in blocks:
+			chrom = names[int(block['chrom'])]
+			mine = numpy.concatenate([positions[ids == t] for c, positions, ids, _
+				in calls if c == chrom])
+			assert ((mine >= block['first']) & (mine <= block['last'])).sum() == \
+				block['n']
+	for chrom, positions, ids, values in calls[:2]:
+		got = reader.read(chrom, positions, 1, tracks=ids.tolist(), dtype=
+			'float64')
+		numpy.testing.assert_array_equal(got[numpy.arange(len(ids)), numpy.arange(
+			len(ids)), 0], numpy.where(ids % 4 == 1, values.astype(numpy.float32),
+			values))
+
+	for n_jobs in (1, 4):
+		with pytest.raises(ValueError, match="value of track 't7' lies beyond"):
+			write(str(tmp_path / 'bad.fw'), n_jobs, flagged=7)
+
+
 def test_track_order_writer(tmp_path):
 	path = str(tmp_path / 't.fw')
 	writer = FigWigWriter(path, {'chr1': 300, 'chr2': 100}, ['a', 'b'],

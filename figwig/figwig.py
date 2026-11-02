@@ -61,7 +61,6 @@ from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
 from ._figwig_kernels import _declared_ranges
-from ._figwig_kernels import _sorted_tile_sums
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
 from ._figwig_kernels import _CODE_SHIFT
@@ -77,7 +76,8 @@ from ._figwig_kernels import _RUNS
 from ._figwig_kernels import _STORED
 from ._figwig_kernels import _check_blocks
 from ._figwig_kernels import _check_chunks
-from ._figwig_kernels import _encode_blocks
+from ._figwig_kernels import _encode_tracks_blocks
+from ._figwig_kernels import _tracks_tile_sums
 from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_pieces
 from ._figwig_kernels import _encode_tiles
@@ -212,6 +212,7 @@ _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
 _INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at least
 _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
+_BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
@@ -997,6 +998,7 @@ class FigWigWriter:
 		self._inflight = []
 		self._folds = []
 		self._block_jobs = []
+		self._block_entries = 0
 		self._copies = True
 		self._sorted_entries = False
 		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
@@ -2594,74 +2596,60 @@ class FigWigWriter:
 		else:
 			self._pending[t] = None
 
-		first = numpy.arange(0, cut + 1, _BLOCK_ENTRIES)
-		if first[-1] != cut:
-			first = numpy.append(first, cut)
-		job = (t, tid, positions[:cut], values[:cut], first)
-		if self._pool is None:
-			self._inflight.append((self._blocks_task(*job), t, 'blocks'))
-		else:
-			self._block_jobs.append(job)
+		self._block_jobs.append((t, tid, positions[:cut], values[:cut]))
+		self._block_entries += cut
+		if self._pool is None and self._block_entries >= _BLOCK_JOB_ENTRIES:
+			self._submit_blocks()
 
 	def _submit_blocks(self):
-		"""Hand the tracks' blocks from `_flush_track` to the pool in order,
-		packing consecutive tracks' into a task until it holds a share of
-		their entries, since a task per track and chromosome cost this
-		thread its dispatch and bookkeeping. Without a pool `_flush_track`
-		encodes them itself."""
+		"""Encode the tracks' blocks from `_flush_track` in order, on the
+		pool when there is one, packing consecutive tracks' into a task until
+		it holds a share of their entries, since a task per track and
+		chromosome cost this thread its dispatch and bookkeeping."""
 
 		jobs = self._block_jobs
 		if len(jobs) == 0:
 			return
 		self._block_jobs = []
-		total = sum(len(job[2]) for job in jobs)
+		total, self._block_entries = self._block_entries, 0
 		share = max(1, total // (_BATCHES_PER_THREAD * self.n_jobs))
 		task, size = [], 0
 		for k, job in enumerate(jobs):
 			task.append(job)
 			size += len(job[2])
 			if size >= share or k == len(jobs) - 1:
-				if len(task) == 1:
-					args = (self._blocks_task,) + task[0]
-					t, kind = task[0][0], 'blocks'
-				else:
-					args = (self._blocks_tasks, task)
-					t, kind = [job[0] for job in task], 'packed blocks'
-				result = args[0](*args[1:]) if self._pool is None else \
-					self._pool.submit(*args)
-				self._inflight.append((result, t, kind))
+				result = self._blocks_tasks(task) if self._pool is None else \
+					self._pool.submit(self._blocks_tasks, task)
+				self._inflight.append((result, [job[0] for job in task],
+					'packed blocks'))
 				task, size = [], 0
 
 	def _blocks_tasks(self, jobs):
-		"""`_blocks_task` of each track's blocks, in order, joined for the
-		writing thread: one buffer of every track's blocks, and per track its
-		block records, with offsets from the buffer's start, its stats and
-		its summary."""
+		"""Encode and compress the blocks of several tracks' entries from
+		`_flush_track`, in order, in one pass. Returns (the blocks' bytes, the
+		block records, with offsets from the bytes' start, each track's
+		number of blocks, each track's stats, each track's summary)."""
 
-		results = [self._blocks_task(*job) for job in jobs]
-		parts, records, at = [], [], 0
-		for compressed, sizes, _, _, where, _, _, _ in results:
-			total = int(sizes.sum())
-			parts.append(compressed[:total])
-			where['offset'] = at + numpy.cumsum(sizes) - sizes
-			records.append(where)
-			at += total
-		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
-			dtype=numpy.uint8), records, [r[6] for r in results], [r[7] for r in
-			results])
-
-	def _blocks_task(self, t, tid, positions, values, first):
-		"""Encode and compress one track's blocks. Returns (compressed bytes,
-		sizes, raw sizes, kind bytes, block records, stats)."""
-
-		n = len(first) - 1
-		out = numpy.empty(16 * n + 12 * len(positions) + 16, dtype=numpy.uint8)
+		counts = numpy.array([len(job[2]) for job in jobs], dtype=numpy.int64)
+		cuts = numpy.zeros(len(jobs) + 1, dtype=numpy.int64)
+		numpy.cumsum(counts, out=cuts[1:])
+		if len(jobs) == 1:
+			positions, values = jobs[0][2], jobs[0][3]
+		else:
+			positions = numpy.concatenate([job[2] for job in jobs])
+			values = numpy.concatenate([job[3] for job in jobs])
+		blocks = -(-counts // _BLOCK_ENTRIES)
+		n = int(blocks.sum())
+		classes = numpy.array([self._classes[job[0]][0] for job in jobs],
+			dtype=numpy.int64)
+		out = numpy.empty(16 * n + 12 * len(positions) + 16 * len(jobs),
+			dtype=numpy.uint8)
 		bounds = numpy.zeros(n + 1, dtype=numpy.int64)
 		kinds = numpy.zeros(n, dtype=numpy.uint8)
-		stats = numpy.zeros((1, 6), dtype=numpy.float64)
+		stats = numpy.zeros((len(jobs), 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
-		_encode_blocks(positions, values, first, int(self._classes[t][0]), out,
-			bounds, kinds, stats)
+		_encode_tracks_blocks(positions, values, cuts, _BLOCK_ENTRIES, classes,
+			out, bounds, kinds, stats)
 		raw = numpy.diff(bounds)
 		data = out[:bounds[-1]]
 		if self.level == 0:
@@ -2669,26 +2657,38 @@ class FigWigWriter:
 		else:
 			compressed, sizes = _compress_blocks(self.engine, self.level, data,
 				bounds)
+		ends = numpy.cumsum(sizes)
 
+		# Block i is the i - starts[j]-th of its track j.
+		owner = numpy.repeat(numpy.arange(len(jobs)), blocks)
+		starts = numpy.cumsum(blocks) - blocks
+		first = cuts[owner] + (numpy.arange(n) - starts[owner]) * _BLOCK_ENTRIES
+		last = numpy.minimum(first + _BLOCK_ENTRIES, cuts[owner + 1])
 		records = numpy.zeros(n, dtype=_BLOCK)
-		records['chrom'] = tid
-		records['first'] = positions[first[:-1]]
-		records['last'] = positions[first[1:] - 1]
-		records['n'] = numpy.diff(first)
+		records['chrom'] = numpy.array([job[1] for job in jobs])[owner]
+		records['first'] = positions[first]
+		records['last'] = positions[last - 1]
+		records['n'] = last - first
+		records['offset'] = ends - sizes
 		records['size'] = sizes
 		records['raw'] = raw
 		records['kind'] = kinds
-		records['crc'] = _crcs(compressed, numpy.concatenate([[0], numpy.cumsum(
-			sizes)]))
-		summary = None
+		records['crc'] = _crcs(compressed, numpy.concatenate([[0], ends]))
+
+		summaries = [None] * len(jobs)
 		if self._summaries:
 			# NaN bases are no part of the sums, as in position order.
 			tiles = numpy.empty(len(positions), dtype=numpy.int64)
 			sums = numpy.empty(len(positions), dtype=numpy.float64)
-			k = _sorted_tile_sums(positions, values, self.tile, tiles, sums)
-			summary = (self._tile_offsets[tid] + tiles[:k], sums[:k].astype(
-				numpy.float32)[:, None])
-		return compressed, sizes, raw, kinds, records, None, stats, summary
+			found = numpy.zeros(len(jobs), dtype=numpy.int64)
+			_tracks_tile_sums(positions, values, cuts, self.tile, tiles, sums,
+				found)
+			for j, job in enumerate(jobs):
+				a = cuts[j]
+				summaries[j] = (self._tile_offsets[job[1]] + tiles[a:a + found[j]],
+					sums[a:a + found[j]].astype(numpy.float32)[:, None])
+		total = int(ends[-1]) if n else 0
+		return compressed[:total], records, blocks, stats, summaries
 
 	def _drain(self, keep=0):
 		"""Fold in the statistics of the call's batches encoded from items,
@@ -2816,27 +2816,27 @@ class FigWigWriter:
 			offset += total
 
 	def _write_packed_blocks(self, result, tracks):
-		"""Write a packed task's tracks' blocks, as `_write_result` writes
-		each track's: their bytes in one write, then each track's stats,
-		summary and block records, in order."""
+		"""Write a packed task's tracks' blocks: fold in their stats, then
+		write their bytes in one write and record each track's summary and
+		blocks, in order."""
 
-		compressed, records, stats, summaries = result
-		offset = self._file.tell()
+		compressed, records, blocks, stats, summaries = result
+		# Each track is its own group, so stats row j is track tracks[j]'s.
+		flagged = _fold_batch(self._stats, numpy.array(tracks, dtype=numpy.int64),
+			stats)
+		if flagged >= 0:
+			raise ValueError("a value of track {!r} lies beyond float32's "
+				"range; declare the track float64 to keep it.".format(
+				self.tracks[int(flagged)]['name']))
+		records['offset'] += self._file.tell()
 		self._file.write(compressed)
-		for t, where, batch, summary in zip(tracks, records, stats, summaries):
-			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[t],
-				dtype=numpy.int64), numpy.ascontiguousarray(batch,
-				dtype=numpy.float64))
-			if flagged >= 0:
-				raise ValueError("a value of track {!r} lies beyond float32's "
-					"range; declare the track float64 to keep it.".format(
-					self.tracks[int(flagged)]['name']))
+		at = 0
+		for t, n, summary in zip(tracks, blocks.tolist(), summaries):
 			if summary is not None:
 				self._sums[t].append(summary)
-			if len(where) == 0:
-				continue
-			where['offset'] += offset
-			self._blocks[t].append(where)
+			if n:
+				self._blocks[t].append(records[at:at + n])
+				at += n
 
 	def _write_result(self, result, g, kind):
 		"""Write one batch's chunks or blocks to the file, record them in the
@@ -2864,11 +2864,6 @@ class FigWigWriter:
 		offset = self._file.tell()
 		self._file.write(compressed[:sizes.sum()])
 		total = int(sizes.sum())
-
-		if kind == 'blocks':
-			where['offset'] = offset + numpy.cumsum(sizes) - sizes
-			self._blocks[g].append(where)
-			return
 
 		live = numpy.zeros(len(where), dtype=_LIVE)
 		live['tile'] = where

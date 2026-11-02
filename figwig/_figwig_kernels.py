@@ -1541,6 +1541,45 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 
 
 @numba.njit(nogil=True, cache=True)
+def _encode_tracks_blocks(positions, values, cuts, size, classes, out, bounds,
+	kinds, stats):
+	"""`_encode_blocks` of several tracks' entries one after another, each
+	cut as `_flush_track` cuts it: track j's entries are cuts[j] to
+	cuts[j + 1] - 1, in blocks of `size` and a last of the rest, of class
+	classes[j], with its statistics row in stats[j]. Block k's bytes are
+	out[bounds[k]:bounds[k + 1]]. Returns the number of blocks."""
+
+	most = 0
+	for j in range(cuts.shape[0] - 1):
+		most = max(most, cuts[j + 1] - cuts[j])
+	first = numpy.empty(most // size + 2, dtype=numpy.int64)
+	k = 0
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		n = b - a
+		n_blocks = (n + size - 1) // size
+		for i in range(n_blocks + 1):
+			first[i] = min(i * size, n)
+		_encode_blocks(positions[a:b], values[a:b], first[:n_blocks + 1],
+			classes[j], out, bounds[k:k + n_blocks + 1], kinds[k:k + n_blocks],
+			stats[j:j + 1])
+		k += n_blocks
+	return k
+
+
+@numba.njit(nogil=True, cache=True)
+def _tracks_tile_sums(positions, values, cuts, tile, tiles, sums, counts):
+	"""`_sorted_tile_sums` of several tracks' entries, track j's being
+	cuts[j] to cuts[j + 1] - 1: track j's tiles and sums go to tiles and
+	sums from cuts[j], and their number to counts[j]."""
+
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		counts[j] = _sorted_tile_sums(positions[a:b], values[a:b], tile,
+			tiles[a:b], sums[a:b])
+
+
+@numba.njit(nogil=True, cache=True)
 def _inflate_chunks(uncompress, data, starts, sizes, stored, buffer, positions,
 	lengths, length):
 	"""Inflate chunks one after another into `buffer`, each starting on an
