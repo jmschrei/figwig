@@ -37,6 +37,7 @@ chunks and blocks; `docs/figwig.rst` gives every field.
 
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import stat
@@ -197,6 +198,7 @@ _SUMMARY_BYTES = 1 << 28
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
+_JSON_TRACKS = 4096  # tracks per check that their attributes are JSON
 _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
@@ -318,6 +320,38 @@ def _check_tracks(tracks, empty_ok=False):
 			.format(type(tracks).__name__))
 
 	records, names = [], set()
+	try:
+		_check_each_track(tracks, records, names)
+	except (TypeError, ValueError):
+		# An earlier track whose attributes are not JSON is reported first,
+		# as checking each track in turn finds it.
+		_json_each(records)
+		raise
+	# The attributes are checked as JSON a slice of tracks at a time, and
+	# each in turn only when a slice fails, to name the track.
+	for a in range(0, len(records), _JSON_TRACKS):
+		try:
+			json.dumps(records[a:a + _JSON_TRACKS], allow_nan=False)
+		except (TypeError, ValueError):
+			_json_each(records)
+
+	if len(records) == 0 and not empty_ok:
+		raise ValueError("tracks must hold at least one track.")
+
+	return records
+
+
+def _json_each(records):
+	"""Raise the error of the first track whose attributes are not JSON."""
+
+	for track in records:
+		_json(track, "the attributes of track {!r}".format(track['name']))
+
+
+def _check_each_track(tracks, records, names):
+	"""Check each track, appending its record to `records` and its name to
+	`names`, all but the JSON of its attributes."""
+
 	for track in tracks:
 		if isinstance(track, str):
 			track = {'name': track}
@@ -349,14 +383,8 @@ def _check_tracks(tracks, empty_ok=False):
 					"{!r}.".format(name, ', '.join(_DTYPES), dtype))
 
 		track['dtype'] = dtype
-		_json(track, "the attributes of track {!r}".format(name))
 		records.append(track)
 		names.add(name)
-
-	if len(records) == 0 and not empty_ok:
-		raise ValueError("tracks must hold at least one track.")
-
-	return records
 
 
 def _check_groups(groups, tracks):
@@ -378,31 +406,43 @@ def _check_groups(groups, tracks):
 			int(groups))]
 
 	ids = {track['name']: i for i, track in enumerate(tracks)}
-	seen, out = set(), []
 	try:
 		members = [list(group) for group in groups]
 	except TypeError:
 		raise TypeError("groups must be an integer or a list of lists of names.")
 
-	for group in members:
-		if len(group) == 0:
-			raise ValueError("a group must hold at least one track.")
-		for name in group:
-			if name not in ids:
-				raise ValueError("group member {!r} is not one of the tracks."
-					.format(name))
-			if name in seen:
-				raise ValueError("track {!r} is in two groups.".format(name))
-			seen.add(name)
-		out.append(numpy.sort(numpy.array([ids[name] for name in group],
-			dtype=numpy.int64)))
+	# Every member is looked up at once, and the first error in the order
+	# of the groups and their members is raised: an empty group, a name
+	# that is not a track's, or a track named before.
+	names = [name for group in members for name in group]
+	index = numpy.fromiter(map(ids.get, names, itertools.repeat(-1)),
+		dtype=numpy.int64, count=len(names))
+	sizes = numpy.array([len(group) for group in members], dtype=numpy.int64)
+	firsts = numpy.concatenate([[0], numpy.cumsum(sizes)])
+	known = index >= 0
+	repeated = numpy.zeros(len(index), dtype=numpy.bool_)
+	if known.any():
+		_, first = numpy.unique(index[known], return_index=True)
+		repeated[numpy.flatnonzero(known)] = True
+		repeated[numpy.flatnonzero(known)[first]] = False
+	bad = numpy.flatnonzero(~known | repeated)
+	empty = numpy.flatnonzero(sizes == 0)
+	at = int(bad[0]) if len(bad) else len(index)
+	if len(empty) and firsts[empty[0]] <= at:
+		raise ValueError("a group must hold at least one track.")
+	if at < len(index):
+		if not known[at]:
+			raise ValueError("group member {!r} is not one of the tracks."
+				.format(names[at]))
+		raise ValueError("track {!r} is in two groups.".format(names[at]))
 
-	if len(seen) != n:
-		missing = [track['name'] for track in tracks if track['name'] not in seen]
+	if len(index) != n:
+		seen = numpy.zeros(n, dtype=numpy.bool_)
+		seen[index] = True
 		raise ValueError("every track must be in a group; {!r} is not.".format(
-			missing[0]))
+			tracks[int(numpy.argmin(seen))]['name']))
 
-	return out
+	return [numpy.sort(index[a:b]) for a, b in zip(firsts[:-1], firsts[1:])]
 
 
 def _check_attributes(attributes):
@@ -467,6 +507,24 @@ def _infer_dtype(nonzero, low, high, flags):
 	if high <= 2147483647:
 		return 'int32'
 	return 'float64'
+
+
+def _infer_dtypes(stats):
+	"""`_infer_dtype` of each row of a (tracks, 6) statistics array, at
+	once, as indices into _INFERRED."""
+
+	nonzero, low, high = stats[:, 1], stats[:, 2], stats[:, 3]
+	flags = stats[:, 4].astype(numpy.int64)
+	signed = numpy.select([(low >= -128) & (high <= 127), (low >= -32768) & (
+		high <= 32767), high <= 2147483647], [1, 2, 3], 4)
+	code = numpy.select([(flags & _FLAG_FRACTION) > 0, (flags & _FLAG_WIDE) > 0,
+		nonzero == 0, (low >= 0) & (high <= 255), (low >= 0) & (high <= 65535),
+		low >= 0], [5, 4, 0, 0, 6, 7], signed)
+	return code
+
+
+_INFERRED = ('uint8', 'int8', 'int16', 'int32', 'float64', 'float32', 'uint16',
+	'uint32')
 
 
 def _positions(positions, name, copy=True):
@@ -2778,10 +2836,9 @@ class FigWigWriter:
 					self._flush_track(t)
 			self._drain()
 
-			for i, track in enumerate(self.tracks):
+			for track, code in zip(self.tracks, _infer_dtypes(self._stats).tolist()):
 				if track['dtype'] is None:
-					sum_, nonzero, low, high, flags, _ = self._stats[i]
-					track['dtype'] = _infer_dtype(nonzero, low, high, flags)
+					track['dtype'] = _INFERRED[code]
 
 			if self.summary_index and self._summaries:
 				self._index_builder = _SummaryIndex([len(g) for g in self._groups],
