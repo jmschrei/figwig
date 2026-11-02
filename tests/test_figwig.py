@@ -2526,6 +2526,29 @@ def test_paired_sums_read_at_once_as_the_batches_would(tmp_path, monkeypatch):
 	assert not any(once)
 
 
+def test_repeated_track_summed_into_float32_as_in_float64(tmp_path,
+	monkeypatch):
+	"""A track named twice in a sum into float32 gives what the float64
+	accumulator gives, whether or not the sums would be exact in float32."""
+
+	path = str(tmp_path / 'd.fw')
+	values = numpy.zeros((1, 2, 64))
+	values[0, 0] = numpy.arange(64) % 5
+	write_figwig(path, {'chr1': 64}, [{'name': 'a', 'dtype': 'uint8'},
+		{'name': 'b', 'dtype': 'uint8'}], 'chr1', [0], values, tile=16)
+	reader = FigWigReader(path)
+	got = reader.read('chr1', [0], 40, tracks=['a', 'a'], bins=10,
+		dtype='float32')
+	sums = reader.sums('chr1', [0, 5], [30, 60], tracks=['a', 'a'],
+		dtype='float32')
+	monkeypatch.setattr(FigWigReader, '_exact_sums', lambda *args, **kwargs:
+		False)
+	assert_identical(got, reader.read('chr1', [0], 40, tracks=['a', 'a'],
+		bins=10, dtype='float32'))
+	assert_identical(sums, reader.sums('chr1', [0, 5], [30, 60], tracks=['a',
+		'a'], dtype='float32'))
+
+
 def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	"""write_sparse checks the entries of tracks with a declared integer
 	dtype in one pass: the first entry, in the order given, whose value is

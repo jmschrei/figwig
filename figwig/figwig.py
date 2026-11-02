@@ -4916,7 +4916,8 @@ class FigWigReader:
 			if summing and dtype.kind in 'iu':
 				inner = numpy.zeros(shape, dtype=numpy.int64)
 			elif summing and dtype != numpy.float64 and not (dtype ==
-					numpy.float32 and self._exact_sums(ids, terms, 2.0 ** 24)):
+					numpy.float32 and not copies and self._exact_sums(ids, terms,
+					2.0 ** 24)):
 				inner = numpy.zeros(shape, dtype=numpy.float64)
 
 		if n == 0:
