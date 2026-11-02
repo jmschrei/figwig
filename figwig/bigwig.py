@@ -16,6 +16,7 @@ from itertools import pairwise
 
 import numpy
 
+from ._kernels import _compiled
 from ._kernels import _inflate_blocks
 from ._kernels import _pread
 from ._kernels import _pread_into
@@ -790,15 +791,15 @@ def _run(reads, n_jobs):
 
 	tasks = [(read, k) for read in reads for k in range(read.n_batches)]
 	first = []
-	if tasks and not getattr(_read_windows, 'signatures', True):
+	if tasks and not _compiled(_read_windows):
 		first.append(tasks[0])
 
 	# A decoder whose library did not load, as zlib's or ISA-L's may not on
 	# Windows, leaves every block to its decompress and is never compiled.
 	compressed = [task for task in tasks if task[0].decoder is not None and
 		task[0].decoder.functions is not None]
-	if compressed and not getattr(compressed[0][0].decoder.kernel, 'signatures',
-			True) and compressed[0] not in first:
+	if compressed and not _compiled(compressed[0][0].decoder.kernel) and \
+			compressed[0] not in first:
 		first.append(compressed[0])
 
 	rest = [task for task in tasks if task not in first]

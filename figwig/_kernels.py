@@ -42,6 +42,19 @@ _FLOAT32_MAX = float(numpy.finfo(numpy.float32).max)
 _SEEK_LOCK = threading.Lock()
 
 
+def _compiled(kernel):
+	"""Whether a kernel has been compiled for any types: by numba's
+	`overloads` where it has them, since `signatures` hashes every
+	signature's types in Python, a few microseconds a read; by `signatures`
+	otherwise. A plain function, as a kernel is with NUMBA_DISABLE_JIT=1,
+	needs no compiling."""
+
+	overloads = getattr(kernel, 'overloads', None)
+	if overloads is not None:
+		return len(overloads) > 0
+	return bool(getattr(kernel, 'signatures', True))
+
+
 def _zlib_uncompress():
 	"""zlib's uncompress() as a ctypes function, or None if it cannot be loaded.
 

@@ -96,6 +96,7 @@ from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
 from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
+from ._kernels import _compiled
 from ._kernels import _libc_pread
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
@@ -5038,7 +5039,7 @@ class FigWigReader:
 		else:
 			kernels = (_read_tiles, _check_chunks)
 		first = []
-		if any(not getattr(kernel, 'signatures', True) for kernel in kernels):
+		if any(not _compiled(kernel) for kernel in kernels):
 			first.append(tasks[0])
 
 		rest = tasks[len(first):]
