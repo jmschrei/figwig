@@ -11,6 +11,7 @@ import warnings
 import threading
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait
 from itertools import pairwise
 
 import numpy
@@ -761,6 +762,22 @@ def _decoder(engine):
 	return _isal_decoder(required=engine == 'isal') or _ZlibDecoder()
 
 
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def _shared_pool(n_threads):
+	"""A thread pool of at least `n_threads` threads, kept between reads,
+	since a converter's thousands of reads each started and joined their
+	own; made again in a process that forked with one."""
+
+	global _POOL
+	with _POOL_LOCK:
+		if _POOL is None or _POOL[0] != os.getpid() or _POOL[1] < n_threads:
+			_POOL = (os.getpid(), n_threads, ThreadPoolExecutor(n_threads))
+		return _POOL[2]
+
+
 def _run(reads, n_jobs):
 	"""Run every batch of every read, on up to `n_jobs` threads.
 
@@ -796,8 +813,32 @@ def _run(reads, n_jobs):
 			for read, k in rest:
 				read.run(k)
 		else:
-			with ThreadPoolExecutor(min(n_jobs, len(rest))) as pool:
-				list(pool.map(lambda task: task[0].run(task[1]), rest))
+			# Each share takes the next batch as it finishes one, so that the
+			# pool, which may be larger, runs at most n_jobs at once; every
+			# share ends before the files are closed, and a failure stops
+			# the others taking more.
+			n_threads = min(n_jobs, len(rest))
+			batches = iter(rest)
+			lock = threading.Lock()
+			failed = []
+
+			def share():
+				while not failed:
+					with lock:
+						task = next(batches, None)
+					if task is None:
+						return
+					try:
+						task[0].run(task[1])
+					except BaseException:
+						failed.append(True)
+						raise
+
+			pool = _shared_pool(n_threads)
+			futures = [pool.submit(share) for _ in range(n_threads)]
+			wait(futures)
+			for future in futures:
+				future.result()
 	finally:
 		for read in reads:
 			read.close()

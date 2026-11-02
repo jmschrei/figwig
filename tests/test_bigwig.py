@@ -243,14 +243,16 @@ def test_n_jobs_does_not_change_output(sparse_bw, batching):
 def test_n_jobs_every_cpu(dense_bw, monkeypatch):
 	"""n_jobs=-1 is every CPU the process may use."""
 
+	# The threads a read asks the shared pool for, which is kept between
+	# reads, so a new pool's size would not show them.
 	sizes = []
-	pool = figwig.bigwig.ThreadPoolExecutor
+	pool = figwig.bigwig._shared_pool
 
-	def recorder(max_workers):
-		sizes.append(max_workers)
-		return pool(max_workers)
+	def recorder(n_threads):
+		sizes.append(n_threads)
+		return pool(n_threads)
 
-	monkeypatch.setattr(figwig.bigwig, 'ThreadPoolExecutor', recorder)
+	monkeypatch.setattr(figwig.bigwig, '_shared_pool', recorder)
 	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
 	monkeypatch.setattr(figwig.bigwig, '_cpu_count', lambda: 3)
 	BigWigReader(dense_bw[0]).read('chr1', numpy.arange(0, 240_000, 1000), 100,
@@ -537,16 +539,45 @@ def test_read_bigwig_several_files_share_a_pool(dense_bw, sparse_bw,
 	# Compiled first, so that no batch runs before the pool to compile them.
 	read_bigwig(dense_bw[0], 'chr1', [0], 100, n_jobs=1)
 	sizes = []
-	pool = figwig.bigwig.ThreadPoolExecutor
+	pool = figwig.bigwig._shared_pool
 
-	def recorder(max_workers):
-		sizes.append(max_workers)
-		return pool(max_workers)
+	def recorder(n_threads):
+		sizes.append(n_threads)
+		return pool(n_threads)
 
-	monkeypatch.setattr(figwig.bigwig, 'ThreadPoolExecutor', recorder)
+	monkeypatch.setattr(figwig.bigwig, '_shared_pool', recorder)
 	read_bigwig([dense_bw[0], sparse_bw[0], dense_bw[0]], 'chr1', [0, 5000],
 		100, n_jobs=8)
 	assert sizes == [3]
+
+
+def test_shared_pool_runs_no_more_than_n_jobs(dense_bw, monkeypatch):
+	"""The pool is kept between reads and grows to the most threads a read
+	asked for; a later read with fewer runs no more batches at once than
+	its n_jobs, and reads as it did on a pool of its own."""
+
+	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
+	starts = numpy.arange(0, 240_000, 1000)
+	bw = BigWigReader(dense_bw[0])
+	expected = bw.read('chr1', starts, 100, n_jobs=1)
+	bw.read('chr1', starts, 100, n_jobs=8)
+
+	run = figwig.bigwig._Read.run
+	lock, active, most = threading.Lock(), [0], [0]
+
+	def counted(self, k):
+		with lock:
+			active[0] += 1
+			most[0] = max(most[0], active[0])
+		try:
+			return run(self, k)
+		finally:
+			with lock:
+				active[0] -= 1
+
+	monkeypatch.setattr(figwig.bigwig._Read, 'run', counted)
+	assert_identical(bw.read('chr1', starts, 100, n_jobs=2), expected)
+	assert 1 <= most[0] <= 2
 
 
 def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
