@@ -57,6 +57,7 @@ from ._figwig_kernels import _CRC_TABLES
 from ._figwig_kernels import _crcs_of
 from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
+from ._figwig_kernels import _any_infinite
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
 from ._figwig_kernels import _CODE_SHIFT
@@ -518,9 +519,20 @@ def _check_exact(values):
 		if int(values.max()) > 2 ** 53 or int(values.min()) < -2 ** 53:
 			raise ValueError("an integer lies beyond 2**53, which a figwig file "
 				"cannot hold exactly; scale or clip the values first.")
-	if values.dtype.kind == 'f' and values.size and numpy.isinf(values).any():
+	if values.dtype.kind == 'f' and values.size and _has_infinity(values):
 		raise ValueError("values must be finite or NaN, but one is infinite; "
 			"clip the values first.")
+
+
+def _has_infinity(values):
+	"""Whether a float array holds an infinite value: one pass of a kernel
+	over a C-contiguous float32 or float64 array, without the boolean array
+	`numpy.isinf` makes, and numpy's test for anything else."""
+
+	if values.dtype.char in 'fd' and values.dtype.isnative and \
+			values.flags.c_contiguous:
+		return bool(_any_infinite(values.reshape(-1)))
+	return bool(numpy.isinf(values).any())
 
 
 def _check_values_fit(name, dtype, values):

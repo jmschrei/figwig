@@ -563,6 +563,17 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 
 @numba.njit(nogil=True, cache=True)
+def _any_infinite(values):
+	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
+	pass without a branch, which vectorizes."""
+
+	found = False
+	for i in range(values.shape[0]):
+		found |= numpy.abs(values[i]) == numpy.inf
+	return found
+
+
+@numba.njit(nogil=True, cache=True)
 def _fold_batch(stats, rows, batch):
 	"""Fold a batch's (tracks, 6) statistics into the writer's for the
 	tracks `rows`: the compensated sum, the nonzero bases, the minimum,
