@@ -4392,14 +4392,16 @@ class FigWigReader:
 				ids[batch])]
 
 		if inner == 1 and n_jobs > 1:
-			# In n_jobs shares, so that a pool larger than n_jobs runs no more.
+			# In at most _MIN_READ_THREADS shares, since more took longer:
+			# 90,543 Fiber-seq reads took 1.5 s on 4 threads and 2.9 s on 32.
 			found = [None] * len(batches)
+			shares = min(n_jobs, _MIN_READ_THREADS)
 
 			def share(k):
-				for j in range(k, len(batches), n_jobs):
+				for j in range(k, len(batches), shares):
 					found[j] = one(batches[j])
 
-			list(self._pool_for(n_jobs).map(share, range(min(n_jobs, len(
+			list(self._pool_for(shares).map(share, range(min(shares, len(
 				batches)))))
 		else:
 			found = [one(batch) for batch in batches]
