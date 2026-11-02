@@ -4566,9 +4566,12 @@ class FigWigReader:
 			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
 			self._load_indexes(groups_read, n_threads)
 			read_bytes = None
-			if n_threads > _MIN_READ_THREADS:
+			if n_threads > _MIN_READ_THREADS and (bins is None or stops is not
+					None or n >= n_threads):
 				# A read of few bytes and little output takes no more threads
-				# than its work keeps busy; more only add tasks to dispatch.
+				# than its work keeps busy; more only add tasks to dispatch. A
+				# few windows summed per bin are a task per group each, which
+				# only a split over every thread cuts finer, so they keep them.
 				read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for g
 					in groups_read) + 8 * len(tiles[2]) * len(groups_read)
 				out_bytes = n * n_channels * out_width * dtype.itemsize if mode == \
