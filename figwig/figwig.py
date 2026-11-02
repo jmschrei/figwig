@@ -215,6 +215,7 @@ _INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at lea
 _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
+_PLAN_PAIRS = 1 << 22  # (window, run) pairs a track-order plan takes at once
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
@@ -5264,30 +5265,55 @@ class FigWigReader:
 		lasts = (number << 32) | blocks['last'].astype(numpy.int64)
 		firsts = (number << 32) | blocks['first'].astype(numpy.int64)
 
-		# Each run with every window on its chromosome, in the windows' order.
-		by_chrom = numpy.argsort(tids, kind='stable')
-		chrom_at = numpy.searchsorted(tids[by_chrom], numpy.arange(n_chroms + 1))
+		# Each run with the windows on its chromosome whose starts can reach
+		# its blocks, in the windows' order, a slice of runs at a time, so that
+		# reads or cells each in a short stretch hold only their own windows.
+		if len(starts) == 0:
+			return []
+		every_end = numpy.minimum(starts + width if stops is None else stops,
+			lengths)
+		reach = int((every_end - starts).max())
+		by_start = numpy.lexsort((starts, tids))
+		placed = tids[by_start] * (1 << 34) + starts[by_start]
 		run_chroms = runs[heads] % n_chroms
-		per_run = chrom_at[run_chroms + 1] - chrom_at[run_chroms]
-		total = int(per_run.sum())
-		if total == 0:
+		tails = numpy.append(heads[1:], len(runs)) - 1
+		low = numpy.searchsorted(placed, run_chroms * (1 << 34) + numpy.maximum(
+			blocks['first'][heads].astype(numpy.int64) - reach + 1, 0))
+		high = numpy.searchsorted(placed, run_chroms * (1 << 34) + blocks['last'][
+			tails].astype(numpy.int64), side='right')
+		per_run = numpy.maximum(high - low, 0)
+		limits = numpy.cumsum(per_run)
+		parts_rows, parts_blocks = [], []
+		r0 = 0
+		while r0 < len(heads):
+			r1 = max(r0 + 1, int(numpy.searchsorted(limits, (limits[r0] - per_run[
+				r0]) + _PLAN_PAIRS, side='right')))
+			counts = per_run[r0:r1]
+			total = int(counts.sum())
+			r_at, r0 = r0, r1
+			if total == 0:
+				continue
+			run_of = numpy.repeat(numpy.arange(r_at, r1), counts)
+			windows = by_start[numpy.repeat(low[r_at:r1], counts) + numpy.arange(
+				total) - numpy.repeat(numpy.cumsum(counts) - counts, counts)]
+			mine = numpy.lexsort((windows, run_of))
+			run_of, windows = run_of[mine], windows[mine]
+			lo = numpy.searchsorted(lasts, (run_of << 32) | starts[windows],
+				side='left')
+			hi = numpy.searchsorted(firsts, (run_of << 32) | every_end[windows],
+				side='left')
+			found = numpy.maximum(hi - lo, 0)
+			total = int(found.sum())
+			if total == 0:
+				continue
+			parts_rows.append(numpy.repeat(windows, found))
+			parts_blocks.append(numpy.repeat(lo, found) + numpy.arange(total) -
+				numpy.repeat(numpy.cumsum(found) - found, found))
+		if not parts_rows:
 			return []
-		run_of = numpy.repeat(numpy.arange(len(heads)), per_run)
-		windows = by_chrom[numpy.repeat(chrom_at[run_chroms], per_run) +
-			numpy.arange(total) - numpy.repeat(numpy.cumsum(per_run) - per_run,
-			per_run)]
-		ends = numpy.minimum(starts[windows] + width if stops is None else stops[
-			windows], lengths[windows])
-		lo = numpy.searchsorted(lasts, (run_of << 32) | starts[windows],
-			side='left')
-		hi = numpy.searchsorted(firsts, (run_of << 32) | ends, side='left')
-		found = numpy.maximum(hi - lo, 0)
-		total = int(found.sum())
-		if total == 0:
-			return []
-		rows = numpy.repeat(windows, found)
-		block_of = numpy.repeat(lo, found) + numpy.arange(total) - numpy.repeat(
-			numpy.cumsum(found) - found, found)
+		rows = numpy.concatenate(parts_rows)
+		block_of = numpy.concatenate(parts_blocks)
+		total = len(rows)
 		track_of = ids[owner[block_of]]
 		slots = numpy.array(list(channels.values()), dtype=numpy.int64)[owner[
 			block_of]]

@@ -2408,6 +2408,40 @@ def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 		assert_identical(many, one)
 
 
+def test_track_order_plan_in_slices(tmp_path, monkeypatch):
+	"""A track-order read pairs its windows with the blocks of tracks a
+	slice of tracks at a time, holding only the windows each track's
+	blocks can reach: the same values in slices of a few pairs."""
+
+	path = str(tmp_path / 't.fw')
+	rng = numpy.random.default_rng(7)
+	sizes = {'chr1': 300_000, 'chr2': 200_000}
+	n_tracks = 60
+	with FigWigWriter(path, sizes, [{'name': 'r{}'.format(i), 'dtype':
+			'uint8'} for i in range(n_tracks)], order='tracks') as writer:
+		for chrom, length in sizes.items():
+			starts = rng.integers(0, length - 3000, n_tracks)
+			ids = numpy.repeat(numpy.arange(n_tracks), 30)
+			positions = numpy.repeat(starts, 30) + numpy.tile(numpy.arange(0, 3000,
+				100), n_tracks)
+			writer.write_sparse(chrom, positions, ids, rng.integers(1, 9,
+				len(ids)))
+	reader = FigWigReader(path)
+	chroms = rng.choice(list(sizes), 200)
+	starts = rng.integers(0, 199_000, 200)
+	labels = rng.integers(-1, 3, n_tracks)
+	for kwargs in ({}, {'labels': labels}, {'sparse': True}):
+		whole = reader.read(chroms, starts, 1000, n_jobs=4, **kwargs)
+		monkeypatch.setattr(figwig.figwig, '_PLAN_PAIRS', 3)
+		sliced = reader.read(chroms, starts, 1000, n_jobs=4, **kwargs)
+		monkeypatch.undo()
+		if kwargs.get('sparse'):
+			for x, y in zip(whole, sliced):
+				numpy.testing.assert_array_equal(x, y)
+		else:
+			assert_identical(whole, sliced)
+
+
 def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	"""write_sparse checks the entries of tracks with a declared integer
 	dtype in one pass: the first entry, in the order given, whose value is
