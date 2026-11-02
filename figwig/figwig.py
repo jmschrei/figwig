@@ -215,6 +215,7 @@ _INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at lea
 _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
+_BLOCK_TASK_ENTRIES = 1 << 18  # entries of a packed task of tracks' blocks, at most
 _PLAN_PAIRS = 1 << 22  # (window, run) pairs a track-order plan takes at once
 _PAIRED_TILES = 4  # tiles per interval of paired sums read at once, on average
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
@@ -2686,15 +2687,17 @@ class FigWigWriter:
 	def _submit_blocks(self):
 		"""Encode the tracks' blocks from `_flush_track` in order, on the
 		pool when there is one, packing consecutive tracks' into a task until
-		it holds a share of their entries, since a task per track and
-		chromosome cost this thread its dispatch and bookkeeping."""
+		it holds a share of their entries, at most _BLOCK_TASK_ENTRIES, since
+		a task per track and chromosome cost this thread its dispatch and
+		bookkeeping, and a running task holds a copy of its entries."""
 
 		jobs = self._block_jobs
 		if len(jobs) == 0:
 			return
 		self._block_jobs = []
 		total, self._block_entries = self._block_entries, 0
-		share = max(1, total // (_BATCHES_PER_THREAD * self.n_jobs))
+		share = max(1, min(_BLOCK_TASK_ENTRIES, total // (_BATCHES_PER_THREAD *
+			self.n_jobs)))
 		task, size = [], 0
 		for k, job in enumerate(jobs):
 			task.append(job)
@@ -2769,8 +2772,10 @@ class FigWigWriter:
 				a = cuts[j]
 				summaries[j] = (self._tile_offsets[job[1]] + tiles[a:a + found[j]],
 					sums[a:a + found[j]].astype(numpy.float32)[:, None])
+		# A copy, as the compressor's buffer holds about the blocks' raw bytes
+		# until the writing thread takes the task.
 		total = int(ends[-1]) if n else 0
-		return compressed[:total], records, blocks, stats, summaries
+		return compressed[:total].copy(), records, blocks, stats, summaries
 
 	def _drain(self, keep=0):
 		"""Fold in the statistics of the call's batches encoded from items,
