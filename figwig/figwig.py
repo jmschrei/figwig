@@ -211,8 +211,9 @@ _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
 _JSON_TRACKS = 4096  # tracks per check that their attributes are JSON
 _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
-_INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at least
+_INDEX_POOL_TILES = 1 << 17  # tiles or blocks of a group index that starts threads
 _SLICED_RUN_TILES = 256  # tiles per run of an index laid out a run at a time
+_INDEX_THREADS = 8  # threads that load group indexes at once, at most
 _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
@@ -3665,20 +3666,54 @@ class FigWigReader:
 		return self._index[g]
 
 	def _load_indexes(self, groups, n_threads):
-		"""Read the indexes of these groups that have not been read yet, on
-		up to n_threads threads when they span _INDEX_POOL_TILES tiles in
-		all, since a group of a genome's tiles costs a few milliseconds to
-		inflate and lay out; smaller ones load on this thread, so that a
-		small read of a small file starts no pool."""
+		"""Read the indexes of these groups that have not been read yet: on
+		this thread while each spans fewer than _INDEX_POOL_TILES tiles, or
+		blocks in track order, and the rest on up to n_threads threads once
+		one spans more, since a group of a genome's tiles costs a few
+		milliseconds to inflate and lay out, but threads that lay out small
+		indexes mostly wait for each other."""
 
 		missing = [g for g in groups if self._index[g] is None]
-		if len(missing) > 1 and n_threads > 1 and len(missing) * self._n_tiles >= \
-				_INDEX_POOL_TILES:
-			pool = self._pool_for(n_threads)
-			list(pool.map(self._group_index, missing))
+		for k, g in enumerate(missing):
+			index = self._group_index(g)
+			span = len(index) if self.order == 'tracks' else int((self._runs[g][
+				'last'] - self._runs[g]['first'] + 1).sum())
+			if span >= _INDEX_POOL_TILES and n_threads > 1 and len(missing) - k > 2:
+				break
 		else:
-			for g in missing:
-				self._group_index(g)
+			return
+
+		# At most _INDEX_THREADS at once, since each holds the arrays of the
+		# index it lays out, and more were no faster. Each takes the next
+		# group as it finishes one. A failure, or an interrupt here, stops
+		# the others taking more, and the first group in order that failed
+		# raises, as one thread would.
+		rest = missing[k + 1:]
+		shares = min(len(rest), n_threads, _INDEX_THREADS)
+		pool = self._pool_for(shares)
+		queue = iter(enumerate(rest))
+		lock = threading.Lock()
+		failed = []
+
+		def share(_):
+			while not failed:
+				with lock:
+					j, g = next(queue, (None, None))
+				if j is None:
+					return
+				try:
+					self._group_index(g)
+				except BaseException as error:
+					failed.append((j, error))
+					return
+
+		try:
+			list(pool.map(share, range(shares)))
+		except BaseException:
+			failed.append((-1, None))
+			raise
+		if failed:
+			raise min(failed, key=lambda failure: failure[0])[1]
 
 	def _read_group_index(self, g):
 		error = "The index of {} cannot be read".format(self.path)
@@ -4815,9 +4850,9 @@ class FigWigReader:
 				lengths, width, stops)
 			n_threads = asked = self._threads(n_jobs, len(tiles[2]) * len(
 				groups_read))
-			# Each group's index is read on first use, on up to n_jobs threads
-			# whatever the read takes: a few milliseconds each, which were most
-			# of a reader's first small read.
+			# Each group's index is read on first use, on threads whatever the
+			# read takes when the indexes are large: a few milliseconds each,
+			# which were most of a reader's first small read.
 			self._load_indexes(groups_read, n_jobs)
 			read_bytes = None
 			if n_threads > _MIN_READ_THREADS and (bins is None or stops is not

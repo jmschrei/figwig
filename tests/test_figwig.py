@@ -9,6 +9,7 @@ import shutil
 import struct
 import zlib
 import subprocess
+import time
 
 import numpy
 import pytest
@@ -3229,6 +3230,109 @@ def test_index_of_empty_groups_is_small(tmp_path):
 	assert sizes.dtype == numpy.uint32 and (kinds > 0).sum() == 1
 	copy = pickle.loads(pickle.dumps(reader))
 	assert all(index is None for index in copy._index)
+
+
+def test_indexes_load_on_threads_once_one_is_large(tmp_path, monkeypatch):
+	"""Group indexes load on this thread while each spans fewer than
+	_INDEX_POOL_TILES tiles, and the rest on up to n_threads and 8 threads
+	from the first that spans more; a group whose index cannot be read
+	raises either way."""
+
+	path = str(tmp_path / 'i.fw')
+	names = ['t{}'.format(i) for i in range(40)]
+	with FigWigWriter(path, {'chr1': 2 ** 24}, names, groups=1, tile=256) \
+			as writer:
+		writer.write('chr1', [2 ** 20], numpy.arange(400).reshape(1, 40, 10))
+
+	asked = []
+	pool_for = FigWigReader._pool_for
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: asked.append(
+		n) or pool_for(self, n))
+	for threshold, groups, n_threads, expected in ((1 << 17, 40, 32, []), (1, 40,
+			32, [8]), (1, 40, 4, [4]), (1, 3, 32, [2]), (1, 2, 32, []), (1, 40, 1,
+			[])):
+		monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', threshold)
+		reader = FigWigReader(path)
+		asked.clear()
+		reader._load_indexes(list(range(groups)), n_threads)
+		assert asked == expected
+		assert all(index is not None for index in reader._index[:groups])
+		assert all(index is None for index in reader._index[groups:])
+		assert reader.read('chr1', [2 ** 20], 10, n_jobs=8).sum() == \
+			400 * 399 // 2
+
+	reader = FigWigReader(path)
+	with open(path, 'rb') as handle:
+		data = bytearray(handle.read())
+	data[int(reader._directory[17]) + 8] ^= 0xFF
+	bad = str(tmp_path / 'bad.fw')
+	with open(bad, 'wb') as handle:
+		handle.write(data)
+	for threshold in (1, 1 << 17):
+		monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', threshold)
+		for n_jobs in (1, 32):
+			with pytest.raises(ValueError, match="checksum"):
+				FigWigReader(bad).read('chr1', [2 ** 20], 10, n_jobs=n_jobs)
+
+
+def test_index_loads_on_threads_raise_the_first_failure(tmp_path, monkeypatch):
+	"""Of several groups whose indexes fail to load on threads, the first in
+	order raises, as on one thread, whichever thread reaches it last."""
+
+	path = str(tmp_path / 'i.fw')
+	with FigWigWriter(path, {'chr1': 2 ** 20}, ['t{}'.format(i) for i in range(
+			5)], groups=1, tile=256) as writer:
+		writer.write('chr1', [2 ** 19], numpy.ones((1, 5, 10)))
+
+	read_group_index = FigWigReader._read_group_index
+
+	def failing(self, g):
+		if g == 2:
+			time.sleep(0.3)
+		if g in (2, 3):
+			raise ValueError("group {} cannot be read".format(g))
+		return read_group_index(self, g)
+
+	monkeypatch.setattr(FigWigReader, '_read_group_index', failing)
+	monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', 1)
+	with pytest.raises(ValueError, match="group 2 cannot"):
+		FigWigReader(path)._load_indexes(list(range(5)), 2)
+
+
+def test_index_loads_on_threads_stop_at_an_interrupt(tmp_path, monkeypatch):
+	"""An interrupt while group indexes load on threads stops the threads
+	taking more groups."""
+
+	path = str(tmp_path / 'i.fw')
+	with FigWigWriter(path, {'chr1': 2 ** 20}, ['t{}'.format(i) for i in range(
+			40)], groups=1, tile=256) as writer:
+		writer.write('chr1', [2 ** 19], numpy.ones((1, 40, 10)))
+
+	read_group_index = FigWigReader._read_group_index
+	loaded = []
+
+	def slow(self, g):
+		time.sleep(0.05)
+		loaded.append(g)
+		return read_group_index(self, g)
+
+	reader = FigWigReader(path)
+	pool = reader._pool_for(2)
+
+	class Interrupting:
+		def map(self, fn, items):
+			[pool.submit(fn, item) for item in items]
+			while len(loaded) < 5:
+				time.sleep(0.01)
+			raise KeyboardInterrupt
+
+	monkeypatch.setattr(FigWigReader, '_read_group_index', slow)
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: Interrupting())
+	monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', 1)
+	with pytest.raises(KeyboardInterrupt):
+		reader._load_indexes(list(range(40)), 2)
+	pool.shutdown(wait=True)
+	assert len(loaded) < 10, loaded
 
 
 @pytest.mark.parametrize('sliced,room', [(256, 1 << 30), (1, 1 << 30), (10 **
