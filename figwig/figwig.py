@@ -4370,10 +4370,13 @@ class FigWigReader:
 		if len(batches) == 0:
 			return numpy.zeros(0, dtype=self._dtype(ids, dtype, True))
 
-		# The batches are summed side by side on the threads, each on one: a
-		# batch is too small a read to spread over several.
+		# In position order the batches are summed side by side on the
+		# threads, each on one: a batch is too small a read to spread over
+		# several. In track order they run one after another, since side by
+		# side they took longer the more threads there were.
 		n_jobs = _check_n_jobs(n_jobs)
-		inner = 1 if n_jobs > 1 and len(batches) > 1 else n_jobs
+		inner = 1 if n_jobs > 1 and len(batches) > 1 and self.order == \
+			'positions' else n_jobs
 
 		def one(batch):
 			mine = numpy.unique(ids[batch])
