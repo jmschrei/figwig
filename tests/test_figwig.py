@@ -2312,6 +2312,38 @@ def test_labels_over_groups_run_in_bands(cells, tmp_path, monkeypatch):
 	assert len(planned) == 1
 
 
+def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
+	"""A few long windows summed per bin are read as parts of whole bins on
+	the threads, and give the sums of the whole windows to the bit: float
+	tracks with NaN under every nan mode, labels, one track, windows past a
+	chromosome's end, and a width whose bins do not split evenly."""
+
+	path = str(tmp_path / 'b.fw')
+	rng = numpy.random.default_rng(53)
+	values = rng.lognormal(0, 3, (1, 6, 5000))
+	values[:, :, rng.integers(0, 5000, 300)] = 0
+	values[0, 2, rng.integers(0, 5000, 40)] = numpy.nan
+	write_figwig(path, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'float64' if i % 2 else 'float32'} for i in range(6)], 'chr1', [0],
+		values, tile=64, groups=3)
+	reader = FigWigReader(path)
+	monkeypatch.setattr(figwig.figwig, '_SPLIT_BYTES', 1)
+	whole = FigWigReader._read
+	calls = []
+	monkeypatch.setattr(FigWigReader, '_read', lambda self, *args: calls.append(
+		len(args[1])) or whole(self, *args))
+	for starts, width, bins, kwargs in (([0], 4096, 64, {}), ([100, 4100],
+			1536, 32, {'nan': 'skip'}), ([700], 4000, 50, {'nan': 'count'}), ([0,
+			10], 2560, 128, {'labels': [0, 1, 0, 1, -1, 0]}), ([300], 2048, 16,
+			{'tracks': 't2', 'nan': 'skip'})):
+		calls.clear()
+		one = reader.read('chr1', starts, width, bins=bins, n_jobs=1, **kwargs)
+		many = reader.read('chr1', starts, width, bins=bins, n_jobs=8, **kwargs)
+		assert len(calls) > 2 + len(starts) and set(calls[2:]) == {1}, calls
+		assert many.shape == one.shape and many.dtype == one.dtype
+		assert_identical(many, one)
+
+
 def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	"""write_sparse checks the entries of tracks with a declared integer
 	dtype in one pass: the first entry, in the order given, whose value is

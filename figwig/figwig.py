@@ -210,6 +210,8 @@ _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the poo
 _JSON_TRACKS = 4096  # tracks per check that their attributes are JSON
 _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
 _INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at least
+_SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
+_SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
@@ -4579,6 +4581,45 @@ class FigWigReader:
 			single = False
 		else:
 			n_channels = len(ids) if pairs is None else 1
+
+		# A few long windows summed per bin, as a genome browser's view is,
+		# were a task each per group, since a binned read's batches are not
+		# cut inside a window. Where those tasks are fewer than the threads
+		# and hold at least _SPLIT_BYTES of chunks a part, each window is read
+		# instead as parts of whole bins, about a part per thread, each part a
+		# read of its own on the pool, and each bin is summed from the same
+		# tiles in the same order as in the whole window.
+		if bins is not None and bins > 1 and stops is None and out is None and \
+				not sparse and self.order == 'positions' and 0 < n < n_jobs and \
+				width >= _SPLIT_TILES * self.tile and len(windows._bad) == 0 and all(
+				name in self._tids for name in windows.names):
+			groups = numpy.unique(self._group_of[ids]).tolist()
+			if len(groups) * n >= n_jobs:
+				groups = []
+			self._load_indexes(groups, n_jobs)
+			tids = numpy.array([self._tids[name] for name in windows.names],
+				dtype=numpy.int64)[windows.codes]
+			first = self._tile_offsets[tids] + windows.starts // self.tile
+			last = self._tile_offsets[tids] + (numpy.minimum(windows.starts +
+				width, self._lengths[tids]) - 1) // self.tile
+			held = sum(int(self._group_index(g)[2][a:b + 1].sum()) for g in groups
+				for a, b in zip(first.tolist(), last.tolist()) if b >= a)
+			parts = min(n_jobs // n, width // (_SPLIT_TILES * self.tile), out_width,
+				held // (n * _SPLIT_BYTES))
+			part = -(-out_width // max(parts, 1)) * bins
+			if parts > 1 and int(windows.starts.max()) + parts * part <= 2 ** 32 - 1:
+				part_chroms = numpy.repeat(numpy.array(windows.names)[windows.codes],
+					parts)
+				part_starts = (windows.starts[:, None] + numpy.arange(parts) *
+					part).ravel()
+				got = numpy.concatenate(list(self._pool_for(n * parts).map(lambda k:
+					self._read(part_chroms[k:k + 1], part_starts[k:k + 1], part,
+					tracks, None, dtype, 1, False, labels, bins, None, nan).reshape(1,
+					-1, part // bins), range(n * parts))))
+				got = got.reshape(n, parts, -1, part // bins)
+				return numpy.ascontiguousarray(got.transpose(0, 2, 1, 3).reshape(n,
+					got.shape[2], -1)[..., :out_width].reshape((n, out_width) if
+					single else (n, got.shape[2], out_width)))
 
 		dtype = self._dtype(ids, dtype, summing)
 		shape = (n, out_width) if single else (n, n_channels, out_width)
