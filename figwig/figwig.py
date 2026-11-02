@@ -47,6 +47,7 @@ import warnings
 import zlib
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait
 from typing import NamedTuple
 
 import numpy
@@ -150,6 +151,12 @@ _READ_BATCHES_PER_THREAD = 2
 _WRITE_TASK_BYTES = 1 << 22
 _ENTRIES_PER_BATCH = 1 << 20
 _CHUNKS_PER_THREAD = 64
+# A position-order read takes no more threads than one per _THREAD_READ_BYTES
+# of its chunks and per _THREAD_OUT_BYTES of a dense output, but at least
+# _MIN_READ_THREADS where it asked for that many.
+_THREAD_READ_BYTES = 1 << 18
+_THREAD_OUT_BYTES = 1 << 21
+_MIN_READ_THREADS = 4
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
 _SCRATCH_BYTES = 1 << 28
@@ -186,6 +193,7 @@ _ENTRIES_PAIRS = 1 << 20
 # read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
+_POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
 
 # Whether a tile whose few tracks have values may be stored as a matrix
@@ -4226,9 +4234,30 @@ class FigWigReader:
 				lengths, width, stops)
 			n_threads = self._threads(n_jobs, len(tiles[2]) * len(groups_read))
 			self._load_indexes(groups_read, n_threads)
+			read_bytes = None
+			if n_threads > _MIN_READ_THREADS:
+				# A read of few bytes and little output takes no more threads
+				# than its work keeps busy; more only add tasks to dispatch.
+				read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for g
+					in groups_read) + 8 * len(tiles[2]) * len(groups_read)
+				out_bytes = n * n_channels * out_width * dtype.itemsize if mode == \
+					'dense' else 0
+				n_threads = min(n_threads, max(_MIN_READ_THREADS, read_bytes //
+					_THREAD_READ_BYTES + out_bytes // _THREAD_OUT_BYTES))
 			tasks = []
 			channels = numpy.array(list(first_channel.values()), dtype=numpy.int64)
 			most = _batch_chunks(len(tiles[2]) * len(groups_read), n_threads)
+			# A plain read's batches are cut by the bytes of the whole read,
+			# not of each group, which for a read of many groups would be
+			# thousands of tasks of about a chunk each. A read with labels
+			# runs a group at a time, so its groups keep their own.
+			if n_threads > 1 and (bins or 1) == 1 and not accumulate and len(
+					groups_read) > 1:
+				if read_bytes is None:
+					read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for
+						g in groups_read) + 8 * len(tiles[2]) * len(groups_read)
+			else:
+				read_bytes = None
 			# The tracks read, grouped once: a scan per group would cost
 			# tracks times groups on a read of thousands of each.
 			by_group = numpy.argsort(self._group_of[read_ids], kind='stable')
@@ -4239,7 +4268,7 @@ class FigWigReader:
 				slots = numpy.full(len(self._groups[g]), -1, dtype=numpy.int64)
 				slots[self._slot_of[read_ids[mine]]] = channels[mine]
 				planned, cut = self._plan(g, slots, tiles, starts, width, None, mode,
-					accumulate, bins or 1, most, stops, nan_mode, n_threads)
+					accumulate, bins or 1, most, stops, nan_mode, n_threads, read_bytes)
 				tasks.extend(planned)
 				cut_inside |= cut
 			if len(tasks) < n_threads:
@@ -4591,7 +4620,7 @@ class FigWigReader:
 		return dtype
 
 	def _plan(self, g, slots, tiles, starts, width, out, mode, accumulate, bins,
-		most, stops=None, nan_mode=0, n_threads=1):
+		most, stops=None, nan_mode=0, n_threads=1, read_bytes=None):
 		"""The tasks that read group g's part of the windows: each a batch
 		of up to `most` chunks and the (window, tile) pairs that fall in
 		them, from the windows' tiles as `_window_tiles` gives them, as
@@ -4600,7 +4629,9 @@ class FigWigReader:
 		`n_threads`, a batch holds fewer bytes when the group's chunks are
 		few batches of _BATCH_BYTES, so that each thread gets several: a
 		chromosome of dense float tracks was 13 batches, and 32 threads
-		split them by their windows, each part inflating its chunks again."""
+		split them by their windows, each part inflating its chunks again.
+		`read_bytes`, the bytes of every group's chunks of the read, sizes
+		those batches when the read spans several groups."""
 
 		tile = self.tile
 		kinds, sizes, raws, offsets, crcs = self._group_index(g)
@@ -4616,8 +4647,9 @@ class FigWigReader:
 		# long windows and cost a copy of the output per thread.
 		cap = _BATCH_BYTES
 		if n_threads > 1 and bins == 1:
-			cap = max(int(bounds.max()), min(_BATCH_BYTES, int(bounds.sum()) // (
-				n_threads * _READ_BATCHES_PER_THREAD)))
+			cap = max(int(bounds.max()), min(_BATCH_BYTES, (int(bounds.sum()) if
+				read_bytes is None else read_bytes) // (n_threads *
+				_READ_BATCHES_PER_THREAD)))
 
 		# Batches of chunks, cut where a batch would hold too many bytes
 		# before compression or too many chunks; a binned read's batches
@@ -4723,11 +4755,15 @@ class FigWigReader:
 
 		Tasks that sum into `summed`, the output of a read with labels or
 		bins, run a group at a time when the tasks of one group write
-		disjoint cells (labels, and bins on the tile grid, in position
-		order), since those of two groups do not; with `copies`, where a
-		track's blocks are spread over the tasks in track order, or a bin
-		straddles two tiles, each thread sums into its own copy, and the
-		copies are added to `summed` at the end.
+		disjoint cells and those of two groups may not (labels, which sum
+		tracks of several groups into one channel); binned tasks without
+		labels write each track's own channel, so every group's tasks run
+		at once, unless each group has one task and together they hold less
+		than _POOL_BYTES, which run here, since waking the pool costs more
+		than such a read. With `copies`, where a track's blocks are spread
+		over the tasks in track order, or a bin straddles two tiles, each
+		thread sums into its own copy, and the copies are added to `summed`
+		at the end.
 		"""
 
 		if len(tasks) == 0:
@@ -4753,24 +4789,45 @@ class FigWigReader:
 
 		def run_all(tasks_):
 			# The tasks in n_threads shares, so that a read on fewer threads
-			# than the pool has takes no more than it asked for.
+			# than the pool has takes no more than it asked for, each share
+			# taking the next task as it finishes one, so that tasks of
+			# unequal sizes even out. Every share ends before the file is
+			# closed, and a failure stops the others taking more.
 			if pool is None or len(tasks_) <= 1:
 				for task in tasks_:
 					task.run(fd)
 				return
 
-			def run_share(k):
-				for task in tasks_[k::n_threads]:
-					task.run(fd)
+			queue = iter(tasks_)
+			lock = threading.Lock()
+			failed = []
 
-			list(pool.map(run_share, range(min(n_threads, len(tasks_)))))
+			def run_share():
+				while not failed:
+					with lock:
+						task = next(queue, None)
+					if task is None:
+						return
+					try:
+						task.run(fd)
+					except BaseException:
+						failed.append(True)
+						raise
+
+			futures = [pool.submit(run_share) for _ in range(min(n_threads, len(
+				tasks_)))]
+			wait(futures)
+			for future in futures:
+				future.result()
 
 		try:
 			for task in first:
 				task.run(fd)
 
 			if summed is None or not copies:
-				if summed is None or not rest or isinstance(rest[0], _BlockTask):
+				if summed is None or not rest or isinstance(rest[0], _BlockTask) or (
+						not rest[0].accumulate and (len(rest) > len({task.g for task in
+						rest}) or sum(task.bound for task in rest) >= _POOL_BYTES)):
 					run_all(rest)
 				else:
 					a = 0

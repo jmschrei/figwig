@@ -3506,7 +3506,10 @@ def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
 	got = reader.read('chr1', starts, 200, n_jobs=8)
 	numpy.testing.assert_array_equal(got, numpy.stack([values[:, s:s + 200] for
 		s in starts]))
+	# The read may take fewer threads than it asked for, as few bytes as
+	# these are, but plans a batch for each thread it takes.
 	tasks, n_threads = seen[-1]
-	assert n_threads == 8 and len(tasks) >= 8
+	assert figwig.figwig._MIN_READ_THREADS <= n_threads <= 8
+	assert len(tasks) >= n_threads
 	tiles = numpy.concatenate([task.gtiles for task in tasks])
 	assert len(tiles) == len(numpy.unique(tiles)) == 600
