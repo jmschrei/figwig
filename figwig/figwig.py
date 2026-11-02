@@ -974,6 +974,7 @@ class FigWigWriter:
 		self._sums = [[] for _ in range(n_groups)]
 		self._pending = [None] * n_groups
 		self._buffers = [None] * n_groups
+		self._item_types = [None] * n_groups
 		self._open = [None] * n_groups
 		self._sealed = [None] * n_groups
 		self._last = [None] * n_groups
@@ -1222,7 +1223,8 @@ class FigWigWriter:
 		self._runs = splice(self._runs, runs)
 		self._blocks = splice(self._blocks, blocks)
 		self._sums = splice(self._sums, sums)
-		for name in ('_pending', '_buffers', '_open', '_sealed', '_last'):
+		for name in ('_pending', '_buffers', '_open', '_sealed', '_last',
+				'_item_types'):
 			setattr(self, name, splice(getattr(self, name), [None] * n_groups))
 		self._done = splice(self._done, [set() for _ in range(n_groups)])
 		self._adopted |= set(range(base_group, base_group + n_groups))
@@ -1862,6 +1864,7 @@ class FigWigWriter:
 
 		if dtype is None:
 			dtype = values.dtype
+		self._item_types[g] = dtype
 
 		tile = self.tile
 		n_tracks = len(self._groups[g])
@@ -2334,7 +2337,10 @@ class FigWigWriter:
 		if items is None:
 			starts = numpy.zeros(0, dtype=numpy.int64)
 			ends = numpy.zeros(0, dtype=numpy.int64)
-			values = numpy.zeros((0, n_tracks, 1), dtype=numpy.float64)
+			# Of the type the group's items had, so that sealing a tile uses
+			# the encoder already loaded for them.
+			values = numpy.zeros((0, n_tracks, 1), dtype=self._item_types[g] or
+				numpy.float64)
 			by_base = False
 			lo = hi = numpy.zeros(len(tiles), dtype=numpy.int64)
 		else:
