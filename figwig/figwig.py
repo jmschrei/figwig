@@ -76,7 +76,7 @@ from ._figwig_kernels import _check_blocks
 from ._figwig_kernels import _check_chunks
 from ._figwig_kernels import _encode_blocks
 from ._figwig_kernels import _encode_dense_tiles
-from ._figwig_kernels import _encode_entries
+from ._figwig_kernels import _encode_pieces
 from ._figwig_kernels import _encode_tiles
 from ._figwig_kernels import _entry_gather
 from ._figwig_kernels import _entry_keys
@@ -197,6 +197,9 @@ _SUMMARY_BYTES = 1 << 28
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
+_PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
+_PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
+_ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
 
 # Whether a tile whose few tracks have values may be stored as a matrix
@@ -2012,93 +2015,132 @@ class FigWigWriter:
 	def _submit_pieces(self, pieces):
 		"""Hand batches of entries from `_write_group_entries` to the pool in
 		order, packing consecutive ones into a task until it holds a share
-		of the call's entries, since a task per small group cost this thread
-		its dispatch and bookkeeping. Without a pool each batch is a task of
-		its own, run here, where packing would only copy their bytes.
-		Empties `pieces`."""
+		of the call's entries, and at least _PACK_ENTRIES, since a task or
+		an encoder call per small piece cost its dispatch and bookkeeping:
+		Hi-C's groups hold a few hundred entries on each chromosome. A task
+		holds a row of statistics per track of each piece until its chunks
+		are written, so it takes at most _PACK_ROWS of them. Without a pool
+		each task runs here. Empties `pieces`."""
 
 		if len(pieces) == 0:
 			return
 		total = sum(len(piece[3]) for piece in pieces)
-		share = 1 if self._pool is None else max(1, total // (
-			_BATCHES_PER_THREAD * self.n_jobs))
-		task, size = [], 0
+		share = _PACK_ENTRIES if self._pool is None else max(_PACK_ENTRIES,
+			total // (_BATCHES_PER_THREAD * self.n_jobs))
+		task, size, rows = [], 0, 0
 		for k, piece in enumerate(pieces):
 			task.append(piece)
 			size += len(piece[3])
-			if size >= share or k == len(pieces) - 1:
-				if len(task) == 1:
-					args = (self._entries_task,) + task[0]
-					g, kind = task[0][0], None
-				else:
-					args = (self._entries_tasks, task)
-					g, kind = [piece[0] for piece in task], 'pieces'
-				result = args[0](*args[1:]) if self._pool is None else \
-					self._pool.submit(*args)
-				self._inflight.append((result, g, kind))
-				task, size = [], 0
+			rows += piece[5]
+			if size >= share or rows >= _PACK_ROWS or k == len(pieces) - 1:
+				g = [piece[0] for piece in task]
+				result = self._entries_tasks(task) if self._pool is None else \
+					self._pool.submit(self._entries_tasks, task)
+				self._inflight.append((result, g, 'pieces'))
+				task, size, rows = [], 0, 0
 		pieces.clear()
 
 	def _entries_tasks(self, pieces):
-		"""`_entries_task` of each piece, in order, joined for the writing
-		thread: one buffer of every piece's chunks, then per piece its live
-		tile records, its bytes in the buffer, its stats and its summary."""
+		"""Encode and compress pieces of entries, each a group's on one
+		chromosome sorted by tile, track and position, its tracks given by
+		their slots in the group, or by their ids with `by_track`, through
+		one encoder call per buffer, for the writing thread: one buffer of
+		every piece's chunks, then per piece its live tile records, its
+		bytes in the buffer, its stats and its summary. The encoder stops
+		before a tile that might not fit its buffer, which holds at most
+		about _ENTRIES_GO_BYTES, and is called again from there."""
 
-		results = [self._entries_task(*piece) for piece in pieces]
-		parts, lives, totals = [], [], []
-		for compressed, sizes, raw, kinds, where, crcs, _, _ in results:
-			total = int(sizes.sum())
-			parts.append(compressed[:total])
-			live = numpy.zeros(len(where), dtype=_LIVE)
-			live['tile'] = where
-			live['kind'] = kinds
-			live['size'] = sizes
-			live['raw'] = raw
-			live['crc'] = crcs
-			lives.append(live)
-			totals.append(total)
-		return (numpy.concatenate(parts) if parts else numpy.zeros(0,
-			dtype=numpy.uint8), lives, totals, [r[6] for r in results], [r[7] for r
-			in results])
+		tile = self.tile
+		lengths = numpy.array([len(piece[3]) for piece in pieces],
+			dtype=numpy.int64)
+		at = numpy.concatenate([[0], numpy.cumsum(lengths)])
+		if len(pieces) == 1:
+			slots, positions, values = pieces[0][2], pieces[0][3], pieces[0][4]
+			if pieces[0][6]:
+				slots = self._slot_of[slots]
+		else:
+			slots = numpy.concatenate([self._slot_of[piece[2]] if piece[6] else
+				piece[2] for piece in pieces])
+			positions = numpy.concatenate([piece[3] for piece in pieces])
+			values = numpy.concatenate([piece[4] for piece in pieces])
 
-	def _entries_task(self, g, tid, slots, positions, values, n_tracks,
-		by_track=False):
-		"""Encode and compress one batch of tiles from their entries, each
-		track given by its slot in the group, or by its id with `by_track`.
-		The encoder stops before a tile that might not fit its buffer, which
-		holds at most about _BATCH_BYTES, and is called again from there."""
-
-		if by_track:
-			slots = self._slot_of[slots]
-		all_tiles = positions // self.tile
-		first = numpy.concatenate([[0], numpy.flatnonzero(all_tiles[1:] !=
-			all_tiles[:-1]) + 1, [len(all_tiles)]])
+		# The tiles of every piece, a piece starting a tile of its own.
+		all_tiles = positions // tile
+		change = numpy.empty(len(positions), dtype=numpy.bool_)
+		change[0] = True
+		numpy.not_equal(all_tiles[1:], all_tiles[:-1], out=change[1:])
+		change[at[1:-1]] = True
+		first = numpy.append(numpy.flatnonzero(change), len(positions))
 		tiles = all_tiles[first[:-1]]
-		del all_tiles
-		n = len(tiles)
-		n_entries = len(positions)
-		largest = int(numpy.diff(first).max())
-		need = max(4 + 4 * n_tracks + 11 * largest + 16, 24 + 18 * largest + 16)
-		bound = n * (4 * n_tracks + 24) + 18 * n_entries + 16
-		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
+		del all_tiles, change
+		n_tiles = len(tiles)
+		piece_tiles = numpy.searchsorted(first, at)
+		per_piece = numpy.diff(piece_tiles)
+		piece_tracks = numpy.array([piece[5] for piece in pieces],
+			dtype=numpy.int64)
+		class_at = numpy.concatenate([[0], numpy.cumsum(piece_tracks)])
+		classes = numpy.concatenate([self._classes[piece[0]] for piece in pieces])
+		sums_at = numpy.concatenate([[0], numpy.cumsum(per_piece * piece_tracks)])
+		stats = numpy.zeros((int(class_at[-1]), 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
-		tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
+		# Each tile's sums are kept only for a file that keeps summaries: a
+		# (tiles, tracks) array per piece of thousands of cells or bins is
+		# otherwise only touched pages.
+		tile_sums = numpy.zeros(int(sums_at[-1]) if self._summaries else 0,
+			dtype=numpy.float32)
+		tids = numpy.array([piece[1] for piece in pieces], dtype=numpy.int64)
+		file_tiles = self._tile_offsets[numpy.repeat(tids, per_piece)] + tiles
+
+		# The most a tile's chunk may take, and the bytes every tile at once
+		# may, as the encoder bounds them.
+		counts = numpy.diff(first)
+		tracks_of = numpy.repeat(piece_tracks, per_piece)
+		need = numpy.maximum(4 + 4 * tracks_of + 11 * counts + 16, 24 + 18 *
+			counts + 16)
+		room = numpy.cumsum((4 * tracks_of + 24 + 18 * counts)[::-1])[::-1]
+
 		parts = []
+		kinds_all = numpy.zeros(n_tiles, dtype=numpy.uint8)
 		t = 0
-		while t < n:
+		while t < n_tiles:
 			# A buffer per go: an uncompressed part is a view of its buffer,
 			# which the next go must not write over.
-			out = numpy.empty(min(bound, _BATCH_BYTES + need), dtype=numpy.uint8)
-			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
-			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
-			done = _encode_entries(self.tile, n_tracks, tiles[t:], first[t:],
-				slots, positions, values, self._classes[g], self._matrix,
-				self.level > 0, out, bounds, kinds, stats, tile_sums[t:])
-			parts.append(self._compress(tid, tiles[t:], done, out, bounds,
+			out = numpy.empty(min(int(room[t]) + 16, _ENTRIES_GO_BYTES + int(need[
+				t:].max())), dtype=numpy.uint8)
+			bounds = numpy.zeros(n_tiles - t + 1, dtype=numpy.int64)
+			kinds = numpy.zeros(n_tiles - t, dtype=numpy.uint8)
+			done = _encode_pieces(tile, piece_tracks, piece_tiles, class_at,
+				classes, stats, sums_at, tile_sums, tiles, first, slots, positions,
+				values, self._matrix, self.level > 0, out, bounds, kinds, t) - t
+			if done == 0:
+				raise RuntimeError("a tile did not fit an empty encode buffer.")
+			parts.append(self._compress(0, file_tiles[t:], done, out, bounds,
 				kinds))
+			kinds_all[t:t + done] = kinds[:done]
 			t += done
-		return _gather_parts(parts) + (stats, self._summary_of(tid, tiles,
-			tile_sums))
+		compressed, sizes, raw, kinds, where, crcs = _gather_parts(parts)
+
+		# Split by piece: the live tiles, their bytes, stats and summaries.
+		live_at = numpy.concatenate([[0], numpy.cumsum(numpy.add.reduceat(
+			kinds_all != 0, piece_tiles[:-1]).astype(numpy.int64))])
+		records = numpy.zeros(len(where), dtype=_LIVE)
+		records['tile'] = where
+		records['kind'] = kinds
+		records['size'] = sizes
+		records['raw'] = raw
+		records['crc'] = crcs
+		byte_at = numpy.concatenate([[0], numpy.cumsum(sizes)])
+		lives, totals, batch_stats, summaries = [], [], [], []
+		for p, piece in enumerate(pieces):
+			lo, hi = int(live_at[p]), int(live_at[p + 1])
+			lives.append(records[lo:hi])
+			totals.append(int(byte_at[hi] - byte_at[lo]))
+			batch_stats.append(stats[class_at[p]:class_at[p + 1]])
+			a, b = int(piece_tiles[p]), int(piece_tiles[p + 1])
+			summaries.append(self._summary_of(piece[1], tiles[a:b], tile_sums[
+				sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p]))) if
+				self._summaries else None)
+		return compressed[:int(byte_at[-1])], lives, totals, batch_stats, summaries
 
 	def _encode_dense(self, g, tid, values, items, columns, tiles, dtype):
 		"""Encode whole tiles covered by windows, each tile from window

@@ -563,6 +563,46 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 
 @numba.njit(nogil=True, cache=True)
+def _encode_pieces(tile, piece_tracks, piece_tiles, class_at, classes,
+	stats, sums_at, tile_sums, tiles, first, tracks, positions, values,
+	allow_matrix, compressed, out, bounds, kinds, t0):
+	"""`_encode_entries` of each piece of a batch in turn, from tile t0 of
+	the batch on, into one buffer. Piece p is tiles piece_tiles[p] to
+	piece_tiles[p + 1] - 1 of `tiles`, of a group of piece_tracks[p] tracks
+	whose classes are classes[class_at[p]:class_at[p + 1]], whose
+	statistics are those rows of `stats`, and whose tile sums are the
+	(tiles, tracks) block of `tile_sums` from sums_at[p], or are not kept
+	when `tile_sums` is empty. `first` indexes the batch's entries; `bounds`
+	and `kinds` cover its tiles from t0 on, bounds[0] where the first chunk
+	starts in `out`. Returns the tile of the batch that encoding stopped
+	before, as `_encode_entries` stops, or the number of tiles."""
+
+	n_pieces = piece_tracks.shape[0]
+	t = t0
+	p = 0
+	while p < n_pieces and piece_tiles[p + 1] <= t:
+		p += 1
+	while p < n_pieces:
+		a = max(t, piece_tiles[p])
+		b = piece_tiles[p + 1]
+		k = piece_tracks[p]
+		if tile_sums.shape[0] > 0:
+			s0 = sums_at[p] + (a - piece_tiles[p]) * k
+			sums = tile_sums[s0:s0 + (b - a) * k].reshape((b - a, k))
+		else:
+			sums = tile_sums.reshape((0, k))
+		done = _encode_entries(tile, k, tiles[a:b], first[a:b + 1], tracks,
+			positions, values, classes[class_at[p]:class_at[p + 1]], allow_matrix,
+			compressed, out, bounds[a - t0:b - t0 + 1], kinds[a - t0:b - t0],
+			stats[class_at[p]:class_at[p + 1]], sums)
+		if done < b - a:
+			return a + done
+		t = b
+		p += 1
+	return t
+
+
+@numba.njit(nogil=True, cache=True)
 def _any_infinite(values):
 	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
 	pass without a branch, which vectorizes."""
@@ -1042,9 +1082,10 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	group, with the value values[e]. A tile is stored as the kind
 	`_encode_block` would pick for the rows the entries fill, but with a
 	runs chunk weighed by the changes it would hold, where `_encode_block`
-	counts each NaN base as one. The chunks, `bounds`, `kinds` and `stats`
-	are as in `_encode_tiles`. Encoding stops before a tile whose chunk
-	might not fit the rest of `out`; returns the number of tiles encoded.
+	counts each NaN base as one. The chunks, `bounds`, `kinds`, `stats` and
+	`tile_sums` are as in `_encode_tiles`, and a `tile_sums` with no rows
+	keeps none. Encoding stops before a tile whose chunk might not fit the
+	rest of `out`; returns the number of tiles encoded.
 
 	Only the tracks a tile touches are visited per tile: their statistics
 	are reset after the tile and folded into `stats`, where a group of
@@ -1123,9 +1164,10 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			adjacent += (p == last + 1) & (nnz[g] > 1)
 			last = p
 
-		for k in range(n_touched):
-			g = touched[k]
-			tile_sums[t, g] = numpy.float32(sums[g])
+		if tile_sums.shape[0] > 0:
+			for k in range(n_touched):
+				g = touched[k]
+				tile_sums[t, g] = numpy.float32(sums[g])
 		if total == 0:
 			kinds[t] = _ZERO
 			bounds[t + 1] = position
