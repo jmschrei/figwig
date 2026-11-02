@@ -603,6 +603,40 @@ def _fold_batch(stats, rows, batch):
 	return flagged
 
 
+@numba.njit(nogil=True, cache=True)
+def _fold_exact(stats, rows, batch, exact, folded):
+	"""`_fold_batch`, with each track's sum folded from its sum over each
+	tile, exact[t] (float64), in order, for the tiles `folded` marks, as
+	`_fold_stats` folds them when the tiles are encoded on the writing
+	thread: the same sums, to the bit, from tiles encoded on the pool.
+	Returns the first track whose flags hold an overflow, or -1."""
+
+	flagged = -1
+	for k in range(rows.shape[0]):
+		g = rows[k]
+		for t in range(exact.shape[0]):
+			if not folded[t]:
+				continue
+			v = exact[t, k]
+			total = stats[g, 0]
+			s = total + v
+			if abs(total) >= abs(v):
+				stats[g, 5] += (total - s) + v
+			else:
+				stats[g, 5] += (v - s) + total
+			stats[g, 0] = s
+		stats[g, 1] += batch[k, 1]
+		if batch[k, 2] < stats[g, 2]:
+			stats[g, 2] = batch[k, 2]
+		if batch[k, 3] > stats[g, 3]:
+			stats[g, 3] = batch[k, 3]
+		f = numpy.int64(stats[g, 4]) | numpy.int64(batch[k, 4])
+		stats[g, 4] = numpy.float64(f)
+		if flagged < 0 and f & _FLAG_OVERFLOW:
+			flagged = g
+	return flagged
+
+
 def _crc_tables():
 	"""The eight tables of a slicing-by-8 CRC-32 (the polynomial of zlib
 	and of the figwig file), as a (8, 256) uint32 array."""
@@ -743,7 +777,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	"""Encode block[:, c0:c0 + width], one tile of a group, as one chunk at
 	`position` of `out`. Returns its kind byte, 0 for a tile whose values
 	are all zero, and where the chunk ends. `summary`, a float32 row of one
-	value per track, gets each track's sum over the tile.
+	value per track, gets each track's sum over the tile, or a float64 row
+	the sum itself.
 
 	Each track's row is scanned once without a branch for its nonzero bases
 	and changes of value, then for its nonzero bases, which are collected
@@ -787,7 +822,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 			collected = False
 
 	for g in range(n_tracks):
-		summary[g] = numpy.float32(sums[g])
+		summary[g] = sums[g]
 	if total == 0:
 		return 0, position
 
@@ -890,7 +925,7 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	and kinds[t] is its kind byte. A tile whose values are all zero takes no
 	bytes. stats[g] accumulates the sum, nonzero bases, minimum, maximum and
 	flags of the encoded values of track g, whose class is classes[g], and
-	tile_sums[t, g], float32, is track g's sum over tile t. With
+	tile_sums[t, g], float32 or float64, is track g's sum over tile t. With
 	`allow_matrix`, a tile may be stored as a matrix chunk; `compressed`
 	says whether the chunks will be deflated.
 

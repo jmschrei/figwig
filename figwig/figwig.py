@@ -57,6 +57,7 @@ from ._figwig_kernels import _CRC_TABLES
 from ._figwig_kernels import _crcs_of
 from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
+from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
@@ -194,6 +195,7 @@ _ENTRIES_PAIRS = 1 << 20
 # read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
+_INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
 
@@ -1466,8 +1468,11 @@ class FigWigWriter:
 				block = values[a:b] if identity else values[a:b, slots]
 				if block.ndim == 2:
 					# Intervals: one value per track, converted here, since
-					# the block is small.
-					block = numpy.ascontiguousarray(block[:, :, None], dtype=dtype)
+					# the block is small, and copied when the pool encodes
+					# them after this call returns.
+					block = numpy.array(block[:, :, None], dtype=dtype, order='C') \
+						if self._pool is not None else numpy.ascontiguousarray(block[
+						:, :, None], dtype=dtype)
 				elif self._copies and self._pool is not None:
 					block = self._copy(block)
 				else:
@@ -1804,12 +1809,15 @@ class FigWigWriter:
 
 		first_tile = int(starts[0] // tile)
 		open_ = self._open[g]
+		continued = False
 		if open_ is not None:
 			# A tile the earlier calls left open is continued when it is the
 			# first of this call's, and sealed otherwise.
 			if open_[0] != tid or open_[1] != first_tile:
 				self._encode(g, open_[0], numpy.array([open_[1]]), None, None,
 					None, False)
+			else:
+				continued = True
 			self._open[g] = None
 
 		# The tiles the items touch; the others stay zero and take nothing. A
@@ -1876,7 +1884,7 @@ class FigWigWriter:
 					keep_last = b == len(tiles) and f == len(segment) and \
 						not last_full
 					self._encode(g, tid, segment[e:f], lo[e:f], hi[e:f], edges,
-						keep_last)
+						keep_last, continued and a == 0 and e == 0)
 
 		if not last_full:
 			self._open[g] = (tid, last_tile)
@@ -2149,10 +2157,75 @@ class FigWigWriter:
 		return _gather_parts(parts) + (stats, self._summary_of(tid, tiles,
 			tile_sums))
 
-	def _encode(self, g, tid, tiles, lo, hi, items, keep_last):
+	def _encode(self, g, tid, tiles, lo, hi, items, keep_last, continued=True):
+		"""Encode a batch of tiles of one group and chromosome and hand the
+		chunks to the compressors. The group's buffer holds what the earlier
+		calls left in the open tile, which is the first of the batch when
+		`continued`, and gets the last tile with `keep_last`, so those two
+		are encoded on this thread; with a pool, the tiles between them are
+		encoded on it, each task with a buffer of its own, when they are
+		more than one."""
+
+		n = len(tiles)
+		first = 1 if continued else 0
+		last = n - 1 if keep_last else n
+		# A batch of one tile, as a window's partial edge tile is, is encoded
+		# here: a task for it would hold the window's edges until it ran.
+		if self._pool is None or items is None or last - first < 2:
+			self._encode_here(g, tid, tiles, lo, hi, items, keep_last)
+			return
+		if first:
+			self._encode_here(g, tid, tiles[:first], lo[:first], hi[:first],
+				items, False)
+		self._inflight.append((self._pool.submit(self._intervals_task, g, tid,
+			tiles[first:last], lo[first:last], hi[first:last], items), g,
+			'exact'))
+		if keep_last:
+			self._encode_here(g, tid, tiles[last:], lo[last:], hi[last:], items,
+				True)
+
+	def _intervals_task(self, g, tid, tiles, lo, hi, items):
+		"""Encode and compress tiles of items on the pool, from a buffer of
+		the task's own, with each tile's sums kept for `_write_exact`."""
+
+		n_tracks = len(self._groups[g])
+		tile = self.tile
+		starts, ends, values, by_base = items
+		buffer = numpy.zeros((n_tracks, tile), dtype=numpy.float64)
+		stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
+		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
+		n = len(tiles)
+		exact = numpy.zeros((n, n_tracks), dtype=numpy.float64)
+		folded = numpy.zeros(n, dtype=numpy.bool_)
+		parts = []
+		t = 0
+		while t < n:
+			# A buffer of at most _INTERVAL_BYTES, or two of the largest
+			# chunks, refilled as the encoder stops before a tile that might
+			# not fit: numpy backs an array of 4 MB or more with huge pages,
+			# which a buffer for every tile at once would touch for the few
+			# KB that runs chunks take.
+			out = numpy.empty(min((n - t) * (n_tracks * tile * 4 + 16) + n_tracks *
+				tile * 4, max(_INTERVAL_BYTES, 2 * (n_tracks * tile * 8 + 16))),
+				dtype=numpy.uint8)
+			bounds = numpy.zeros(n - t + 1, dtype=numpy.int64)
+			kinds = numpy.zeros(n - t, dtype=numpy.uint8)
+			done = _encode_tiles(tile, tiles[t:], lo[t:], hi[t:], starts, ends,
+				values, by_base, buffer, False, self._classes[g], self._matrix,
+				self.level > 0, out, bounds, kinds, stats, exact[t:])
+			if done == 0:
+				raise RuntimeError("a tile did not fit an empty encode buffer.")
+			folded[t:t + done] = kinds[:done] != 0
+			parts.append(self._compress(tid, tiles[t:], done, out, bounds, kinds))
+			t += done
+		return _gather_parts(parts) + (stats, exact, folded, self._summary_of(
+			tid, tiles, exact.astype(numpy.float32)))
+
+	def _encode_here(self, g, tid, tiles, lo, hi, items, keep_last):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
-		on this thread, since it fills the group's buffer, and hand the
-		chunks it made to the compressors."""
+		on this thread, with the group's buffer, and hand the chunks it made
+		to the compressors. With a pool, the batch's statistics are folded
+		when its chunks are written, in order with the pool's batches."""
 
 		n_tracks = len(self._groups[g])
 		tile = self.tile
@@ -2168,8 +2241,16 @@ class FigWigWriter:
 			starts, ends, values, by_base = items
 
 		n = len(tiles)
-		stats = self._stats[self._groups[g]]
-		tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
+		defer = self._pool is not None
+		if defer:
+			stats = numpy.zeros((n_tracks, 6), dtype=numpy.float64)
+			stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
+			tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float64)
+			folded = numpy.zeros(n, dtype=numpy.bool_)
+			goes = []
+		else:
+			stats = self._stats[self._groups[g]]
+			tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
 		expected = n - 1 if keep_last else n
 		t = 0
 		while True:
@@ -2187,18 +2268,24 @@ class FigWigWriter:
 				self._classes[g], self._matrix, self.level > 0, out, bounds, kinds,
 				stats, tile_sums[t:])
 			live = numpy.flatnonzero(kinds[:n_done])
-			if len(live) > 0:
-				args = (tid, tiles[t:], n_done, out, bounds, kinds)
-				if self._pool is None:
-					self._inflight.append((self._compress(*args), g, None))
-				else:
-					self._inflight.append((self._pool.submit(self._compress, *args),
-						g, None))
+			args = (tid, tiles[t:], n_done, out, bounds, kinds)
+			if defer:
+				folded[t:t + n_done] = kinds[:n_done] != 0
+				if len(live) > 0:
+					goes.append(args)
+			elif len(live) > 0:
+				self._inflight.append((self._compress(*args), g, None))
 			t += n_done
 			if t >= expected:
 				break
 			if n_done == 0:
 				raise RuntimeError("a tile did not fit an empty encode buffer.")
+		if defer:
+			if expected > 0:
+				self._inflight.append((self._pool.submit(self._compress_goes, goes,
+					stats, tile_sums[:expected], folded[:expected], tid,
+					tiles[:expected]), g, 'exact'))
+			return
 		self._stats[self._groups[g]] = stats
 		self._check_overflow(self._groups[g])
 		summary = self._summary_of(tid, tiles[:expected], tile_sums[:expected])
@@ -2489,6 +2576,8 @@ class FigWigWriter:
 				self._write_pieces(result, g)
 			elif kind == 'packed blocks':
 				self._write_packed_blocks(result, g)
+			elif kind == 'exact':
+				self._write_exact(result, g)
 			else:
 				self._write_result(result, g, kind)
 
@@ -2525,6 +2614,34 @@ class FigWigWriter:
 			else:
 				runs.append([first, last, offset, total])
 			offset += total
+
+	def _compress_goes(self, goes, stats, exact, folded, tid, tiles):
+		"""Compress the goes of `_encode_here` on the pool, as one result for
+		`_write_exact` with the batch's statistics and tile sums."""
+
+		parts = [self._compress(*args) for args in goes]
+		if not parts:
+			empty = numpy.zeros(0, dtype=numpy.int64)
+			parts = [(numpy.zeros(0, dtype=numpy.uint8), empty, empty, numpy.zeros(
+				0, dtype=numpy.uint8), empty, empty)]
+		return _gather_parts(parts) + (stats, exact, folded, self._summary_of(
+			tid, tiles, exact.astype(numpy.float32)))
+
+	def _write_exact(self, result, g):
+		"""Write a batch of tiles encoded from items, after folding in its
+		statistics with each tile's sums in order, as the writing thread
+		folds them without a pool."""
+
+		stats, exact, folded, summary = result[6:]
+		flagged = _fold_exact(self._stats, numpy.asarray(self._groups[g],
+			dtype=numpy.int64), stats, exact, folded)
+		if flagged >= 0:
+			raise ValueError("a value of track {!r} lies beyond float32's "
+				"range; declare the track float64 to keep it.".format(
+				self.tracks[int(flagged)]['name']))
+		if summary is not None:
+			self._sums[g].append(summary)
+		self._write_result(result[:6], g, None)
 
 	def _write_packed_blocks(self, result, tracks):
 		"""Write a packed task's tracks' blocks, as `_write_result` writes
