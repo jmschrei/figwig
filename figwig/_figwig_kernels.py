@@ -774,6 +774,14 @@ def _crcs_of(data, cuts, tables, out):
 
 
 @numba.njit(nogil=True, cache=True)
+def _crcs_of_libdeflate(crc32, data, cuts, out):
+	"""`_crcs_of` with libdeflate's crc32."""
+
+	for k in range(cuts.shape[0] - 1):
+		out[k] = crc32(0, data[cuts[k]:].ctypes, cuts[k + 1] - cuts[k])
+
+
+@numba.njit(nogil=True, cache=True)
 def _entry_bounds(positions, tracks, present):
 	"""The lowest and highest of `positions`, marking each track of
 	`tracks` in `present`, in one pass."""

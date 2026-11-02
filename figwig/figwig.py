@@ -56,6 +56,7 @@ import numpy
 from ._figwig_kernels import _BLOCK_ENTRIES
 from ._figwig_kernels import _CRC_TABLES
 from ._figwig_kernels import _crcs_of
+from ._figwig_kernels import _crcs_of_libdeflate
 from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
@@ -100,6 +101,7 @@ from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
 from ._kernels import _compiled
 from ._kernels import _libc_pread
+from ._kernels import _libdeflate_crc32
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
 from ._kernels import _pread_into
@@ -3165,8 +3167,13 @@ def _crcs(data, cuts):
 	one call without the GIL."""
 
 	out = numpy.empty(len(cuts) - 1, dtype=numpy.uint32)
-	_crcs_of(numpy.frombuffer(data, dtype=numpy.uint8), numpy.ascontiguousarray(
-		cuts, dtype=numpy.int64), _CRC_TABLES, out)
+	data = numpy.frombuffer(data, dtype=numpy.uint8)
+	cuts = numpy.ascontiguousarray(cuts, dtype=numpy.int64)
+	crc32 = _libdeflate_crc32()
+	if crc32 is None:
+		_crcs_of(data, cuts, _CRC_TABLES, out)
+	else:
+		_crcs_of_libdeflate(crc32, data, cuts, out)
 	return out.astype(numpy.int64)
 
 

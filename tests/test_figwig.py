@@ -3652,6 +3652,30 @@ def test_chunk_crcs_are_zlibs():
 		assert _crcs(piece, numpy.array([0, n])).tolist() == [zlib.crc32(piece)]
 
 
+@pytest.mark.parametrize('engine', ['libdeflate', 'table'])
+def test_chunk_crcs_with_and_without_libdeflate(monkeypatch, engine):
+	"""libdeflate's crc32 and the table kernel it stands in for give zlib's
+	values on pieces of every length, from bytes and from arrays."""
+
+	import zlib
+
+	from figwig.figwig import _crcs
+
+	if engine == 'table':
+		monkeypatch.setattr(figwig.figwig, '_libdeflate_crc32', lambda: None)
+	elif figwig.figwig._libdeflate_crc32() is None:
+		pytest.skip("libdeflate is not installed")
+	rng = numpy.random.default_rng(1)
+	data = rng.integers(0, 256, 300_000, dtype=numpy.uint8)
+	cuts = numpy.concatenate([[0, 0], numpy.sort(rng.integers(0, len(data),
+		200)), [len(data)]])
+	expected = [zlib.crc32(data[a:b].tobytes()) for a, b in zip(cuts[:-1],
+		cuts[1:])]
+	assert _crcs(data, cuts).tolist() == expected
+	assert _crcs(data.tobytes(), cuts).tolist() == expected
+	assert _crcs(b'', numpy.array([0, 0])).tolist() == [0]
+
+
 # Dense tracks: short runs decode in place, and a chromosome of dense chunks
 # is planned as enough batches for every thread without a chunk being
 # inflated twice.
