@@ -990,6 +990,7 @@ class FigWigWriter:
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
+		self._folds = []
 		self._block_jobs = []
 		self._copies = True
 		self._sorted_entries = False
@@ -2284,19 +2285,24 @@ class FigWigWriter:
 		if self._pool is None or items is None or last - first < 2:
 			self._encode_here(g, tid, tiles, lo, hi, items, keep_last)
 			return
+		batch = _Fold(g, tid, tiles, keep_last)
 		if first:
 			self._encode_here(g, tid, tiles[:first], lo[:first], hi[:first],
-				items, False)
-		self._inflight.append((self._pool.submit(self._intervals_task, g, tid,
-			tiles[first:last], lo[first:last], hi[first:last], items), g,
-			'exact'))
+				items, False, batch)
+		future = self._pool.submit(self._intervals_task, g, tid, tiles[first:last],
+			lo[first:last], hi[first:last], items)
+		batch.pieces.append(future)
+		batch.entries.append([future, g, 'exact', 0])
+		self._inflight.append(batch.entries[-1])
 		if keep_last:
 			self._encode_here(g, tid, tiles[last:], lo[last:], hi[last:], items,
-				True)
+				True, batch)
+		self._folds.append(batch)
 
 	def _intervals_task(self, g, tid, tiles, lo, hi, items):
 		"""Encode and compress tiles of items on the pool, from a buffer of
-		the task's own, with each tile's sums kept for `_write_exact`."""
+		the task's own, with each tile's sums and chunk bytes kept for
+		`_settle`."""
 
 		n_tracks = len(self._groups[g])
 		tile = self.tile
@@ -2307,6 +2313,7 @@ class FigWigWriter:
 		n = len(tiles)
 		exact = numpy.zeros((n, n_tracks), dtype=numpy.float64)
 		folded = numpy.zeros(n, dtype=numpy.bool_)
+		sizes = numpy.zeros(n, dtype=numpy.int64)
 		parts = []
 		t = 0
 		while t < n:
@@ -2326,16 +2333,18 @@ class FigWigWriter:
 			if done == 0:
 				raise RuntimeError("a tile did not fit an empty encode buffer.")
 			folded[t:t + done] = kinds[:done] != 0
+			sizes[t:t + done] = numpy.diff(bounds[:done + 1])
 			parts.append(self._compress(tid, tiles[t:], done, out, bounds, kinds))
 			t += done
 		return _gather_parts(parts) + (stats, exact, folded, self._summary_of(
-			tid, tiles, exact.astype(numpy.float32)))
+			tid, tiles, exact.astype(numpy.float32)), sizes)
 
-	def _encode_here(self, g, tid, tiles, lo, hi, items, keep_last):
+	def _encode_here(self, g, tid, tiles, lo, hi, items, keep_last, batch=None):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
 		on this thread, with the group's buffer, and hand the chunks it made
 		to the compressors. With a pool, the batch's statistics are folded
-		when its chunks are written, in order with the pool's batches."""
+		when the call ends, with those of the pool's batches, in order; as
+		a piece of `batch`, its entries in flight count as that batch's."""
 
 		n_tracks = len(self._groups[g])
 		tile = self.tile
@@ -2360,7 +2369,7 @@ class FigWigWriter:
 			stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
 			tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float64)
 			folded = numpy.zeros(n, dtype=numpy.bool_)
-			goes = []
+			sizes = numpy.zeros(n, dtype=numpy.int64)
 		else:
 			stats = self._stats[self._groups[g]]
 			tile_sums = numpy.zeros((n, n_tracks), dtype=numpy.float32)
@@ -2384,8 +2393,13 @@ class FigWigWriter:
 			args = (tid, tiles[t:], n_done, out, bounds, kinds)
 			if defer:
 				folded[t:t + n_done] = kinds[:n_done] != 0
+				sizes[t:t + n_done] = numpy.diff(bounds[:n_done + 1])
 				if len(live) > 0:
-					goes.append(args)
+					entry = [self._pool.submit(self._compress, *args), g, None, 1 if
+						batch is None else 0]
+					self._inflight.append(entry)
+					if batch is not None:
+						batch.entries.append(entry)
 			elif len(live) > 0:
 				self._inflight.append((self._compress(*args), g, None))
 			t += n_done
@@ -2394,10 +2408,12 @@ class FigWigWriter:
 			if n_done == 0:
 				raise RuntimeError("a tile did not fit an empty encode buffer.")
 		if defer:
-			if expected > 0:
-				self._inflight.append((self._pool.submit(self._compress_goes, goes,
-					stats, tile_sums[:expected], folded[:expected], tid,
-					tiles[:expected]), g, 'exact'))
+			piece = (tiles[:expected], stats, tile_sums[:expected],
+				folded[:expected], sizes[:expected])
+			if batch is None:
+				batch = _Fold(g, tid, tiles, keep_last)
+				self._folds.append(batch)
+			batch.pieces.append(piece)
 			return
 		self._stats[self._groups[g]] = stats
 		self._check_overflow(self._groups[g])
@@ -2672,18 +2688,84 @@ class FigWigWriter:
 		return compressed, sizes, raw, kinds, records, None, stats, summary
 
 	def _drain(self, keep=0):
-		"""Hand the pool the tracks' blocks waiting for it, then write every
-		batch in flight but the last `keep`."""
+		"""Fold in the statistics of the call's batches encoded from items,
+		hand the pool the tracks' blocks waiting for it, then write every
+		batch in flight but the last `keep`, each counted as the batches it
+		stands for."""
 
+		self._settle()
 		self._submit_blocks()
-		self._write(max(0, len(self._inflight) - keep))
+		weights = [item[3] if len(item) > 3 else 1 for item in self._inflight]
+		bound, total, n = sum(weights) - keep, 0, 0
+		for weight in weights:
+			if total + weight > bound:
+				break
+			total += weight
+			n += 1
+		self._write(n)
+
+	def _settle(self):
+		"""Fold in the statistics and summaries of the batches a call encoded
+		from items with a pool, piece after piece in order, as the calling
+		thread folds them as it encodes them without one, and count the
+		entries in flight of a batch the pool encoded part of as the goes the
+		calling thread's encoder would have made over it, so that each drain
+		writes, and folds in, the same batches as it would."""
+
+		folds, self._folds = self._folds, []
+		for batch in folds:
+			rows = numpy.asarray(self._groups[batch.g], dtype=numpy.int64)
+			sizes, live = [], []
+			for piece in batch.pieces:
+				if isinstance(piece, tuple):
+					tiles, stats, exact, folded, size = piece
+					summary = self._summary_of(batch.tid, tiles, exact.astype(
+						numpy.float32))
+				else:
+					stats, exact, folded, summary, size = piece.result()[6:]
+				flagged = _fold_exact(self._stats, rows, stats, exact, folded)
+				if flagged >= 0:
+					raise ValueError("a value of track {!r} lies beyond float32's "
+						"range; declare the track float64 to keep it.".format(
+						self.tracks[int(flagged)]['name']))
+				if summary is not None:
+					self._sums[batch.g].append(summary)
+				sizes.append(size)
+				live.append(folded)
+			if batch.entries:
+				batch.entries[0][3] = self._goes(batch, numpy.concatenate(sizes),
+					numpy.concatenate(live))
+
+	def _goes(self, batch, sizes, live):
+		"""How many goes with live tiles `_encode_here` makes over a whole
+		batch, from each tile's chunk bytes: a go stops before a tile that
+		might not fit the rest of a buffer sized for the tiles left."""
+
+		n = len(batch.tiles)
+		n_tracks = len(self._groups[batch.g])
+		need = n_tracks * self.tile * 8 + 16
+		expected = n - 1 if batch.keep_last else n
+		goes, t = 0, 0
+		while t < expected:
+			room = (n - t) * (n_tracks * self.tile * 4 + 16) + n_tracks * \
+				self.tile * 4
+			position, done = 0, t
+			while done < expected and position + need <= room:
+				position += int(sizes[done])
+				done += 1
+			if done == t:
+				raise RuntimeError("a tile did not fit an empty encode buffer.")
+			goes += bool(live[t:done].any())
+			t = done
+		return goes
 
 	def _write(self, n_batches):
 		"""Write the first `n_batches` batches in flight to the file, in
 		order, record their chunks or blocks in the index, and fold in the
 		stats of those encoded on the pool."""
 
-		for result, g, kind in self._inflight[:n_batches]:
+		for item in self._inflight[:n_batches]:
+			result, g, kind = item[0], item[1], item[2]
 			if not isinstance(result, (tuple, list)):
 				result = result.result()
 			if kind == 'pieces':
@@ -2691,7 +2773,8 @@ class FigWigWriter:
 			elif kind == 'packed blocks':
 				self._write_packed_blocks(result, g)
 			elif kind == 'exact':
-				self._write_exact(result, g)
+				# Its statistics and summary were folded in when its call ended.
+				self._write_result(result[:6], g, None)
 			else:
 				self._write_result(result, g, kind)
 
@@ -2728,34 +2811,6 @@ class FigWigWriter:
 			else:
 				runs.append([first, last, offset, total])
 			offset += total
-
-	def _compress_goes(self, goes, stats, exact, folded, tid, tiles):
-		"""Compress the goes of `_encode_here` on the pool, as one result for
-		`_write_exact` with the batch's statistics and tile sums."""
-
-		parts = [self._compress(*args) for args in goes]
-		if not parts:
-			empty = numpy.zeros(0, dtype=numpy.int64)
-			parts = [(numpy.zeros(0, dtype=numpy.uint8), empty, empty, numpy.zeros(
-				0, dtype=numpy.uint8), empty, empty)]
-		return _gather_parts(parts) + (stats, exact, folded, self._summary_of(
-			tid, tiles, exact.astype(numpy.float32)))
-
-	def _write_exact(self, result, g):
-		"""Write a batch of tiles encoded from items, after folding in its
-		statistics with each tile's sums in order, as the writing thread
-		folds them without a pool."""
-
-		stats, exact, folded, summary = result[6:]
-		flagged = _fold_exact(self._stats, numpy.asarray(self._groups[g],
-			dtype=numpy.int64), stats, exact, folded)
-		if flagged >= 0:
-			raise ValueError("a value of track {!r} lies beyond float32's "
-				"range; declare the track float64 to keep it.".format(
-				self.tracks[int(flagged)]['name']))
-		if summary is not None:
-			self._sums[g].append(summary)
-		self._write_result(result[:6], g, None)
 
 	def _write_packed_blocks(self, result, tracks):
 		"""Write a packed task's tracks' blocks, as `_write_result` writes
@@ -5395,6 +5450,20 @@ def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 
 	data = parts[0] if len(parts) == 1 else numpy.concatenate(parts)
 	return data, positions, lengths
+
+
+class _Fold:
+	"""A batch of tiles that a writer with a pool encoded from items: its
+	pieces in tile order, each the statistics of tiles encoded on the
+	calling thread or the future of a task of the pool, folded in when the
+	call ends, and the entries in flight of a batch the pool encoded part
+	of, to count as the calling thread's goes over it."""
+
+	__slots__ = ('g', 'tid', 'tiles', 'keep_last', 'pieces', 'entries')
+
+	def __init__(self, g, tid, tiles, keep_last):
+		self.g, self.tid, self.tiles, self.keep_last = g, tid, tiles, keep_last
+		self.pieces, self.entries = [], []
 
 
 class _Task:

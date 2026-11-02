@@ -510,6 +510,43 @@ def test_intervals_write_what_windows_write(tmp_path, ref):
 	numpy.testing.assert_array_equal(y[0], dense)
 
 
+def test_stats_fold_in_the_order_of_one_thread(tmp_path):
+	"""A window's partial edge tiles and an interval batch's tiles fold into
+	the statistics as one thread folds them, before the whole tiles in
+	flight, so values that cancel give the same sum, and file, on any
+	number of threads; a value beyond float32 raises from its own call."""
+
+	files = []
+	for n_jobs in (1, 2, 4):
+		path = str(tmp_path / 'w{}.fw'.format(n_jobs))
+		with FigWigWriter(path, {'chr1': 10000}, [{'name': 'a', 'dtype':
+				'float64'}], tile=256, n_jobs=n_jobs) as writer:
+			v = numpy.zeros((2, 1, 640))
+			v[0, 0, 0], v[0, 0, 128], v[0, 0, 384] = 1e16, 1.0, 0.3
+			v[1, 0, 0], v[1, 0, 224] = -1e16, 0.1
+			writer.write('chr1', [128, 800], v)
+			starts = numpy.arange(2000, 4000, 100)
+			values = numpy.where(numpy.arange(20) % 7 == 3, -1e16, 0.7)
+			values[0] = 1e16
+			writer.write('chr1', starts, values[:, None], ends=starts + 90)
+		with open(path, 'rb') as handle:
+			files.append(handle.read())
+	assert files[1] == files[0] and files[2] == files[0]
+
+	for n_jobs in (1, 4):
+		path = str(tmp_path / 'o{}.fw'.format(n_jobs))
+		writer = FigWigWriter(path, {'chr1': 100000}, [{'name': 'a', 'dtype':
+			'float32'}], tile=64, n_jobs=n_jobs)
+		starts = numpy.arange(0, 2000, 10)
+		writer.write('chr1', starts, numpy.ones(200)[:, None], ends=starts + 5)
+		values = numpy.ones(200)
+		values[150] = 1e39
+		with pytest.raises(ValueError, match="beyond float32's range"):
+			writer.write('chr1', starts + 3000, values[:, None], ends=starts +
+				3005)
+		writer._abandon()
+
+
 def test_groups_as_a_count(tmp_path):
 	path = str(tmp_path / 'g.fw')
 	with FigWigWriter(path, {'chr1': 100}, ['a', 'b', 'c', 'd', 'e'], groups=2,
