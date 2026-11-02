@@ -60,6 +60,7 @@ from ._figwig_kernels import _entry_bounds
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
+from ._figwig_kernels import _sorted_tile_sums
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
 from ._figwig_kernels import _CODE_SHIFT
@@ -2554,8 +2555,10 @@ class FigWigWriter:
 			return
 
 		tid = pending[0]
-		positions = numpy.concatenate(pending[1])
-		values = numpy.concatenate(pending[2])
+		positions = pending[1][0] if len(pending[1]) == 1 else numpy.concatenate(
+			pending[1])
+		values = pending[2][0] if len(pending[2]) == 1 else numpy.concatenate(
+			pending[2])
 		n = len(positions)
 		n_blocks = n // _BLOCK_ENTRIES if not final else -(-n // _BLOCK_ENTRIES)
 		cut = n_blocks * _BLOCK_ENTRIES if not final else n
@@ -2654,12 +2657,11 @@ class FigWigWriter:
 			sizes)]))
 		summary = None
 		if self._summaries:
-			tiles = positions // self.tile
-			unique, inverse = numpy.unique(tiles, return_inverse=True)
 			# NaN bases are no part of the sums, as in position order.
-			sums = numpy.bincount(inverse, weights=numpy.where(values == values,
-				values, 0.0), minlength=len(unique))
-			summary = (self._tile_offsets[tid] + unique, sums.astype(
+			tiles = numpy.empty(len(positions), dtype=numpy.int64)
+			sums = numpy.empty(len(positions), dtype=numpy.float64)
+			k = _sorted_tile_sums(positions, values, self.tile, tiles, sums)
+			summary = (self._tile_offsets[tid] + tiles[:k], sums[:k].astype(
 				numpy.float32)[:, None])
 		return compressed, sizes, raw, kinds, records, None, stats, summary
 

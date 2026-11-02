@@ -603,6 +603,27 @@ def _encode_pieces(tile, piece_tracks, piece_tiles, class_at, classes,
 
 
 @numba.njit(nogil=True, cache=True)
+def _sorted_tile_sums(positions, values, tile, tiles, sums):
+	"""Each tile's sum of one track's entries, positions ascending: the
+	distinct tiles go to `tiles` and their sums, a NaN counting 0, to
+	`sums`, each added base by base from 0.0 in order as numpy.bincount
+	adds its weights. Returns the number of tiles."""
+
+	k = -1
+	last = -1
+	for i in range(positions.shape[0]):
+		t = positions[i] // tile
+		if t != last:
+			k += 1
+			tiles[k] = t
+			sums[k] = 0.0
+			last = t
+		v = values[i]
+		sums[k] += v if v == v else 0.0
+	return k + 1
+
+
+@numba.njit(nogil=True, cache=True)
 def _any_infinite(values):
 	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
 	pass without a branch, which vectorizes."""
