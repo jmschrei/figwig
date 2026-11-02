@@ -2619,24 +2619,33 @@ class FigWigWriter:
 		ends = (positions[stops - 1] + 1).tolist()
 		ts, ids = tracks[firsts].tolist(), tids[firsts].tolist()
 		values = values.astype(numpy.float64, copy=False)
-		if not (values != 0).all():
-			# Zeros are left out, though each piece still counts as written.
-			keep = values != 0
+		# Zeros are left out, though each piece still counts as written; a
+		# piece with zeros keeps a copy of its other entries, as each track
+		# frees its own when it flushes, and the rest are views of the call's.
+		keep = values != 0
+		zeros = [False] * len(ts)
+		if not keep.all():
 			at = numpy.concatenate([[0], numpy.cumsum(keep)])
-			firsts, stops = at[firsts], at[stops]
-			positions, values = positions[keep], values[keep]
+			kept_positions, kept_values = positions[keep], values[keep]
+			kept_firsts, kept_stops = at[firsts].tolist(), at[stops].tolist()
+			zeros = ((at[stops] - at[firsts]) < (stops - firsts)).tolist()
 		pending_of, last_of, done_of = self._pending, self._last, self._done
-		for t, tid, a, b, end in zip(ts, ids, firsts.tolist(), stops.tolist(),
-				ends):
+		for k, (t, tid, a, b, end) in enumerate(zip(ts, ids, firsts.tolist(),
+				stops.tolist(), ends)):
 			pending = pending_of[t]
 			if pending is not None and pending[0] != tid:
 				self._flush_track(t)
 				pending = None
 			if pending is None:
 				pending = pending_of[t] = [tid, [], [], 0]
+			if zeros[k]:
+				a, b = kept_firsts[k], kept_stops[k]
+				piece = kept_positions[a:b].copy(), kept_values[a:b].copy()
+			else:
+				piece = positions[a:b], values[a:b]
 			if b > a:
-				pending[1].append(positions[a:b])
-				pending[2].append(values[a:b])
+				pending[1].append(piece[0])
+				pending[2].append(piece[1])
 				pending[3] += b - a
 				if pending[3] >= _BLOCK_ENTRIES:
 					self._flush_track(t, final=False)

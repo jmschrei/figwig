@@ -2428,6 +2428,24 @@ def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 		assert_identical(many, one)
 
 
+def test_track_order_pieces_with_zeros_are_their_own(tmp_path):
+	"""A track-order write_sparse leaves zeros out of its pending pieces:
+	a piece with zeros is a copy of its other entries, which its track
+	frees when it flushes, and a piece without is a view of the call's."""
+
+	path = str(tmp_path / 'z.fw')
+	with FigWigWriter(path, {'chr1': 1000}, [{'name': 'a', 'dtype': 'uint8'},
+			{'name': 'b', 'dtype': 'uint8'}], order='tracks') as writer:
+		writer.write_sparse('chr1', [1, 2, 3, 5, 6], [0, 0, 0, 1, 1], numpy.array(
+			[1, 0, 2, 3, 4]))
+		a, b = writer._pending[0], writer._pending[1]
+		assert a[3] == 2 and a[1][0].tolist() == [1, 3] and a[1][0].base is None
+		assert b[3] == 2 and b[1][0].tolist() == [5, 6] and b[1][0].base is not \
+			None
+	numpy.testing.assert_array_equal(FigWigReader(path).read('chr1', [0], 8,
+		dtype='float64')[0], [[0, 1, 0, 2, 0, 0, 0, 0], [0, 0, 0, 0, 0, 3, 4, 0]])
+
+
 def test_write_sparse_declared_dtypes_take_any_value_type(tmp_path):
 	"""Values of a byte order, float16 or longdouble, which the range kernel
 	does not take, are checked as float64, as `_check_values_fit` checks
