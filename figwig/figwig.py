@@ -1533,10 +1533,10 @@ class FigWigWriter:
 				if block.ndim == 2:
 					# Intervals: one value per track, converted here, since
 					# the block is small, and copied when the pool encodes
-					# them after this call returns.
+					# them after this call returns, unless `_copies` is off.
 					block = numpy.array(block[:, :, None], dtype=dtype, order='C') \
-						if self._pool is not None else numpy.ascontiguousarray(block[
-						:, :, None], dtype=dtype)
+						if self._pool is not None and self._copies else \
+						numpy.ascontiguousarray(block[:, :, None], dtype=dtype)
 				elif self._copies and self._pool is not None:
 					block = self._copy(block)
 				else:
