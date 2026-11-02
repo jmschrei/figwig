@@ -138,6 +138,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 	# bigWig under a final name.
 	paths, partials = {}, {}
 	pool = ThreadPoolExecutor(n_jobs) if n_jobs > 1 else None
+	reading = ThreadPoolExecutor(1)
 	for g, members in by_group.items():
 		writers = {}
 		try:
@@ -147,23 +148,36 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 				writers[i] = BigWigWriter(partials[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
 
-			for chrom, length in chrom_sizes:
-				width = int(min(_WINDOW, length))
-				for a in range(0, length, _PIECE):
-					starts = numpy.arange(a, min(length, a + _PIECE), width)
-					values = reader.read(chrom, starts, width, tracks=members,
-						dtype='float32', n_jobs=n_jobs)
-					if pool is None:
-						for k, i in enumerate(members):
-							writers[i].write(chrom, starts, values[:, k],
-								missing=missing)
-					else:
-						list(pool.map(lambda k: writers[members[k]].write(chrom,
-							starts, values[:, k], missing=missing), range(len(
-							members))))
-				if verbose and chrom == chrom_sizes[0][0]:
+			def write(chrom, starts, values):
+				if pool is None:
+					for k, i in enumerate(members):
+						writers[i].write(chrom, starts, values[:, k], missing=missing)
+				else:
+					list(pool.map(lambda k: writers[members[k]].write(chrom, starts,
+						values[:, k], missing=missing), range(len(members))))
+
+			def read(piece):
+				return reader.read(piece[0], piece[1], piece[2], tracks=members,
+					dtype='float32', n_jobs=n_jobs)
+
+			# Each piece is read while the one before it is written.
+			pieces = [(chrom, numpy.arange(a, min(length, a + _PIECE), int(min(
+				_WINDOW, length))), int(min(_WINDOW, length))) for chrom, length in
+				chrom_sizes for a in range(0, length, _PIECE)]
+			future = reading.submit(read, pieces[0]) if pieces else None
+			told = False
+			for k, piece in enumerate(pieces):
+				values = future.result()
+				if k + 1 < len(pieces):
+					future = reading.submit(read, pieces[k + 1])
+				if verbose and not told and piece[0] != chrom_sizes[0][0]:
 					print("{}: group {}: {}".format(path, g, ', '.join(paths[i] for i
 						in members)), file=sys.stderr)
+					told = True
+				write(piece[0], piece[1], values)
+			if verbose and not told:
+				print("{}: group {}: {}".format(path, g, ', '.join(paths[i] for i in
+					members)), file=sys.stderr)
 
 			for writer in writers.values():
 				writer.close()
@@ -180,6 +194,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 			raise
 	if pool is not None:
 		pool.shutdown()
+	reading.shutdown()
 
 	keys = ['file', 'name', 'dtype']
 	for i in ids.tolist():
