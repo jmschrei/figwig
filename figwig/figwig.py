@@ -3303,7 +3303,7 @@ class FigWigReader:
 		if zlib.crc32(stream, zlib.crc32(raw)) != crc:
 			raise ValueError(error + ": it does not match its checksum; the file "
 				"is corrupt.")
-		raw = _inflate_exact(stream, 17 * n_live, error)
+		raw = _inflate_stream(stream, 17 * n_live, error)
 		tiles = numpy.frombuffer(raw[:4 * n_live], dtype='<u4').astype(numpy.int64)
 		if n_live > 0 and (tiles[-1] >= n or (tiles[1:] <= tiles[:-1]).any()):
 			raise ValueError(error + ": its tiles are out of order.")
@@ -3404,7 +3404,7 @@ class FigWigReader:
 		if zlib.crc32(stream) != crc:
 			raise ValueError(error + ": its summary does not match its checksum; "
 				"the file is corrupt.")
-		raw = _inflate_exact(stream, n_sum * (4 + 4 * n_tracks), error)
+		raw = _inflate_stream(stream, n_sum * (4 + 4 * n_tracks), error)
 		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.int64)
 		if n_sum > 0 and (tiles.max() >= self._n_tiles or (tiles[1:] <= tiles[
 				:-1]).any()):
@@ -3460,7 +3460,7 @@ class FigWigReader:
 					if len(stream) != length or zlib.crc32(stream) != crc:
 						raise ValueError(error + ": a zoom level does not match its "
 							"checksum; the file is corrupt.")
-					decoded = _inflate_exact(stream, n * (4 + 8 * n_tracks), error)
+					decoded = _inflate_stream(stream, n * (4 + 8 * n_tracks), error)
 					bins = numpy.frombuffer(decoded[:4 * n], dtype='<u4').astype(
 						numpy.int64)
 					if n > 0 and (bins[-1] >= n_bins or (bins[1:] <= bins[:-1]).any()):
@@ -5003,6 +5003,31 @@ def _inflate_exact(stream, n, error):
 	if len(raw) != n or not inflater.eof:
 		raise ValueError(error + ": it is corrupt.")
 	return raw
+
+
+def _inflate_stream(stream, n, error):
+	"""`_inflate_exact` of a group's index, summary or zoom level, by
+	libdeflate where it loads, which inflates about twice as fast; by zlib
+	where it does not, or refuses the stream. libdeflate is called through
+	ctypes rather than a kernel, so that a command that decodes no chunk,
+	as `figwig merge` and `figwig info`, does not start numba for it."""
+
+	inflate = _libdeflate_inflate()
+	if inflate is not None and n > 0:
+		alloc, decompress, free = inflate
+		decompressor = alloc()
+		if decompressor != 0:
+			source = numpy.frombuffer(stream, dtype=numpy.uint8)
+			buffer = numpy.empty(n, dtype=numpy.uint8)
+			length = numpy.zeros(1, dtype=numpy.uintp)
+			try:
+				status = decompress(decompressor, source.ctypes.data, len(stream),
+					buffer.ctypes.data, n, length.ctypes.data)
+			finally:
+				free(decompressor)
+			if status == 0 and int(length[0]) == n:
+				return buffer
+	return _inflate_exact(stream, n, error)
 
 
 def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
