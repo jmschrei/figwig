@@ -3162,6 +3162,17 @@ def _radix_order(keys, bits, pool, n_chunks):
 	return order, keys
 
 
+def _join_records(arrays):
+	"""numpy.concatenate of 1-D structured arrays of one dtype, as their
+	bytes: numpy.concatenate promotes the fields of every structured array
+	it is given, which for a block index per track of 90,000 reads was most
+	of a read's planning."""
+
+	dtype = arrays[0].dtype
+	return numpy.concatenate([numpy.ascontiguousarray(a).view(numpy.uint8) for a
+		in arrays]).view(dtype)
+
+
 def _crcs(data, cuts):
 	"""The CRC-32 of each piece data[cuts[k]:cuts[k + 1]], as int64, in
 	one call without the GIL."""
@@ -5238,7 +5249,7 @@ class FigWigReader:
 			dtype=numpy.int64)
 		if counts.sum() == 0:
 			return []
-		blocks = numpy.concatenate(indexes)
+		blocks = _join_records(indexes)
 		at = numpy.concatenate([[0], numpy.cumsum(counts)])
 		owner = numpy.repeat(numpy.arange(len(ids)), counts)
 
@@ -5416,7 +5427,7 @@ class FigWigReader:
 			dtype=numpy.int64)
 		if counts.sum() == 0:
 			return []
-		blocks = numpy.concatenate(indexes)
+		blocks = _join_records(indexes)
 
 		# A track's blocks lie in order of chromosome and position, so each
 		# (track, chromosome) is a run of them, numbered in order, and a key
