@@ -212,6 +212,7 @@ _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the poo
 _JSON_TRACKS = 4096  # tracks per check that their attributes are JSON
 _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
 _INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at least
+_SLICED_RUN_TILES = 256  # tiles per run of an index laid out a run at a time
 _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
@@ -3712,58 +3713,76 @@ class FigWigReader:
 		if zlib.crc32(stream, zlib.crc32(raw)) != crc:
 			raise ValueError(error + ": it does not match its checksum; the file "
 				"is corrupt.")
-		raw = _inflate_stream(stream, 17 * n_live, error)
+		# The live tiles' fields follow each other in the stream, so that most
+		# would start unaligned, which numpy reads several times slower: the
+		# stream is inflated where its four-byte fields start aligned.
+		raw = _inflate_stream(stream, 17 * n_live, error, -5 * n_live % 4)
 		tiles = numpy.frombuffer(raw[:4 * n_live], dtype='<u4').astype(numpy.int64)
 		if n_live > 0 and (tiles[-1] >= n or (tiles[1:] <= tiles[:-1]).any()):
 			raise ValueError(error + ": its tiles are out of order.")
+		live_kinds = numpy.frombuffer(raw[4 * n_live:5 * n_live],
+			dtype=numpy.uint8)
+		live_sizes, live_raws, live_crcs = (numpy.frombuffer(raw[k * n_live:(k +
+			4) * n_live], dtype='<u4') for k in (5, 9, 13))
 		kinds = numpy.zeros(n, dtype=numpy.uint8)
 		sizes = numpy.zeros(n, dtype=numpy.uint32)
 		raws = numpy.zeros(n, dtype=numpy.uint32)
 		crcs = numpy.zeros(n, dtype=numpy.uint32)
-		kinds[tiles] = numpy.frombuffer(raw[4 * n_live:5 * n_live],
-			dtype=numpy.uint8)
-		sizes[tiles] = numpy.frombuffer(raw[5 * n_live:9 * n_live], dtype='<u4')
-		raws[tiles] = numpy.frombuffer(raw[9 * n_live:13 * n_live], dtype='<u4')
-		crcs[tiles] = numpy.frombuffer(raw[13 * n_live:17 * n_live], dtype='<u4')
+		kinds[tiles] = live_kinds
+		sizes[tiles] = live_sizes
+		raws[tiles] = live_raws
+		crcs[tiles] = live_crcs
+		del tiles
 		self._summary_at[g] = self._summary_header(at + n_bytes, error)
 
-		if (((kinds >> _CODE_SHIFT) & _CODE_MASK) > _F64).any() or ((kinds &
-				_KIND_MASK) > _RUNS).any():
+		# The checks look at the live tiles alone: every other tile is 0,
+		# which passes each of them.
+		if (((live_kinds >> _CODE_SHIFT) & _CODE_MASK) > _F64).any() or ((
+				live_kinds & _KIND_MASK) > _RUNS).any():
 			raise ValueError(error + ": a chunk has a kind this figwig does not "
 				"know.")
-		if ((kinds == 0) != (sizes == 0)).any() or ((kinds == 0) != (raws == 0)
-				).any() or ((kinds & _STORED > 0) & (sizes != raws)).any() or (
-				self._codec == _CODEC_NONE and (sizes != raws).any()):
+		if ((live_kinds == 0) != (live_sizes == 0)).any() or ((live_kinds == 0)
+				!= (live_raws == 0)).any() or ((live_kinds & _STORED > 0) & (
+				live_sizes != live_raws)).any() or (self._codec == _CODEC_NONE and
+				(live_sizes != live_raws).any()):
 			raise ValueError(error + ": a chunk's kind and size disagree.")
 		# No chunk of the group is larger than its dense float64 form plus
 		# its headers, so a declared size past that asks for memory the
 		# chunk cannot fill.
 		n_tracks = len(self._groups[g])
 		largest = n_tracks * self.tile * 8 + 16 * n_tracks + 64
-		if (raws > largest).any() or (sizes > largest + 64).any():
+		if (live_raws > largest).any() or (live_sizes > largest + 64).any():
 			raise ValueError(error + ": a chunk's size is larger than any chunk "
 				"of {} tracks can be.".format(n_tracks))
 
-		offsets = numpy.zeros(n, dtype=numpy.int64)
-		covered = numpy.zeros(n, dtype=numpy.bool_)
+		# The runs are checked and laid out at once, and again one at a time
+		# when one fails, which names its fault.
 		limit = numpy.uint64(self._file_size)
-		for run in runs:
-			first, last = int(run['first']), int(run['last'])
-			if first > last or last >= n or covered[first:last + 1].any() or \
-					run['offset'] > limit or run['bytes'] > limit - run['offset']:
-				raise ValueError(error + ": a run of chunks is out of order or "
-					"lies outside the file.")
+		laid_out = _runs_offsets(runs, sizes, int(live_sizes.sum(dtype=numpy.uint64)),
+			n, limit, 8 * n_live + n)
+		if laid_out is not None:
+			offsets, covered, stray = laid_out
+		else:
+			offsets = numpy.zeros(n, dtype=numpy.int64)
+			covered = numpy.zeros(n, dtype=numpy.bool_)
+			for run in runs:
+				first, last = int(run['first']), int(run['last'])
+				if first > last or last >= n or covered[first:last + 1].any() or \
+						run['offset'] > limit or run['bytes'] > limit - run['offset']:
+					raise ValueError(error + ": a run of chunks is out of order or "
+						"lies outside the file.")
 
-			chunk_sizes = sizes[first:last + 1].astype(numpy.int64)
-			if int(chunk_sizes.sum()) != int(run['bytes']):
-				raise ValueError(error + ": a run's chunks do not add up to its "
-					"bytes.")
+				chunk_sizes = sizes[first:last + 1].astype(numpy.int64)
+				if int(chunk_sizes.sum()) != int(run['bytes']):
+					raise ValueError(error + ": a run's chunks do not add up to its "
+						"bytes.")
 
-			covered[first:last + 1] = True
-			offsets[first:last + 1] = int(run['offset']) + numpy.cumsum(
-				chunk_sizes) - chunk_sizes
+				covered[first:last + 1] = True
+				offsets[first:last + 1] = int(run['offset']) + numpy.cumsum(
+					chunk_sizes) - chunk_sizes
+			stray = (sizes[~covered] != 0).any()
 
-		if (sizes[~covered] != 0).any():
+		if stray:
 			raise ValueError(error + ": a chunk lies in no run.")
 		if len(runs) > 1:
 			order = numpy.argsort(runs['offset'], kind='stable')
@@ -5716,6 +5735,91 @@ def _continuing_windows(rows, inverse, n_unique):
 	return numpy.cumsum(edges)[:n_unique] > 0
 
 
+def _runs_offsets(runs, sizes, total, n, limit, room):
+	"""Each of n tiles' offset in the file, whether a run covers it, and
+	whether a chunk of nonzero size lies outside every run, from a group's
+	runs of chunks, the chunks' sizes and their `total`, the same as laying
+	the runs out one at a time; None when a run is out of order, lies past
+	the file's `limit` or the last tile, overlaps another, or is not the sum
+	of its chunks, or when the runs' own arrays would take more than `room`
+	bytes. Short runs are laid out a batch at a time, in arrays of 24 bytes
+	a tile and 48 a run that, with the runs', take at most `room` bytes."""
+
+	if 24 * len(runs) > room:
+		return None
+	first, last = runs['first'], runs['last']
+	offset, n_bytes = runs['offset'], runs['bytes']
+	if not ((first <= last).all() and (last < n).all() and (offset <= limit).all()
+			and (n_bytes <= limit - offset).all()):
+		return None
+	if len(runs) > 1:
+		if (first[1:] >= first[:-1]).all():
+			if (first[1:] <= last[:-1]).any():
+				return None
+		else:
+			order = numpy.argsort(first, kind='stable')
+			if (first[order[1:]] <= last[order[:-1]]).any():
+				return None
+			del order
+
+	offsets = numpy.zeros(n, dtype=numpy.int64)
+	covered = numpy.zeros(n, dtype=numpy.bool_)
+	lengths = (last - first + 1).astype(numpy.int64)
+	# Long runs are laid out a slice at a time, faster than gathering their
+	# tiles, and with one array of their length.
+	sliced = len(runs) == 0 or int(lengths.sum()) >= _SLICED_RUN_TILES * len(runs)
+	cost = lengths * 24
+	cost += 48
+	numpy.cumsum(cost, out=cost)
+	room -= 16 * len(runs)
+	k = 0
+	while k < len(runs):
+		done = int(cost[k - 1]) if k else 0
+		if sliced or int(cost[k]) - done > room:
+			a, b, at = int(first[k]), int(last[k]) + 1, int(offset[k])
+			chunk_sizes = sizes[a:b].astype(numpy.int64)
+			run = offsets[a:b]
+			numpy.cumsum(chunk_sizes, out=run)
+			if int(run[-1]) != int(n_bytes[k]):
+				return None
+			run -= chunk_sizes
+			run += at
+			covered[a:b] = True
+			k += 1
+			continue
+		stop = int(numpy.searchsorted(cost, done + room, 'right'))
+		if not _lay_out_runs(first[k:stop].astype(numpy.int64), lengths[k:stop],
+				offset[k:stop], n_bytes[k:stop], sizes, offsets, covered):
+			return None
+		k = stop
+	# The runs do not overlap and each is the sum of its chunks, so the
+	# chunks outside them are 0 exactly when the runs' bytes are the total,
+	# which is below 2**64.
+	return offsets, covered, (total - int(n_bytes.sum())) % (1 << 64) != 0
+
+
+def _lay_out_runs(first, lengths, offset, n_bytes, sizes, offsets, covered):
+	"""Lay these runs out at once by their tiles into offsets and covered;
+	False when a run is not the sum of its chunks."""
+
+	ends = numpy.cumsum(lengths)
+	starts = ends - lengths
+	tiles = numpy.repeat(first - starts, lengths)
+	tiles += numpy.arange(len(tiles))
+	chunk_sizes = sizes[tiles].astype(numpy.int64)
+	before = numpy.cumsum(chunk_sizes)
+	if (before[ends - 1] - before[starts] + chunk_sizes[starts] != n_bytes.astype(
+			numpy.int64)).any():
+		return False
+	before -= chunk_sizes
+	del chunk_sizes
+	at = numpy.repeat(offset.astype(numpy.int64) - before[starts], lengths)
+	at += before
+	offsets[tiles] = at
+	covered[tiles] = True
+	return True
+
+
 def _window_tiles(tile, tile_offsets, tids, starts, lengths, width, stops=None):
 	"""The tiles the windows overlap, clipped to their chromosomes, as
 	(window rows, tiles on the chromosome, distinct file tiles, where each
@@ -5819,12 +5923,13 @@ def _inflate_exact(stream, n, error):
 	return raw
 
 
-def _inflate_stream(stream, n, error):
+def _inflate_stream(stream, n, error, pad=0):
 	"""`_inflate_exact` of a group's index, summary or zoom level, by
-	libdeflate where it loads, which inflates about twice as fast; by zlib
-	where it does not, or refuses the stream. libdeflate is called through
-	ctypes rather than a kernel, so that a command that decodes no chunk,
-	as `figwig merge` and `figwig info`, does not start numba for it."""
+	libdeflate where it loads, which inflates about twice as fast, `pad`
+	bytes into an array of its own; by zlib where it does not, or refuses
+	the stream. libdeflate is called through ctypes rather than a kernel, so
+	that a command that decodes no chunk, as `figwig merge` and `figwig
+	info`, does not start numba for it."""
 
 	inflate = _libdeflate_inflate()
 	if inflate is not None and n > 0:
@@ -5832,7 +5937,7 @@ def _inflate_stream(stream, n, error):
 		decompressor = alloc()
 		if decompressor != 0:
 			source = numpy.frombuffer(stream, dtype=numpy.uint8)
-			buffer = numpy.empty(n, dtype=numpy.uint8)
+			buffer = numpy.empty(n + pad, dtype=numpy.uint8)[pad:]
 			length = numpy.zeros(1, dtype=numpy.uintp)
 			try:
 				status = decompress(decompressor, source.ctypes.data, len(stream),

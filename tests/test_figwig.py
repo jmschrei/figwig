@@ -3231,6 +3231,86 @@ def test_index_of_empty_groups_is_small(tmp_path):
 	assert all(index is None for index in copy._index)
 
 
+@pytest.mark.parametrize('sliced,room', [(256, 1 << 30), (1, 1 << 30), (10 **
+	9, 1 << 30), (10 ** 9, 0), (10 ** 9, 2000)])
+def test_runs_laid_out_at_once_as_one_at_a_time(monkeypatch, sliced, room):
+	"""A group's runs of chunks are checked and laid out at once, in batches
+	of whatever size, or a slice at a time when they are long, with the
+	offsets and coverage of laying them out one at a time, and refused
+	exactly when one at a time refuses one of them; with no room for the
+	runs' own arrays they are left to be laid out one at a time."""
+
+	monkeypatch.setattr(figwig.figwig, '_SLICED_RUN_TILES', sliced)
+
+	rng = numpy.random.default_rng(3)
+	limit = numpy.uint64(1 << 20)
+
+	def one_at_a_time(runs, sizes, n):
+		offsets = numpy.zeros(n, dtype=numpy.int64)
+		covered = numpy.zeros(n, dtype=numpy.bool_)
+		for run in runs:
+			first, last = int(run['first']), int(run['last'])
+			if first > last or last >= n or covered[first:last + 1].any() or \
+					run['offset'] > limit or run['bytes'] > limit - run['offset']:
+				return None
+			chunk_sizes = sizes[first:last + 1].astype(numpy.int64)
+			if int(chunk_sizes.sum()) != int(run['bytes']):
+				return None
+			covered[first:last + 1] = True
+			offsets[first:last + 1] = int(run['offset']) + numpy.cumsum(
+				chunk_sizes) - chunk_sizes
+		return offsets, covered, (sizes[~covered] != 0).any()
+
+	refused = strays = 0
+	for trial in range(2000):
+		n = int(rng.integers(1, 200))
+		sizes = rng.integers(0, 50, n).astype(numpy.uint32)
+		sizes[rng.random(n) < 0.5] = 0
+		cuts = numpy.sort(rng.choice(n + 1, min(n + 1, int(rng.integers(1, 12))),
+			replace=False))
+		spans = [(int(a), int(b) - 1) for a, b in zip(cuts[:-1], cuts[1:])]
+		spans = [span for span in spans if rng.random() < 0.8]
+		rng.shuffle(spans)
+		runs = numpy.zeros(len(spans), dtype=figwig.figwig._RUN)
+		at = 64
+		for j, (first, last) in enumerate(spans):
+			runs[j] = (first, last, at, int(sizes[first:last + 1].sum()))
+			at += int(runs[j]['bytes'])
+		if len(runs) and trial % 2:
+			j = int(rng.integers(len(runs)))
+			fault = int(rng.integers(6))
+			if fault == 0:
+				runs[j]['bytes'] += 1
+			elif fault == 1:
+				runs[j]['last'] = n + int(rng.integers(3))
+			elif fault == 2:
+				runs[j]['first'] = runs[j]['last'] + 1
+			elif fault == 3:
+				runs[j]['offset'] = int(limit) + 1
+			elif fault == 4:
+				runs[j]['bytes'] = int(limit) - int(runs[j]['offset']) + 1
+			elif len(runs) > 1:
+				runs[j]['first'] = runs[(j + 1) % len(runs)]['last']
+
+		expected = one_at_a_time(runs, sizes, n)
+		total = int(sizes.sum(dtype=numpy.uint64))
+		got = figwig.figwig._runs_offsets(runs, sizes, total, n, limit, 24 * len(
+			runs) + room)
+		if len(runs):
+			assert figwig.figwig._runs_offsets(runs, sizes, total, n, limit, 24 *
+				len(runs) - 1) is None
+		assert (got is None) == (expected is None), trial
+		if expected is None:
+			refused += 1
+		else:
+			assert got[0].dtype == numpy.int64 and got[1].dtype == numpy.bool_
+			assert numpy.array_equal(got[0], expected[0]), trial
+			assert numpy.array_equal(got[1], expected[1]), trial
+			assert got[2] == expected[2], trial
+			strays += bool(expected[2])
+	assert 300 < refused < 1000 and strays > 50
+
+
 def test_same_stats_whatever_the_call_split(tmp_path):
 	"""The sum of a float track is compensated, so splitting the values
 	between calls differently gives the same statistics table."""
