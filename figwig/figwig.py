@@ -162,6 +162,11 @@ _CHUNKS_PER_THREAD = 64
 _THREAD_READ_BYTES = 1 << 18
 _THREAD_OUT_BYTES = 1 << 21
 _MIN_READ_THREADS = 4
+
+# A read of several groups cuts a group's batches from its own share of the
+# threads, or where that is smaller, from the whole read's share, up to this
+# many bytes a thread.
+_GROUP_BATCH_BYTES = 1 << 17
 _SPLIT_PAIRS = 1024
 _MAX_DENSE_BYTES = 1 << 33
 _SCRATCH_BYTES = 1 << 28
@@ -4891,7 +4896,7 @@ class FigWigReader:
 		chromosome of dense float tracks was 13 batches, and 32 threads
 		split them by their windows, each part inflating its chunks again.
 		`read_bytes`, the bytes of every group's chunks of the read, sizes
-		those batches when the read spans several groups."""
+		larger batches for a read of many small groups."""
 
 		tile = self.tile
 		kinds, sizes, raws, offsets, crcs = self._group_index(g)
@@ -4907,9 +4912,15 @@ class FigWigReader:
 		# long windows and cost a copy of the output per thread.
 		cap = _BATCH_BYTES
 		if n_threads > 1 and bins == 1:
-			cap = max(int(bounds.max()), min(_BATCH_BYTES, (int(bounds.sum()) if
-				read_bytes is None else read_bytes) // (n_threads *
-				_READ_BATCHES_PER_THREAD)))
+			share = int(bounds.sum()) // (n_threads * _READ_BATCHES_PER_THREAD)
+			if read_bytes is not None:
+				# A batch costs the calling thread its dispatch whatever its
+				# size, so a read of many small groups takes batches of the
+				# whole read's share, up to _GROUP_BATCH_BYTES a thread, where
+				# its groups' own would be smaller.
+				share = max(share, min(read_bytes // (n_threads *
+					_READ_BATCHES_PER_THREAD), n_threads * _GROUP_BATCH_BYTES))
+			cap = max(int(bounds.max()), min(_BATCH_BYTES, share))
 
 		# Batches of chunks, cut where a batch would hold too many bytes
 		# before compression or too many chunks; a binned read's batches
