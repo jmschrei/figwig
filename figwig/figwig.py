@@ -5158,70 +5158,83 @@ class FigWigReader:
 	def _plan_tracks(self, channels, tids, starts, lengths, width, out, mode,
 		accumulate, bins, n_jobs, stops=None, nan_mode=0):
 		"""The tasks that read windows from a file in track order: each a
-		batch of blocks and the (window, block, channel) pairs."""
+		batch of blocks and the (window, block, channel) pairs. Every track's
+		windows are paired with its blocks at once, from one sorted key over
+		every track's blocks, where a loop over the tracks and chromosomes
+		took seconds for thousands of cells."""
 
-		pairs = []
-		for i, channel in channels.items():
-			blocks = self._group_index(i)
-			if len(blocks) == 0:
-				continue
-			for tid in numpy.unique(tids).tolist():
-				mine = numpy.flatnonzero(blocks['chrom'] == tid)
-				windows = numpy.flatnonzero(tids == tid)
-				if len(mine) == 0 or len(windows) == 0:
-					continue
-				firsts = blocks['first'][mine].astype(numpy.int64)
-				lasts = blocks['last'][mine].astype(numpy.int64)
-				ends = numpy.minimum(starts[windows] + width if stops is None else
-					stops[windows], lengths[windows])
-				lo = numpy.searchsorted(lasts, starts[windows], side='left')
-				hi = numpy.searchsorted(firsts, ends, side='left')
-				counts = numpy.maximum(hi - lo, 0)
-				total = int(counts.sum())
-				if total == 0:
-					continue
-				rows = numpy.repeat(windows, counts)
-				which = numpy.repeat(lo, counts) + numpy.arange(total) - \
-					numpy.repeat(numpy.cumsum(counts) - counts, counts)
-				pairs.append((numpy.full(total, i, dtype=numpy.int64), mine[which],
-					rows, numpy.full(total, channel, dtype=numpy.int64)))
-
-		if not pairs:
+		ids = numpy.array(list(channels), dtype=numpy.int64)
+		indexes = [self._group_index(i) for i in ids.tolist()]
+		counts = numpy.array([len(blocks) for blocks in indexes],
+			dtype=numpy.int64)
+		if counts.sum() == 0:
 			return []
+		blocks = numpy.concatenate(indexes)
+		at = numpy.concatenate([[0], numpy.cumsum(counts)])
+		owner = numpy.repeat(numpy.arange(len(ids)), counts)
 
-		track_of = numpy.concatenate([p[0] for p in pairs])
-		block_of = numpy.concatenate([p[1] for p in pairs])
-		rows = numpy.concatenate([p[2] for p in pairs])
-		slots = numpy.concatenate([p[3] for p in pairs])
+		# A track's blocks lie in order of chromosome and position, so each
+		# (track, chromosome) is a run of them, numbered in order, and a key
+		# of that number and a position orders every block at once.
+		n_chroms = len(self._lengths)
+		runs = owner * n_chroms + blocks['chrom'].astype(numpy.int64)
+		change = numpy.concatenate([[False], runs[1:] != runs[:-1]])
+		heads = numpy.flatnonzero(change | (numpy.arange(len(runs)) == 0))
+		number = numpy.cumsum(change)
+		lasts = (number << 32) | blocks['last'].astype(numpy.int64)
+		firsts = (number << 32) | blocks['first'].astype(numpy.int64)
 
-		# Each block once, batched by its uncompressed bytes.
-		keys = track_of * (1 << 40) + block_of
+		# Each run with every window on its chromosome, in the windows' order.
+		by_chrom = numpy.argsort(tids, kind='stable')
+		chrom_at = numpy.searchsorted(tids[by_chrom], numpy.arange(n_chroms + 1))
+		run_chroms = runs[heads] % n_chroms
+		per_run = chrom_at[run_chroms + 1] - chrom_at[run_chroms]
+		total = int(per_run.sum())
+		if total == 0:
+			return []
+		run_of = numpy.repeat(numpy.arange(len(heads)), per_run)
+		windows = by_chrom[numpy.repeat(chrom_at[run_chroms], per_run) +
+			numpy.arange(total) - numpy.repeat(numpy.cumsum(per_run) - per_run,
+			per_run)]
+		ends = numpy.minimum(starts[windows] + width if stops is None else stops[
+			windows], lengths[windows])
+		lo = numpy.searchsorted(lasts, (run_of << 32) | starts[windows],
+			side='left')
+		hi = numpy.searchsorted(firsts, (run_of << 32) | ends, side='left')
+		found = numpy.maximum(hi - lo, 0)
+		total = int(found.sum())
+		if total == 0:
+			return []
+		rows = numpy.repeat(windows, found)
+		block_of = numpy.repeat(lo, found) + numpy.arange(total) - numpy.repeat(
+			numpy.cumsum(found) - found, found)
+		track_of = ids[owner[block_of]]
+		slots = numpy.array(list(channels.values()), dtype=numpy.int64)[owner[
+			block_of]]
+
+		# Each block once, batched by its uncompressed bytes, in order of
+		# track id and block.
+		keys = track_of * (1 << 40) + (block_of - at[owner[block_of]])
 		unique, first, inverse = numpy.unique(keys, return_index=True,
 			return_inverse=True)
 		order = numpy.argsort(inverse, kind='stable')
 		rows, slots, inverse = rows[order], slots[order], inverse[order]
-		u_tracks, u_blocks = track_of[first], block_of[first]
-		records = numpy.concatenate([self._group_index(int(t))[b:b + 1] for t, b
-			in zip(u_tracks.tolist(), u_blocks.tolist())])
+		records = blocks[block_of[first]]
 		bounds = records['raw'].astype(numpy.int64) + 8
 		edges = numpy.concatenate([numpy.flatnonzero(numpy.diff(inverse,
 			prepend=-1)), [len(inverse)]])
 
-		most = _batch_chunks(len(unique), n_jobs)
+		cuts, totals, _ = _batch_cuts(bounds, numpy.ones(len(bounds),
+			dtype=numpy.int64), int(_BATCH_BYTES), int(_batch_chunks(len(unique),
+			n_jobs)), numpy.zeros(0, dtype=numpy.bool_), False)
 		tasks = []
-		a = 0
-		while a < len(unique):
-			total_bytes, b = 0, a
-			while b < len(unique) and (b == a or (total_bytes + bounds[b] <=
-					_BATCH_BYTES and b - a < most)):
-				total_bytes += int(bounds[b])
-				b += 1
+		for a, b, total_bytes in zip(cuts[:-1].tolist(), cuts[1:].tolist(),
+				totals.tolist()):
 			p0, p1 = int(edges[a]), int(edges[b])
 			tasks.append(_BlockTask(self, records[a:b], int(total_bytes),
 				inverse[p0:p1] - a, slots[p0:p1], starts[rows[p0:p1]], rows[p0:p1],
 				out, width, mode, accumulate, bins, _empty_pairs if stops is None
 				else stops[rows[p0:p1]], nan_mode))
-			a = b
 
 		return tasks
 
