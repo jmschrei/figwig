@@ -582,23 +582,24 @@ def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
 		tid = tids[r]
 		for c0 in range(0, width, step):
 			c1 = min(width, c0 + step)
+			row = block[r, c0:c1]
+			brow = bits[r, c0:c1]
 
-			n_bases, n_runs, n_stretches = 0, 0, 0
-			kept, last = False, numpy.uint32(0)
-			for c in range(c0, c1):
-				value = block[r, c]
-				if value != value or (not missing_is_nan and value == missing):
-					kept = False
-					continue
-
-				n_bases += 1
-				if not kept:
-					n_runs += 1
-					n_stretches += 1
-				elif bits[r, c] != last:
-					n_stretches += 1
-
-				kept, last = True, bits[r, c]
+			# Counted without a branch, each base against the one before it,
+			# over row views, so that the loop vectorizes.
+			value = row[0]
+			was = (value == value) & (missing_is_nan | (value != missing))
+			n_bases = numpy.int64(was)
+			n_runs = numpy.int64(was)
+			n_stretches = numpy.int64(was)
+			for c in range(1, c1 - c0):
+				value = row[c]
+				before = row[c - 1]
+				kept = (value == value) & (missing_is_nan | (value != missing))
+				was = (before == before) & (missing_is_nan | (before != missing))
+				n_bases += kept
+				n_runs += kept & (not was)
+				n_stretches += kept & ((not was) | (brow[c] != brow[c - 1]))
 
 			if n_bases == 0:
 				continue
@@ -608,15 +609,15 @@ def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
 			bed = n_stretches * costs[3]
 			kind = 3 if fixed <= var and fixed <= bed else 2 if var <= bed else 1
 
-			kept = False
-			for c in range(c0, c1):
-				value = block[r, c]
+			kept, last = False, numpy.uint32(0)
+			for c in range(c1 - c0):
+				value = row[c]
 				if value != value or (not missing_is_nan and value == missing):
 					kept = False
 					continue
 
-				position = firsts[r] + c
-				if kind == 1 and kept and bits[r, c] == last:
+				position = firsts[r] + c0 + c
+				if kind == 1 and kept and brow[c] == last:
 					ends[n_items - 1] = position + 1
 					continue
 
@@ -633,7 +634,7 @@ def _window_items(block, bits, firsts, tids, missing, by_row, segment_bases,
 				values[n_items] = value
 				n_items += 1
 				part_end = position + 1
-				kept, last = True, bits[r, c]
+				kept, last = True, brow[c]
 
 	return n_items, n_parts
 
