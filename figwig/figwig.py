@@ -936,6 +936,7 @@ class FigWigWriter:
 		self.order = _check_order(order)
 		self.tracks = _check_tracks(tracks, empty_ok=True)
 		self._integer_tracks = None
+		self._integer_limits_of = None
 		if self.order == 'tracks':
 			self._groups = [numpy.array([i]) for i in range(len(self.tracks))]
 		else:
@@ -1224,6 +1225,7 @@ class FigWigWriter:
 
 		self.tracks = splice(self.tracks, records)
 		self._integer_tracks = None
+		self._integer_limits_of = None
 		self._track_ids = {track['name']: i for i, track in enumerate(self.tracks)}
 		self._stats = numpy.concatenate([stats, self._stats] if first else [
 			self._stats, stats])
@@ -1680,7 +1682,12 @@ class FigWigWriter:
 			if bad >= 0:
 				_check_values_fit(self.tracks[int(track_ids[bad])]['name'],
 					self.tracks[int(track_ids[bad])]['dtype'], values[bad:bad + 1])
-			for i in declared:
+			# The limits as float64 can round outward, so a track at one is
+			# checked again against the exact limit.
+			floor, ceiling = self._integer_limits()
+			for i in numpy.flatnonzero((lows[declared] <= floor[declared]) | (
+					highs[declared] >= ceiling[declared])).tolist():
+				i = declared[i]
 				info = numpy.iinfo(self.tracks[i]['dtype'])
 				if lows[i] < info.min or highs[i] > info.max:
 					raise ValueError("track {!r} is {}, and a value is outside {} to "
@@ -1757,24 +1764,32 @@ class FigWigWriter:
 			return int(groups_present[0]) if group_ids is None else int(
 				group_ids[a])
 
-		for a, b in zip(bounds[:-1], bounds[1:]):
-			if len(bounds) > 2:
-				low = int(positions[a:b].min())
-				high = int(positions[a:b].max())
-			self._check_order_of(group_at(a), tids[a:a + 1], numpy.array([
-				low]), numpy.array([high + 1]), numpy.array([0, 1]), lambda j, c=a:
-				describe(given(c)), None, entries=self.order == 'positions')
+		# A group that has written nothing, sealed no tile and left none open
+		# has nothing for its piece to come after.
+		if len(bounds) > 2:
+			lows = numpy.minimum.reduceat(positions, bounds[:-1])
+			highs = numpy.maximum.reduceat(positions, bounds[:-1])
+		else:
+			lows, highs = numpy.array([low]), numpy.array([high])
+		for k, a in enumerate(bounds[:-1].tolist()):
+			g = group_at(a)
+			if self._last[g] is None and not self._done[g] and self._sealed[g] is \
+					None and self._open[g] is None:
+				continue
+			self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
+				1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
+				entries=self.order == 'positions')
 
 		self._written = True
 		pieces = []
-		for a, b in zip(bounds[:-1], bounds[1:]):
-			g, tid = group_at(a), int(tids[a])
-			if self.order == 'tracks':
-				self._write_track_entries(int(self._groups[g][0]), tid,
-					positions[a:b], values[a:b], int(positions[b - 1]) + 1)
-			else:
-				self._write_group_entries(g, tid, slots[a:b], positions[a:b],
-					values[a:b], pieces, by_track)
+		if self.order == 'tracks':
+			# Each track is its own group.
+			self._write_tracks_entries(numpy.broadcast_to(groups_present[0], n) if
+				group_ids is None else group_ids, tids, positions, values, bounds)
+		else:
+			for a, b in zip(bounds[:-1], bounds[1:]):
+				self._write_group_entries(group_at(a), int(tids[a]), slots[a:b],
+					positions[a:b], values[a:b], pieces, by_track)
 		self._submit_pieces(pieces)
 
 		self._drain(0 if self._pool is None else 2 * self.n_jobs)
@@ -1814,6 +1829,21 @@ class FigWigWriter:
 			self._integer_tracks = numpy.array([track['dtype'] not in (None,
 				'float32', 'float64') for track in self.tracks], dtype=bool)
 		return self._integer_tracks
+
+	def _integer_limits(self):
+		"""The lowest and highest value of each track's integer dtype as
+		float64, or -inf and inf for a track without one."""
+
+		declared = self._declared_integers()
+		if self._integer_limits_of is None or len(self._integer_limits_of[0]) != \
+				len(declared):
+			floor = numpy.full(len(declared), -numpy.inf)
+			ceiling = numpy.full(len(declared), numpy.inf)
+			for i in numpy.flatnonzero(declared).tolist():
+				info = numpy.iinfo(self.tracks[i]['dtype'])
+				floor[i], ceiling[i] = info.min, info.max
+			self._integer_limits_of = floor, ceiling
+		return self._integer_limits_of
 
 	def _radix_entries(self, tids, single, track_ids, positions, values, top):
 		"""The entries in the order `_entry_order` gives, with each array
@@ -2571,6 +2601,42 @@ class FigWigWriter:
 				self._flush_track(t, final=False)
 
 		self._note_written(t, tid, end)
+
+	def _write_tracks_entries(self, tracks, tids, positions, values, bounds):
+		"""`_write_track_entries` of each piece bounds[k] to bounds[k + 1] - 1
+		of a call's entries, sorted by chromosome, track and position, the
+		piece's track and chromosome being tracks[bounds[k]] and
+		tids[bounds[k]], in one loop."""
+
+		firsts, stops = bounds[:-1], bounds[1:]
+		ends = (positions[stops - 1] + 1).tolist()
+		ts, ids = tracks[firsts].tolist(), tids[firsts].tolist()
+		values = values.astype(numpy.float64, copy=False)
+		if not (values != 0).all():
+			# Zeros are left out, though each piece still counts as written.
+			keep = values != 0
+			at = numpy.concatenate([[0], numpy.cumsum(keep)])
+			firsts, stops = at[firsts], at[stops]
+			positions, values = positions[keep], values[keep]
+		pending_of, last_of, done_of = self._pending, self._last, self._done
+		for t, tid, a, b, end in zip(ts, ids, firsts.tolist(), stops.tolist(),
+				ends):
+			pending = pending_of[t]
+			if pending is not None and pending[0] != tid:
+				self._flush_track(t)
+				pending = None
+			if pending is None:
+				pending = pending_of[t] = [tid, [], [], 0]
+			if b > a:
+				pending[1].append(positions[a:b])
+				pending[2].append(values[a:b])
+				pending[3] += b - a
+				if pending[3] >= _BLOCK_ENTRIES:
+					self._flush_track(t, final=False)
+			last = last_of[t]
+			if last is not None and last[0] != tid:
+				done_of[t].add(last[0])
+			last_of[t] = (tid, end)
 
 	def _flush_track(self, t, final=True):
 		"""Encode the pending entries of track t as blocks: every full block,
