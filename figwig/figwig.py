@@ -4734,10 +4734,12 @@ class FigWigReader:
 				part_starts = (windows.starts[:, None] + numpy.arange(parts) *
 					part).ravel()
 				pool = self._pool_for(n * parts)
-				futures = [pool.submit(self._read, part_chroms[k:k + 1],
-					part_starts[k:k + 1], part, tracks, None, dtype, 1, False, labels,
-					bins, None, nan) for k in range(n * parts)]
+				futures = []
 				try:
+					for k in range(n * parts):
+						futures.append(pool.submit(self._read, part_chroms[k:k + 1],
+							part_starts[k:k + 1], part, tracks, None, dtype, 1, False,
+							labels, bins, None, nan))
 					wait(futures)
 				except BaseException:
 					for future in futures:

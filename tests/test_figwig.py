@@ -2428,6 +2428,33 @@ def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
 		assert_identical(many, one)
 
 
+def test_long_binned_window_parts_are_waited_for(tmp_path, monkeypatch):
+	"""An interrupt while a long window's parts are handed to the pool
+	propagates only once every part handed over has finished."""
+
+	path = str(tmp_path / 'b.fw')
+	rng = numpy.random.default_rng(54)
+	write_figwig(path, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'uint8'} for i in range(6)], 'chr1', [0], rng.integers(0, 50, (1, 6,
+		5000)).astype(numpy.float64), tile=64, groups=3)
+	reader = FigWigReader(path)
+	monkeypatch.setattr(figwig.figwig, '_SPLIT_BYTES', 1)
+	pool = reader._pool_for(8)
+	handed = []
+
+	class Interrupting:
+		def submit(self, *args):
+			if len(handed) == 2:
+				raise KeyboardInterrupt
+			handed.append(pool.submit(*args))
+			return handed[-1]
+
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: Interrupting())
+	with pytest.raises(KeyboardInterrupt):
+		reader.read('chr1', [0], 4096, bins=64, n_jobs=8)
+	assert len(handed) == 2 and all(future.done() for future in handed)
+
+
 def test_track_order_pieces_with_zeros_are_their_own(tmp_path):
 	"""A track-order write_sparse leaves zeros out of its pending pieces:
 	a piece with zeros is a copy of its other entries, which its track
