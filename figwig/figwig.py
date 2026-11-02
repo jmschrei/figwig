@@ -216,6 +216,7 @@ _SPLIT_TILES = 4  # tiles of a part of a long binned window, at least
 _SPLIT_BYTES = 1 << 21  # chunk bytes of a part of a long binned window, at least
 _BLOCK_JOB_ENTRIES = 1 << 20  # entries a writer without a pool encodes at once
 _PLAN_PAIRS = 1 << 22  # (window, run) pairs a track-order plan takes at once
+_PAIRED_TILES = 4  # tiles per interval of paired sums read at once, on average
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
@@ -4494,6 +4495,29 @@ class FigWigReader:
 		total = total.astype(dtype)
 		return total[:, 0] if single else total
 
+	def _read_at_once(self, ids, starts, ends, width, dtype):
+		"""Whether paired sums of integer tracks give what the batches
+		give when read at once: intervals of a few tiles each, since the
+		batches take long intervals' whole tiles from the file's tile sums,
+		and, into an integer type, no sum of any of these tracks over any
+		interval outside it, since a batch sums each interval over each of
+		its tracks and raises for any of those sums."""
+
+		spans = numpy.maximum((ends - 1) // self.tile - starts // self.tile + 1, 1)
+		if int(spans.sum()) > _PAIRED_TILES * len(starts):
+			return False
+		try:
+			kind = self._dtype(ids, dtype, True)
+		except (TypeError, ValueError):
+			return False
+		if kind.kind not in 'iu':
+			return True
+		unique = numpy.unique(ids)
+		info = numpy.iinfo(kind)
+		low = min(0.0, float(self.stats['min'][unique].min())) * width
+		high = max(0.0, float(self.stats['max'][unique].max())) * width
+		return info.min <= low and high <= info.max
+
 	def _paired_sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan):
 		"""`sums` with a track per interval: the intervals are sorted by
 		track, cut into batches of at most `_PAIRED_TRACKS` distinct tracks
@@ -4518,10 +4542,11 @@ class FigWigReader:
 		# track's chunks or blocks alone, for the same sums. Anything a read
 		# would raise on goes the batched way below, which raises as before.
 		width = int((ends - starts).max()) if len(starts) else 0
-		if len(starts) and nan in _NAN_MODES and (self._dtype_codes[ids] <
-				_DTYPES.index('float32')).all() and all(name in self._tids for name
-				in names) and starts.min() >= 0 and int(starts.max()) <= 2 ** 32 - 1 - \
-				max(width, 1):
+		if len(starts) and nan in _NAN_MODES and nan != 'count' and (
+				self._dtype_codes[ids] < _DTYPES.index('float32')).all() and all(
+				name in self._tids for name in names) and starts.min() >= 0 and int(
+				starts.max()) <= 2 ** 32 - 1 - max(width, 1) and self._read_at_once(
+				ids, starts, ends, width, dtype):
 			peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]),
 				numpy.abs(self.stats['max'][ids])).max())
 			if peak * width < 2.0 ** 53:

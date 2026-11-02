@@ -2442,6 +2442,47 @@ def test_track_order_plan_in_slices(tmp_path, monkeypatch):
 			assert_identical(whole, sliced)
 
 
+def test_paired_sums_read_at_once_as_the_batches_would(tmp_path, monkeypatch):
+	"""Paired sums read every interval at once only where that gives what
+	the batches give: not for intervals of many tiles, which the batches
+	take from the tile sums; not with nan='count'; and into an integer type
+	only where no sum of these tracks can fall outside it, since a batch
+	raises for any sum of its tracks."""
+
+	path = str(tmp_path / 'p.fw')
+	values = numpy.zeros((1, 2, 400))
+	values[0, 0, 10:50] = 5
+	values[0, 0, 200] = 8
+	values[0, 1, 10:50] = -3
+	write_figwig(path, {'chr1': 400}, [{'name': 'a', 'dtype': 'int16'},
+		{'name': 'b', 'dtype': 'int16'}], 'chr1', [0], values, tile=16)
+	reader = FigWigReader(path)
+	once = []
+	whole = FigWigReader._read
+	monkeypatch.setattr(FigWigReader, '_read', lambda self, *args, **kwargs: (
+		once.append(kwargs.get('pairs') is not None) or whole(self, *args,
+		**kwargs)))
+
+	starts, ends = numpy.array([10, 200]), numpy.array([50, 201])
+	got = reader.sums('chr1', starts, ends, tracks=['a', 'a'], paired=True)
+	assert once[0] and got.tolist() == [200, 8]
+
+	once.clear()
+	reader.sums('chr1', [0], [400], tracks=['a'], paired=True)
+	assert not any(once)
+
+	once.clear()
+	got = reader.sums('chr1', starts, ends, tracks=['a', 'b'], paired=True,
+		nan='count')
+	assert not any(once)
+
+	once.clear()
+	with pytest.raises(ValueError, match="outside what uint32 holds"):
+		reader.sums('chr1', starts, ends, tracks=['a', 'b'], paired=True,
+			dtype='uint32')
+	assert not any(once)
+
+
 def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	"""write_sparse checks the entries of tracks with a declared integer
 	dtype in one pass: the first entry, in the order given, whose value is
