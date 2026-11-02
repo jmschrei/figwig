@@ -2979,10 +2979,11 @@ class FigWigWriter:
 
 			def record_of(g):
 				if self.order == 'tracks':
-					blocks = numpy.concatenate(self._blocks[g]) if self._blocks[g] \
-						else numpy.zeros(0, dtype=_BLOCK)
-					body = blocks.tobytes()
-					record = struct.pack('<II', len(blocks), zlib.crc32(body)) + body
+					# Joined as bytes: numpy.concatenate promotes the fields of each
+					# structured array it is given.
+					body = b''.join([blocks.tobytes() for blocks in self._blocks[g]])
+					record = struct.pack('<II', len(body) // _BLOCK.itemsize,
+						zlib.crc32(body)) + body
 				else:
 					runs = numpy.zeros(len(self._runs[g]), dtype=_RUN)
 					for r, run in enumerate(self._runs[g]):
