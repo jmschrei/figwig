@@ -207,6 +207,7 @@ _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
 _JSON_TRACKS = 4096  # tracks per check that their attributes are JSON
 _PACK_ENTRIES = 1 << 16  # entries per entries task, at least, when packed
+_INDEX_POOL_TILES = 1 << 16  # tiles of group indexes to load on threads, at least
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
 _COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
@@ -3556,11 +3557,14 @@ class FigWigReader:
 
 	def _load_indexes(self, groups, n_threads):
 		"""Read the indexes of these groups that have not been read yet, on
-		up to n_threads threads, since a file of hundreds of groups costs a
-		few milliseconds per group to inflate and lay out."""
+		up to n_threads threads when they span _INDEX_POOL_TILES tiles in
+		all, since a group of a genome's tiles costs a few milliseconds to
+		inflate and lay out; smaller ones load on this thread, so that a
+		small read of a small file starts no pool."""
 
 		missing = [g for g in groups if self._index[g] is None]
-		if len(missing) > 1 and n_threads > 1:
+		if len(missing) > 1 and n_threads > 1 and len(missing) * self._n_tiles >= \
+				_INDEX_POOL_TILES:
 			pool = self._pool_for(n_threads)
 			list(pool.map(self._group_index, missing))
 		else:
@@ -4607,7 +4611,10 @@ class FigWigReader:
 				lengths, width, stops)
 			n_threads = asked = self._threads(n_jobs, len(tiles[2]) * len(
 				groups_read))
-			self._load_indexes(groups_read, n_threads)
+			# Each group's index is read on first use, on up to n_jobs threads
+			# whatever the read takes: a few milliseconds each, which were most
+			# of a reader's first small read.
+			self._load_indexes(groups_read, n_jobs)
 			read_bytes = None
 			if n_threads > _MIN_READ_THREADS and (bins is None or stops is not
 					None or n >= n_threads):
@@ -5176,7 +5183,7 @@ class FigWigReader:
 			planned.append((g, mine, (mine[tiles[0]],) + tiles[1:]))
 		n_chunks = sum(len(tiles[2]) for _, _, tiles in planned)
 		n_threads = self._threads(n_jobs, n_chunks)
-		self._load_indexes(groups_read, n_threads)
+		self._load_indexes(groups_read, n_jobs)
 		if n_threads > _MIN_READ_THREADS:
 			read_bytes = sum(int(self._group_index(g)[2][tiles[2]].sum()) for g, _,
 				tiles in planned) + 8 * n_chunks
