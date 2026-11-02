@@ -4121,7 +4121,6 @@ class FigWigReader:
 				"{}.".format(starts.shape, ids.shape))
 		names, codes = _chrom_codes(chroms, len(starts))
 		chroms = numpy.array(names)[codes]
-		out = None
 		order = numpy.lexsort((ids, self._group_of[ids]))
 		sorted_ids = ids[order]
 		# A batch starts at every _PAIRED_TRACKS-th distinct track, and at
@@ -4130,18 +4129,39 @@ class FigWigReader:
 		cuts = set(first[_PAIRED_TRACKS - 1::_PAIRED_TRACKS].tolist())
 		cuts.update((numpy.flatnonzero(numpy.diff(self._group_of[sorted_ids]))
 			+ 1).tolist())
-		for batch in numpy.split(order, sorted(cuts)):
-			if len(batch) == 0:
-				continue
+		batches = [batch for batch in numpy.split(order, sorted(cuts)) if len(
+			batch) > 0]
+		if len(batches) == 0:
+			return numpy.zeros(0, dtype=self._dtype(ids, dtype, True))
+
+		# The batches are summed side by side on the threads, each on one: a
+		# batch is too small a read to spread over several.
+		n_jobs = _check_n_jobs(n_jobs)
+		inner = 1 if n_jobs > 1 and len(batches) > 1 else n_jobs
+
+		def one(batch):
 			mine = numpy.unique(ids[batch])
 			found = self.sums(chroms[batch], starts[batch], ends[batch],
-				tracks=mine.tolist(), dtype=dtype, n_jobs=n_jobs, nan=nan)
-			if out is None:
-				out = numpy.zeros(len(starts), dtype=found.dtype)
-			out[batch] = found[numpy.arange(len(batch)), numpy.searchsorted(mine,
+				tracks=mine.tolist(), dtype=dtype, n_jobs=inner, nan=nan)
+			return found[numpy.arange(len(batch)), numpy.searchsorted(mine,
 				ids[batch])]
-		return out if out is not None else numpy.zeros(0, dtype=self._dtype(ids,
-			dtype, True))
+
+		if inner == 1 and n_jobs > 1:
+			# In n_jobs shares, so that a pool larger than n_jobs runs no more.
+			found = [None] * len(batches)
+
+			def share(k):
+				for j in range(k, len(batches), n_jobs):
+					found[j] = one(batches[j])
+
+			list(self._pool_for(n_jobs).map(share, range(min(n_jobs, len(
+				batches)))))
+		else:
+			found = [one(batch) for batch in batches]
+		out = numpy.zeros(len(starts), dtype=found[0].dtype)
+		for batch, sums in zip(batches, found):
+			out[batch] = sums
+		return out
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
 		labels, bins, stops, nan='propagate'):
