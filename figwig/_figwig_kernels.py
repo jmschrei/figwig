@@ -1781,6 +1781,73 @@ def _matrix_header(data, position):
 
 
 @numba.njit(nogil=True, cache=True)
+def _varints_fit(data, at, end, tile):
+	"""Whether data[at:end] holds whole varints, of up to three bytes each,
+	whose running sum stays below `tile`: one track's offsets in a sparse or
+	runs chunk."""
+
+	p = 0
+	while at < end:
+		if at + 3 > end and data[at] >= 128 and (at + 1 >= end or (data[at + 1] >=
+				128 and (at + 2 >= end or data[at + 2] >= 128))):
+			return False
+		delta, at = _get_varint(data, at)
+		p += delta
+		if p >= tile:
+			return False
+	return at == end
+
+
+@numba.njit(nogil=True, cache=True)
+def _none_read(data, position, kind, n_tracks, slots, selected):
+	"""Whether none of the tracks read, `selected`, has a base in a sparse,
+	runs or matrix chunk."""
+
+	if kind == _SPARSE or kind == _RUNS:
+		counts = data[position + 4:position + 4 + 4 * n_tracks].view(numpy.uint32)
+		for j in range(selected.shape[0]):
+			if counts[selected[j]] > 0:
+				return False
+		return True
+	n_present = numpy.int64(data[position:position + 4].view(numpy.uint32)[0])
+	present = data[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
+	if selected.shape[0] >= n_present:
+		for k in range(n_present):
+			if slots[present[k]] >= 0:
+				return False
+		return True
+	for j in range(selected.shape[0]):
+		g = selected[j]
+		lo, hi = 0, n_present
+		while lo < hi:
+			mid = (lo + hi) // 2
+			if numpy.int64(present[mid]) < g:
+				lo = mid + 1
+			else:
+				hi = mid
+		if lo < n_present and numpy.int64(present[lo]) == g:
+			return False
+	return True
+
+
+@numba.njit(nogil=True, cache=True)
+def _drop_unread(data, positions, kinds, n_tracks, slots, selected,
+	pair_chunks, kept):
+	"""`pair_chunks` into `kept`, with -1 for each pair whose chunk has no
+	base in any track read, `selected`; the chunks have passed their
+	checks."""
+
+	unread = numpy.zeros(positions.shape[0], dtype=numpy.bool_)
+	for c in range(positions.shape[0]):
+		if _kind_of(kinds[c]) != _DENSE:
+			unread[c] = _none_read(data, positions[c], _kind_of(kinds[c]), n_tracks,
+				slots, selected)
+	for q in range(pair_chunks.shape[0]):
+		c = pair_chunks[q]
+		kept[q] = -1 if c >= 0 and unread[c] else c
+
+
+@numba.njit(nogil=True, cache=True)
 def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, slots,
 	failed):
 	"""Whether each chunk of a batch can be decoded by `_read_tiles` for the
@@ -1888,6 +1955,100 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, slots,
 
 	return n_failed
 
+
+@numba.njit(nogil=True, cache=True)
+def _check_chunks_few(tile, data, positions, lengths, kinds, n_tracks, slots,
+	failed, pair_chunks, kept):
+	"""`_check_chunks` for a read of few of the group's tracks: the same
+	checks, but each sparse or runs chunk's tracks read are found by moving
+	past the tracks before them, rather than by passing every track. When
+	every chunk passes, `kept` is `pair_chunks` with -1, a tile of zeros,
+	for each pair whose chunk has no base in any track read, which is most
+	chunks of such a read; `kept` may be empty, for none."""
+
+	selected = numpy.flatnonzero(slots >= 0)
+	n_failed = 0
+	for k in range(positions.shape[0]):
+		kind = _kind_of(kinds[k])
+		code = _code_in(kinds[k])
+		position = positions[k]
+		length = lengths[k]
+		bad = False
+
+		if position < 0 or code > _F64 or kind == _ZERO or kind > _RUNS:
+			bad = True
+		elif kind == _DENSE:
+			bad = code == _ONE or length < n_tracks * tile * _WIDTHS[code]
+		elif kind == _SPARSE or kind == _RUNS:
+			if length < 4 + 4 * n_tracks or (kind == _RUNS and code == _ONE):
+				bad = True
+			else:
+				track_bytes, total, deltas_at, delta_bytes, values_at = \
+					_sparse_header(data, position, n_tracks)
+				if length < values_at - position + total * _WIDTHS[code] or \
+						_count_varints(data, deltas_at, deltas_at + delta_bytes) != \
+						total:
+					bad = True
+				else:
+					at = deltas_at
+					after = 0
+					for j in range(selected.shape[0]):
+						g = selected[j]
+						for t in range(after, g):
+							at += numpy.int64(track_bytes[t])
+						after = g + 1
+						end = at + numpy.int64(track_bytes[g])
+						if not _varints_fit(data, at, end, tile):
+							bad = True
+							break
+						at = end
+		else:
+			if length < 4:
+				bad = True
+			else:
+				n_present = numpy.int64(data[position:position + 4].view(
+					numpy.uint32)[0])
+				if n_present > n_tracks or length < 8 + 8 * n_present:
+					bad = True
+				else:
+					_, tracks, ptr, offsets_at, values_at, total = _matrix_header(
+						data, position)
+					if length < values_at - position + total * _WIDTHS[code]:
+						bad = True
+					else:
+						# Every pointer is checked before any offset is read by
+						# it: the loop over a track's offsets runs to ptr[j + 1],
+						# which must lie within the chunk's offsets.
+						if ptr[0] != 0 or numpy.int64(ptr[n_present]) != total:
+							bad = True
+						for j in range(n_present):
+							if bad or tracks[j] >= n_tracks or (j > 0 and tracks[j] <=
+									tracks[j - 1]) or ptr[j + 1] < ptr[j] or numpy.int64(
+									ptr[j + 1]) > total:
+								bad = True
+								break
+						offsets = data[offsets_at:offsets_at + 2 * total].view(
+							numpy.uint16)
+						for j in range(n_present):
+							if bad:
+								break
+							if slots[tracks[j]] < 0:
+								continue
+							for i in range(numpy.int64(ptr[j]), numpy.int64(ptr[j +
+									1])):
+								if offsets[i] >= tile or (i > numpy.int64(ptr[j]) and
+										offsets[i] <= offsets[i - 1]):
+									bad = True
+									break
+
+		if bad:
+			failed[k] = 1
+			n_failed += 1
+
+	if n_failed == 0 and kept.shape[0] > 0:
+		_drop_unread(data, positions, kinds, n_tracks, slots, selected, pair_chunks,
+			kept)
+	return n_failed
 
 @numba.njit(nogil=True, cache=True)
 def _check_blocks(data, positions, lengths, kinds, n_entries, firsts, lasts,

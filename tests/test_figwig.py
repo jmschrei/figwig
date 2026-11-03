@@ -2756,6 +2756,86 @@ def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	assert numpy.isnan(y[2, 6])
 
 
+@pytest.mark.parametrize('level', [0, None])
+def test_reads_of_few_tracks_pass_over_only_chunks_without_them(tmp_path,
+	level):
+	"""A read of few of a group's tracks reads what the same tracks give
+	from a file of a group per track, through matrix chunks of one present
+	track or a few, sparse and dense chunks, as windows set, listed or
+	summed, whether the tracks read are present in a chunk or not."""
+
+	tracks = ['t{}'.format(i) for i in range(64)]
+	rng = numpy.random.default_rng(41)
+	positions, which = [], []
+	for t, present in enumerate([[5], [5, 40], list(range(0, 64, 2)), list(range(64)),
+			[63], [0, 33]]):
+		for g in present:
+			p = numpy.sort(rng.choice(64, 6 if len(present) < 64 else 60, replace=False))
+			positions.append(t * 64 + p)
+			which.append(numpy.full(len(p), g))
+	positions, which = numpy.concatenate(positions), numpy.concatenate(which)
+	values = rng.integers(1, 9, len(positions))
+
+	def write(name, groups):
+		path = str(tmp_path / name)
+		with FigWigWriter(path, {'chr1': 6 * 64}, tracks, tile=64, groups=groups,
+				level=level) as writer:
+			writer.write_sparse('chr1', positions, which, values)
+		return FigWigReader(path)
+
+	few, apart = write('few.fw', 64), write('apart.fw', 1)
+	kinds = set((few._group_index(0)[0][:6] & 7).tolist())
+	assert kinds >= ({2, 3} if level == 0 else {2})
+	starts = numpy.array([0, 30, 64, 100, 128, 200, 300, 330])
+	for chosen in ([5], [40], [6], [63], [5, 6], [6, 7, 8], [0, 33, 40], [33]):
+		for kwargs in ({}, {'sparse': True}, {'labels': numpy.zeros(len(chosen),
+				dtype=int)}, {'bins': 8}):
+			a = few.read(['chr1'] * len(starts), starts, 48, tracks=chosen, **kwargs)
+			b = apart.read(['chr1'] * len(starts), starts, 48, tracks=chosen, **kwargs)
+			if kwargs.get('sparse'):
+				for x, y in zip(a, b):
+					numpy.testing.assert_array_equal(x, y)
+			else:
+				numpy.testing.assert_array_equal(a, b)
+		entries = few.read_entries(tracks=chosen)
+		expected = apart.read_entries(tracks=chosen)
+		for x, y in zip(entries, expected):
+			numpy.testing.assert_array_equal(x, y)
+
+
+def test_reads_of_few_tracks_check_their_own_offsets(tmp_path):
+	"""A read of few of a group's tracks checks each one's offsets where
+	they lie in a sparse chunk: a chunk whose one track's offsets run past
+	the tile raises on a read of that track, alone or with another, and on a
+	read of every track, but not on a read of another track alone."""
+
+	path = str(tmp_path / 'few.fw')
+	tracks = ['t{}'.format(i) for i in range(64)]
+	with FigWigWriter(path, {'chr1': 64}, tracks, tile=64, groups=64,
+			level=0) as writer:
+		writer.write_sparse('chr1', numpy.tile([1, 5, 9], 64), numpy.repeat(
+			numpy.arange(64), 3), numpy.ones(192))
+	reader = FigWigReader(path)
+	kinds, _, _, offsets, _ = reader._group_index(0)
+	assert kinds[0] & 7 == 2
+	# Each track's offsets are three one-byte varints, 1, 4 and 4; track
+	# 40's second becomes 100, which keeps the chunk's count of varints.
+	at = int(offsets[0]) + 4 + 4 * 64 + 3 * 40 + 1
+	with open(path, 'rb') as handle:
+		data = bytearray(handle.read())
+	assert data[at] == 4
+	data[at] = 100
+	with open(path, 'wb') as handle:
+		handle.write(bytes(data))
+
+	reader = FigWigReader(path)
+	y = reader.read('chr1', [0], 64, tracks=[3])[0, 0]
+	assert numpy.flatnonzero(y).tolist() == [1, 5, 9]
+	for chosen in ([40], [3, 40], None):
+		with pytest.raises(ValueError, match="cannot be read"):
+			reader.read('chr1', [0], 64, tracks=chosen)
+
+
 @pytest.mark.parametrize('order', ['positions', 'tracks'])
 def test_sparse_reads_past_two_to_the_31(tmp_path, order):
 	"""A sparse read of a window wider than 2**31 bases, and the entries of

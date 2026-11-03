@@ -99,6 +99,7 @@ from ._figwig_kernels import _pread_runs
 from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
+from ._figwig_kernels import _check_chunks_few
 from ._figwig_kernels import _read_groups
 from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
@@ -199,6 +200,11 @@ _MERGE_REACH = 4096
 _MERGE_FAR = 16
 _MERGE_DESCENTS = 64
 _MERGE_SMALL = 1 << 14
+
+# A read of fewer than one in _FEW_TRACKS of a group's tracks passes over
+# the chunks that none of them is in, and checks only those tracks' bytes.
+_FEW_TRACKS = 16
+_NO_PAIRS = numpy.zeros(0, dtype=numpy.int64)
 
 # A read's planner cuts a group's chunks into batches in Python up to this
 # many chunks, where the kernel's call costs more than the loop.
@@ -5789,10 +5795,9 @@ class FigWigReader:
 			kernels = (_read_blocks, _check_blocks)
 		elif isinstance(tasks[0], _BandTask):
 			kernels = (_read_groups,)
-		elif tasks[0].mode == 'list':
-			kernels = (_list_tiles, _check_chunks)
 		else:
-			kernels = (_read_tiles, _check_chunks)
+			kernels = (_list_tiles if tasks[0].mode == 'list' else _read_tiles,
+				_check_chunks_few if tasks[0].few() else _check_chunks)
 		first = []
 		if any(not _compiled(kernel) for kernel in kernels):
 			first.append(tasks[0])
@@ -6279,6 +6284,7 @@ class _Task:
 		self.accumulate, self.bins, self.nan_mode = accumulate, bins, nan_mode
 		self.pair_tracks = pair_tracks
 		self.entries = None
+		self._few = None
 
 	def split(self, parts, by_window=False):
 		"""This task as `parts` tasks over the same chunks, each with a
@@ -6321,15 +6327,35 @@ class _Task:
 					self.pair_tracks is None else self.pair_tracks[a:b]))
 		return out, cut_inside
 
+	def few(self):
+		"""Whether this task reads fewer than one in _FEW_TRACKS of the
+		group's tracks."""
+
+		if self._few is None:
+			self._few = int((self.slots >= 0).sum()) * _FEW_TRACKS < len(self.slots)
+		return self._few
+
 	def run(self, fd):
 		reader = self.reader
 		n = len(self.gtiles)
+		pair_chunks = self.pair_chunks
 		if n > 0:
 			data, positions, lengths = _load_batch(reader, fd, self.offsets,
 				self.sizes, self.kinds, self.bound, self.crcs)
 			failed = numpy.zeros(n, dtype=numpy.int64)
-			if _check_chunks(reader.tile, data, positions, lengths, self.kinds,
-					len(self.slots), self.slots, failed) > 0:
+			# A read of few of the group's tracks checks only theirs, and
+			# passes over the chunks that hold none of their bases as tiles
+			# of zeros, which they read as.
+			if self.few():
+				if self.pair_tracks is None:
+					pair_chunks = numpy.empty_like(self.pair_chunks)
+				bad = _check_chunks_few(reader.tile, data, positions, lengths,
+					self.kinds, len(self.slots), self.slots, failed, self.pair_chunks,
+					pair_chunks if self.pair_tracks is None else _NO_PAIRS)
+			else:
+				bad = _check_chunks(reader.tile, data, positions, lengths, self.kinds,
+					len(self.slots), self.slots, failed)
+			if bad > 0:
 				k = int(numpy.argmax(failed))
 				raise ValueError("a chunk of {} cannot be read: tile {} of the "
 					"group of {!r} is corrupt, or the file is truncated.".format(
@@ -6342,7 +6368,7 @@ class _Task:
 		if self.mode == 'list':
 			empty = numpy.zeros(0, dtype=numpy.int64)
 			count = _list_tiles(reader.tile, data, positions, self.kinds, len(
-				self.slots), self.slots, self.pair_chunks, self.pair_bases,
+				self.slots), self.slots, pair_chunks, self.pair_bases,
 				self.pair_starts, self.pair_rows, self.width, False, empty, empty,
 				empty, numpy.zeros(0, dtype=numpy.float64))
 			index = _part_index(self.width)
@@ -6351,7 +6377,7 @@ class _Task:
 			offsets = numpy.empty(count, dtype=index)
 			values = numpy.empty(count, dtype=numpy.float64)
 			_list_tiles(reader.tile, data, positions, self.kinds, len(self.slots),
-				self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
+				self.slots, pair_chunks, self.pair_bases, self.pair_starts,
 				self.pair_rows, self.width, True, rows, channels, offsets, values)
 			self.entries = (rows, channels, offsets, values)
 			return
@@ -6365,7 +6391,7 @@ class _Task:
 			scratch = numpy.empty((n_channels, reader.tile), dtype=numpy.float64)
 
 		args = (reader.tile, data, positions, self.kinds, len(self.slots),
-			self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
+			self.slots, pair_chunks, self.pair_bases, self.pair_starts,
 			self.pair_rows, self.out, self.accumulate, scratch, self.bins,
 			self.pair_stops, self.nan_mode)
 		if self.pair_tracks is None:
