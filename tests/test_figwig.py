@@ -1841,6 +1841,67 @@ def test_radix_order_is_a_stable_argsort(n_chunks):
 		numpy.testing.assert_array_equal(order, numpy.arange(100))
 
 
+def test_key_segments_are_the_runs_of_chromosome_and_group():
+	"""The runs of sorted keys that agree above the tile's bits, and each
+	run's lowest and highest position, are what numpy finds over every
+	entry, for runs of one entry or many, one tile or many, and keys that
+	reach the top bit."""
+
+	from figwig._figwig_kernels import _key_segments
+
+	rng = numpy.random.default_rng(31)
+	for shift, slot_bits, tile_bits, high_bits in ((2, 1, 1, 1), (6, 3, 4, 5),
+			(8, 10, 7, 9), (14, 12, 15, 22)):
+		for n in (1, 2, 50, 20000):
+			high = rng.integers(0, 1 << high_bits, n, dtype=numpy.int64)
+			high[: n // 2] = high[0]
+			tile = rng.integers(0, 1 << tile_bits, n, dtype=numpy.int64)
+			slot = rng.integers(0, 1 << slot_bits, n, dtype=numpy.int64)
+			offset = rng.integers(0, 1 << shift, n, dtype=numpy.int64)
+			keys = numpy.sort((((high << tile_bits | tile) << slot_bits | slot) << shift)
+				| offset)
+			positions = ((keys >> (shift + slot_bits)) & ((1 << tile_bits) - 1)) << \
+				shift | (keys & ((1 << shift) - 1))
+			bounds, lows, highs = _key_segments(keys, positions, shift + slot_bits +
+				tile_bits, shift + slot_bits)
+			top = keys >> (shift + slot_bits + tile_bits)
+			expected = numpy.concatenate([[0], numpy.flatnonzero(top[1:] != top[:-1])
+				+ 1, [n]])
+			numpy.testing.assert_array_equal(bounds, expected)
+			numpy.testing.assert_array_equal(lows, numpy.minimum.reduceat(positions,
+				expected[:-1]))
+			numpy.testing.assert_array_equal(highs, numpy.maximum.reduceat(positions,
+				expected[:-1]))
+	keys = numpy.array([(1 << 62) - 5, (1 << 62) + 3, (1 << 63) - 1], dtype=numpy.int64)
+	bounds, lows, highs = _key_segments(keys, keys, 62, 61)
+	numpy.testing.assert_array_equal(bounds, [0, 1, 3])
+	numpy.testing.assert_array_equal(highs, [keys[0], keys[2]])
+
+
+@pytest.mark.parametrize('n_chunks', [1, 3, 8])
+def test_radix_order_from_a_low_bit_is_a_stable_argsort(n_chunks):
+	"""Keys already in order of their low bits wherever their higher bits
+	agree sort from those bits up to numpy's stable argsort, ties
+	included, whatever the number of chunks."""
+
+	from concurrent.futures import ThreadPoolExecutor
+	from figwig.figwig import _radix_order
+
+	rng = numpy.random.default_rng(n_chunks + 20)
+	with ThreadPoolExecutor(4) as pool:
+		for low, high_bits in ((1, 1), (6, 3), (8, 20), (14, 27), (30, 33)):
+			for n in (0, 1, 9, 6000):
+				lows = numpy.sort(rng.integers(0, 1 << low, n, dtype=numpy.int64))
+				highs = rng.integers(0, 1 << high_bits, n, dtype=numpy.int64)
+				highs[::4] = highs[0] if n else 0
+				keys = (highs << low) | lows
+				expected = numpy.argsort(keys, kind='stable')
+				order, sorted_keys = _radix_order(keys.copy(), low + high_bits, pool if
+					n_chunks > 1 else None, n_chunks, low)
+				numpy.testing.assert_array_equal(order, expected)
+				numpy.testing.assert_array_equal(sorted_keys, keys[expected])
+
+
 @pytest.mark.parametrize('n_jobs', [1, 4])
 def test_write_sparse_radix_sort_writes_what_the_numpy_sort_writes(tmp_path,
 	monkeypatch, n_jobs):
@@ -1980,6 +2041,75 @@ def test_write_sparse_sorts_by_either_sort_alike(tmp_path, monkeypatch, n_jobs):
 			assert took_radix == (name == 'far'), name
 		else:
 			assert took_radix == (name != 'runs'), name
+
+
+@pytest.mark.parametrize('n_jobs', [1, 3])
+def test_write_sparse_sorts_tracks_interleaved_in_tiles_by_radix(tmp_path,
+	monkeypatch, n_jobs):
+	"""Entries in position order whose tracks interleave within each tile,
+	as a single-cell contact map's cells do, keys out of order only near
+	each other but at most bases, go to the radix sort on one thread too,
+	from above the offset's bits, and give the file the merge sort gives,
+	byte for byte, with the same message for two entries on one base."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	rng = numpy.random.default_rng(13)
+	tracks = ['c{}'.format(i) for i in range(300)]
+	sizes = {'chr1': 40 * 1024}
+	# A few cells per base in each tile of 1,024 bases, over 40 tiles.
+	positions = numpy.sort(rng.integers(0, 40 * 1024, 30000))
+	which = rng.integers(0, 300, len(positions))
+	key = numpy.unique(positions * 300 + which)
+	positions, which = key // 300, key % 300
+	assert len(positions) >= figwig.figwig._MERGE_SMALL
+	lows = []
+	original = figwig.figwig._radix_order
+
+	def spy(*args):
+		lows.append(args[4] if len(args) > 4 else 0)
+		return original(*args)
+
+	monkeypatch.setattr(figwig.figwig, '_radix_order', spy)
+
+	values = numpy.arange(1, len(positions) + 1)
+
+	def write(name, p, t, v, **constants):
+		with monkeypatch.context() as m:
+			for constant, value in constants.items():
+				m.setattr(figwig.figwig, constant, value)
+			path = str(tmp_path / '{}.fw'.format(name))
+			with FigWigWriter(path, sizes, tracks, tile=1024, groups=300,
+					n_jobs=n_jobs) as writer:
+				writer.write_sparse('chr1', p, t, v)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	chosen = write('chosen', positions, which, values)
+	assert lows == [10]
+	del lows[:]
+	merged = write('merged', positions, which, values, _MERGE_RUNS=10 ** 9)
+	assert lows == []
+	# Out of position order the offset's bits are sorted on too.
+	i = int(numpy.flatnonzero(positions[1:] > positions[:-1])[0])
+	flip = numpy.arange(len(positions))
+	flip[[i, i + 1]] = flip[[i + 1, i]]
+	unordered = write('unordered', positions[flip], which[flip], values[flip])
+	assert chosen == merged == unordered
+	assert lows == [0]
+
+	messages = []
+	for constants in ({}, {'_MERGE_RUNS': 10 ** 9}):
+		with monkeypatch.context() as m:
+			for constant, value in constants.items():
+				m.setattr(figwig.figwig, constant, value)
+			with FigWigWriter(str(tmp_path / 'twice.fw'), sizes, tracks,
+					tile=1024, groups=300, n_jobs=n_jobs) as writer:
+				with pytest.raises(ValueError, match='both name base') as error:
+					writer.write_sparse('chr1', numpy.insert(positions, 101,
+						positions[100]), numpy.insert(which, 101, which[100]),
+						numpy.ones(len(positions) + 1))
+				messages.append(str(error.value))
+	assert messages[0] == messages[1]
 
 
 def test_write_sparse_packs_group_batches_into_tasks(tmp_path, monkeypatch):
@@ -2624,6 +2754,73 @@ def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	y = FigWigReader(path).read('chr1', [0], 13, dtype='float64')[0]
 	assert y[[0, 1, 1, 3], [0, 3, 12, 9]].tolist() == [255, -32768, 32767, 0.25]
 	assert numpy.isnan(y[2, 6])
+
+
+def test_write_sparse_checks_in_parts_raise_as_one_pass(tmp_path, monkeypatch):
+	"""A call's checks cut into parts on the pool raise what one thread
+	raises, with the same message, for a bad entry in any part and bad
+	entries in several: values beyond 2**53 or infinite, a track index out
+	of range, a position outside the chromosome, and declared dtypes' NaNs,
+	fractions and ranges; a call without a bad entry writes the file one
+	thread writes."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'},
+		{'name': 'c'}, {'name': 'd'}]
+	n = 4000
+	positions = numpy.arange(n) * 7
+	which = numpy.arange(n) % 4
+
+	def bad(**at):
+		values = numpy.full(n, 3.0)
+		p, t = positions.copy(), which.copy()
+		for name, spots in at.items():
+			for i in spots:
+				if name == 'nan':
+					t[i], values[i] = 0, numpy.nan
+				elif name == 'fraction':
+					t[i], values[i] = 1, 0.5
+				elif name == 'wide':
+					t[i], values[i] = 0, 300
+				elif name == 'inf':
+					values[i] = numpy.inf
+				elif name == 'track':
+					t[i] = 4
+				elif name == 'outside':
+					p[i] = 10 ** 6
+		return p, t, values
+
+	cases = [bad(nan=[3900]), bad(nan=[3100, 900]), bad(fraction=[2500, 3990]),
+		bad(nan=[3500], fraction=[1200]), bad(wide=[3999]), bad(inf=[3998]),
+		bad(inf=[1, 3000]), bad(track=[3997]), bad(outside=[3996]),
+		bad(outside=[3000, 20])]
+	p, t, v = bad()
+	v = v.astype(numpy.int64)
+	v[3995] = 2 ** 53 + 1
+	cases.append((p, t, v))
+	v = v.copy()
+	v[3995] = -2 ** 53 - 1
+	cases.append((p, t, v))
+
+	def message(n_jobs, p, t, v):
+		with FigWigWriter(str(tmp_path / 'p.fw'), {'chr1': 7 * n}, tracks, tile=64,
+				n_jobs=n_jobs) as writer:
+			with pytest.raises((ValueError, TypeError)) as error:
+				writer.write_sparse('chr1', p, t, v)
+		return str(error.value)
+
+	for k, (p, t, v) in enumerate(cases):
+		assert message(1, p, t, v) == message(4, p, t, v), k
+
+	written = []
+	for n_jobs in (1, 4):
+		path = str(tmp_path / 'ok{}.fw'.format(n_jobs))
+		with FigWigWriter(path, {'chr1': 7 * n}, tracks, tile=64,
+				n_jobs=n_jobs) as writer:
+			writer.write_sparse('chr1', positions, which, numpy.full(n, 3.0))
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
 
 
 ###

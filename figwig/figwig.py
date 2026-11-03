@@ -57,10 +57,12 @@ from ._figwig_kernels import _BLOCK_ENTRIES
 from ._figwig_kernels import _CRC_TABLES
 from ._figwig_kernels import _crcs_of
 from ._figwig_kernels import _crcs_of_libdeflate
-from ._figwig_kernels import _entry_bounds
+from ._figwig_kernels import _entry_ranges
+from ._figwig_kernels import _key_segments
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
+from ._figwig_kernels import _value_range
 from ._figwig_kernels import _declared_ranges
 from ._figwig_kernels import _tile_cuts
 from ._figwig_kernels import _CODE_MASK
@@ -82,6 +84,7 @@ from ._figwig_kernels import _tracks_tile_sums
 from ._figwig_kernels import _encode_dense_tiles
 from ._figwig_kernels import _encode_pieces
 from ._figwig_kernels import _encode_tiles
+from ._figwig_kernels import _entry_decode
 from ._figwig_kernels import _entry_gather
 from ._figwig_kernels import _entry_keys
 from ._figwig_kernels import _inflate_chunks
@@ -99,6 +102,8 @@ from ._figwig_kernels import _read_tiles
 from ._figwig_kernels import _read_groups
 from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
+from ._figwig_kernels import _radix_scatter_values
+from ._figwig_kernels import _radix_starts
 from ._kernels import _compiled
 from ._kernels import _libc_pread
 from ._kernels import _libdeflate_crc32
@@ -180,12 +185,20 @@ _SCRATCH_BYTES = 1 << 28
 _RADIX_BITS = 16
 _RADIX_PARALLEL = 1 << 18
 
+# The most bytes that a write_sparse pass cut into parts on the pool takes
+# in rows of its own, one per part (the tracks present, declared ranges).
+_PRESENT_BYTES = 1 << 26
+
 # write_sparse sorts its keys by numpy's merge sort, not the radix sort,
 # where they hold at most _MERGE_RUNS descents, or on one thread where at
-# most one in _MERGE_FAR is below the key _MERGE_REACH before it.
+# most one in _MERGE_FAR is below the key _MERGE_REACH before it and either
+# at most one in _MERGE_DESCENTS is below the key before it or there are
+# fewer than _MERGE_SMALL keys.
 _MERGE_RUNS = 8
 _MERGE_REACH = 4096
 _MERGE_FAR = 16
+_MERGE_DESCENTS = 64
+_MERGE_SMALL = 1 << 14
 
 # A read's planner cuts a group's chunks into batches in Python up to this
 # many chunks, where the kernel's call costs more than the loop.
@@ -592,29 +605,49 @@ def _track_indices(tracks, track_ids, n_tracks, whose):
 	return numpy.array(ids, dtype=numpy.int64), single
 
 
-def _check_exact(values):
+def _check_exact(values, pool=None, parts=1):
 	"""Raise for a 64-bit integer array with a value beyond 2**53, which
 	float64, and so the file, cannot hold exactly, and for an infinite
-	value, which no figwig file holds: a base is a finite value or NaN."""
+	value, which no figwig file holds: a base is a finite value or NaN. A
+	native C-contiguous 1-D array is checked in `parts` pieces on the pool."""
 
 	values = numpy.asarray(values)
+	split = pool is not None and parts > 1 and values.ndim == 1 and \
+		values.dtype.isnative and values.flags.c_contiguous
 	if values.dtype.kind in 'iu' and values.dtype.itemsize == 8 and values.size:
-		if int(values.max()) > 2 ** 53 or int(values.min()) < -2 ** 53:
+		if split:
+			cuts = numpy.arange(parts + 1, dtype=numpy.int64) * len(values) // parts
+			found = [None] * parts
+			_each(pool, parts, lambda c: found.__setitem__(c, _value_range(values,
+				cuts[c], cuts[c + 1])))
+			low, high = min(int(f[0]) for f in found), max(int(f[1]) for f in found)
+		else:
+			low, high = int(values.min()), int(values.max())
+		if high > 2 ** 53 or low < -2 ** 53:
 			raise ValueError("an integer lies beyond 2**53, which a figwig file "
 				"cannot hold exactly; scale or clip the values first.")
-	if values.dtype.kind == 'f' and values.size and _has_infinity(values):
+	if values.dtype.kind == 'f' and values.size and _has_infinity(values, pool if
+			split else None, parts):
 		raise ValueError("values must be finite or NaN, but one is infinite; "
 			"clip the values first.")
 
 
-def _has_infinity(values):
+def _has_infinity(values, pool=None, parts=1):
 	"""Whether a float array holds an infinite value: one pass of a kernel
 	over a C-contiguous float32 or float64 array, without the boolean array
-	`numpy.isinf` makes, and numpy's test for anything else."""
+	`numpy.isinf` makes, in `parts` pieces on the pool when given one, and
+	numpy's test for anything else."""
 
 	if values.dtype.char in 'fd' and values.dtype.isnative and \
 			values.flags.c_contiguous:
-		return bool(_any_infinite(values.reshape(-1)))
+		flat = values.reshape(-1)
+		if pool is None or parts == 1:
+			return bool(_any_infinite(flat))
+		cuts = numpy.arange(parts + 1, dtype=numpy.int64) * len(flat) // parts
+		found = [False] * parts
+		_each(pool, parts, lambda c: found.__setitem__(c, bool(_any_infinite(flat[
+			cuts[c]:cuts[c + 1]]))))
+		return any(found)
 	return bool(numpy.isinf(values).any())
 
 
@@ -1612,12 +1645,14 @@ class FigWigWriter:
 		if self._file is None:
 			raise ValueError("the writer is closed.")
 
-		positions = _positions(positions, 'positions', copy=not
-			self._sorted_entries)
+		# No array given is changed, and only the presorted path keeps one,
+		# so they are copied only to make them contiguous int64.
+		positions = numpy.ascontiguousarray(_positions(positions, 'positions',
+			copy=False))
 		n = len(positions)
 		values = numpy.asarray(values)
 		if not self._sorted_entries:
-			_check_exact(values)
+			_check_exact(values, self._pool, self._parts(n))
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 		if values.shape != (n,):
@@ -1626,6 +1661,7 @@ class FigWigWriter:
 		if n == 0:
 			return
 
+		ranges = None
 		if isinstance(tracks, (str, int, numpy.integer)) and not isinstance(
 				tracks, bool):
 			track_ids = numpy.full(n, self._select(tracks)[0][0], dtype=numpy.int64)
@@ -1638,14 +1674,17 @@ class FigWigWriter:
 				unique, inverse = numpy.unique(tracks, return_inverse=True)
 				track_ids = self._select(unique.tolist())[0][inverse]
 			elif tracks.dtype.kind in 'iu':
-				track_ids = tracks.astype(numpy.int64, copy=not self._sorted_entries)
-				if n > 0 and (track_ids.min() < 0 or track_ids.max() >= len(
-						self.tracks)):
+				track_ids = numpy.ascontiguousarray(tracks.astype(numpy.int64,
+					copy=False))
+				ranges = self._entry_ranges(positions, track_ids)
+				if ranges[2] < 0 or ranges[3] >= len(self.tracks):
 					raise ValueError("a track index is out of range; there are {} "
 						"tracks.".format(len(self.tracks)))
 			else:
 				raise TypeError("tracks must be names or indices, not {}.".format(
 					tracks.dtype))
+		if ranges is None:
+			ranges = self._entry_ranges(positions, track_ids)
 
 		# One chromosome throughout, the usual call, has its name resolved
 		# once and its entries checked against one length, with no array of
@@ -1657,14 +1696,10 @@ class FigWigWriter:
 		if single:
 			codes = numpy.broadcast_to(codes, n)
 			tids = numpy.broadcast_to(tids, n)
-		present = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
-		if self._sorted_entries:
-			low, high = _entry_bounds(positions, track_ids, present)
-			low, high = int(low), int(high)
-		else:
-			present[track_ids] = True
-			low, high = int(positions.min()), int(positions.max())
-		ids = numpy.flatnonzero(present)
+		# The tracks present are marked where the presorted path takes their
+		# groups or a declared dtype may check them.
+		low, high, _, _, present = ranges
+		ids = None if present is None else numpy.flatnonzero(present)
 		if single:
 			outside = low < 0 or high >= self._lengths[tids[0]]
 		else:
@@ -1678,17 +1713,25 @@ class FigWigWriter:
 
 		# Declared dtypes are checked over all their tracks' entries at once,
 		# with each track's range found in one pass of a kernel.
-		declared = ids[self._declared_integers()[ids]].tolist()
+		declared = [] if ids is None else ids[self._declared_integers()[ids]].tolist()
 		if declared:
-			lows = numpy.full(len(self.tracks), numpy.inf)
-			highs = numpy.full(len(self.tracks), -numpy.inf)
+			# Each part of the call on the pool finds its own ranges, a row
+			# each, and its first bad entry.
+			parts = self._parts(n, 16 * len(self.tracks))
+			lows = numpy.full((parts, len(self.tracks)), numpy.inf)
+			highs = numpy.full((parts, len(self.tracks)), -numpy.inf)
 			marked = numpy.zeros(len(self.tracks), dtype=numpy.bool_)
 			marked[declared] = True
 			# The kernel takes native ints, float32 and float64; other values are
 			# checked as float64, as `_check_values_fit` checks them.
-			bad = _declared_ranges(numpy.ascontiguousarray(track_ids), values if
-				values.dtype.isnative and values.dtype.char not in 'eg' else
-				values.astype(numpy.float64), marked, lows, highs)
+			checked = values if values.dtype.isnative and values.dtype.char not in \
+				'eg' else values.astype(numpy.float64)
+			cuts = numpy.arange(parts + 1, dtype=numpy.int64) * n // parts
+			found = [None] * parts
+			_each(self._pool, parts, lambda c: found.__setitem__(c, _declared_ranges(
+				track_ids, checked, marked, lows[c], highs[c], cuts[c], cuts[c + 1])))
+			bad = min([f for f in found if f >= 0], default=-1)
+			lows, highs = lows.min(axis=0), highs.max(axis=0)
 			if bad >= 0:
 				_check_values_fit(self.tracks[int(track_ids[bad])]['name'],
 					self.tracks[int(track_ids[bad])]['dtype'], values[bad:bad + 1])
@@ -1717,7 +1760,8 @@ class FigWigWriter:
 		# base and the pass over the values for infinity; on one
 		# chromosome and one group, the usual call, it is spared every pass
 		# over the entries but the checks of their range.
-		groups_present = numpy.unique(self._group_of[ids])
+		groups_present = None if ids is None else numpy.unique(self._group_of[ids])
+		segment_shifts = None
 		if self._sorted_entries and len(names) == 1 and len(groups_present) == 1:
 			order = None
 			group_ids = None
@@ -1737,8 +1781,8 @@ class FigWigWriter:
 			sorted_ = self._radix_entries(tids, single, track_ids, positions,
 				values, high)
 			if sorted_ is not None:
-				order, tids, positions, slots, group_ids, values, keys = sorted_
-				same = keys[1:] == keys[:-1]
+				order, tids, positions, slots, group_ids, values, keys, repeat, \
+					segment_shifts = sorted_
 			else:
 				group_ids = self._group_of[track_ids]
 				order = self._entry_order(tids, group_ids, track_ids, positions)
@@ -1748,27 +1792,44 @@ class FigWigWriter:
 				slots = self._slot_of[track_ids]
 				same = (tids[1:] == tids[:-1]) & (track_ids[1:] == track_ids[:-1]) & (
 					positions[1:] == positions[:-1])
-			if same.any():
-				k = int(numpy.argmax(same)) + 1
-				track = int(self._groups[int(group_ids[k])][int(slots[k])])
-				raise ValueError("entries {} and {} both name base {} of {!r} in "
-					"track {!r}.".format(int(order[k - 1]), int(order[k]),
-					positions[k], names[codes[int(order[k])]], self.tracks[track][
-					'name']))
+				repeat = int(numpy.argmax(same)) + 1 if same.any() else -1
 
 		def given(k):
+			# The radix sort gives a function for the order, which is found
+			# only for a message.
+			nonlocal order
+			if callable(order):
+				order = order()
 			return k if order is None else int(order[k])
+
+		if not self._sorted_entries and repeat >= 0:
+			k = repeat
+			track = int(self._groups[int(group_ids[k])][int(slots[k])])
+			raise ValueError("entries {} and {} both name base {} of {!r} in "
+				"track {!r}.".format(given(k - 1), given(k), positions[k],
+				names[codes[given(k)]], self.tracks[track]['name']))
 
 		def describe(j):
 			return "entry {} on {!r}".format(j, names[codes[j]])
 
 		# The entries of each (chromosome, group), checked against what the
-		# group wrote before, all of them before any is encoded.
-		if group_ids is not None:
-			changes = group_ids[1:] != group_ids[:-1]
-			if len(names) > 1:
-				changes |= tids[1:] != tids[:-1]
-			bounds = numpy.concatenate([[0], numpy.flatnonzero(changes) + 1, [n]])
+		# group wrote before, all of them before any is encoded. The radix
+		# sort's keys hold the chromosome and group above the tile, so their
+		# runs, and each run's lowest and highest position, are found by
+		# binary search over them.
+		if segment_shifts is not None:
+			bounds, lows, highs = _key_segments(keys, positions, *segment_shifts)
+		else:
+			if group_ids is not None:
+				changes = group_ids[1:] != group_ids[:-1]
+				if len(names) > 1:
+					changes |= tids[1:] != tids[:-1]
+				bounds = numpy.concatenate([[0], numpy.flatnonzero(changes) + 1, [n]])
+			if len(bounds) > 2:
+				lows = numpy.minimum.reduceat(positions, bounds[:-1])
+				highs = numpy.maximum.reduceat(positions, bounds[:-1])
+			else:
+				lows, highs = numpy.array([low]), numpy.array([high])
 
 		def group_at(a):
 			return int(groups_present[0]) if group_ids is None else int(
@@ -1776,11 +1837,6 @@ class FigWigWriter:
 
 		# A group that has written nothing, sealed no tile and left none open
 		# has nothing for its piece to come after.
-		if len(bounds) > 2:
-			lows = numpy.minimum.reduceat(positions, bounds[:-1])
-			highs = numpy.maximum.reduceat(positions, bounds[:-1])
-		else:
-			lows, highs = numpy.array([low]), numpy.array([high])
 		for k, a in enumerate(bounds[:-1].tolist()):
 			g = group_at(a)
 			if self._last[g] is None and not self._done[g] and self._sealed[g] is \
@@ -1803,6 +1859,39 @@ class FigWigWriter:
 		self._submit_pieces(pieces)
 
 		self._drain(0 if self._pool is None else 2 * self.n_jobs)
+
+	def _parts(self, n, row_bytes=0):
+		"""How many parts a pass over a call's n entries is cut into on the
+		pool: a part per thread for a large call, as many as hold a row of
+		`row_bytes` each within _PRESENT_BYTES, and one without a pool."""
+
+		if self._pool is None or n < _RADIX_PARALLEL:
+			return 1
+		return max(1, min(self.n_jobs, _PRESENT_BYTES // max(1, row_bytes)))
+
+	def _entry_ranges(self, positions, track_ids):
+		"""The lowest and highest position and track index of a call's
+		entries, and which tracks are present, or None where neither the
+		presorted path nor a declared dtype needs them, in parts on the pool
+		for a large call, each part marking a row of its own."""
+
+		n = len(positions)
+		n_tracks = len(self.tracks)
+		mark = self._sorted_entries or bool(self._declared_integers().any())
+		parts = self._parts(n, n_tracks if mark else 0)
+		cuts = numpy.arange(parts + 1, dtype=numpy.int64) * n // parts
+		rows = numpy.zeros((parts, n_tracks if mark else 0), dtype=numpy.bool_)
+		found = [None] * parts
+
+		def scan(c):
+			found[c] = _entry_ranges(positions, track_ids, rows[c], cuts[c], cuts[c +
+				1])
+
+		_each(self._pool, parts, scan)
+		found = numpy.array(found, dtype=numpy.int64)
+		present = (rows[0] if parts == 1 else rows.any(axis=0)) if mark else None
+		return (int(found[:, 0].min()), int(found[:, 1].max()), int(found[:, 2].min()),
+			int(found[:, 3].max()), present)
 
 	def _entry_order(self, tids, group_ids, track_ids, positions):
 		"""The order that sorts entries by chromosome, group, tile, track
@@ -1886,28 +1975,55 @@ class FigWigWriter:
 			positions, track_ids, keyed, not single, self._group_of, self._slot_of,
 			n_groups, shift, slot_bits, tile_bits, _MERGE_REACH, keys, cuts[c],
 			cuts[c + 1])))
-		descents, far = numpy.sum(counted, axis=0).tolist()
+		descents, far, back = numpy.sum(counted, axis=0).tolist()
 		descents += int((keys[cuts[1:-1]] < keys[cuts[1:-1] - 1]).sum())
-		if descents <= _MERGE_RUNS or (n_chunks == 1 and far * _MERGE_FAR <= n):
+		back += int((positions[cuts[1:-1]] < positions[cuts[1:-1] - 1]).sum())
+		merge = descents <= _MERGE_RUNS or (n_chunks == 1 and far * _MERGE_FAR <= n
+			and (descents * _MERGE_DESCENTS <= n or n < _MERGE_SMALL))
+		if merge:
 			# Keys in a few runs, or on one thread keys out of order only
-			# near each other, as reads given in position order are, where a
-			# contact map's columns each go back to its first rows, sort
-			# faster by numpy's merge sort.
+			# near each other and seldom, as reads given in position order
+			# are, sort faster by numpy's merge sort; a contact map's columns
+			# each go back to its first rows, and a single-cell contact map's
+			# cells interleave within each tile.
 			order = numpy.argsort(keys, kind='stable')
 			keys = keys[order]
 		else:
-			order, keys = _radix_order(keys, bits, self._pool, n_chunks)
+			# The values move with their keys, in place of their order, which
+			# a message alone needs and finds again by numpy's stable sort of
+			# the same keys. With positions in order, keys that agree above
+			# the offset are already in order of it, so the offset's bits
+			# need no pass.
+			keys, values = _radix_order(keys, bits, self._pool, n_chunks, shift if
+				back == 0 else 0, values)
 
-		out = [numpy.empty(n, dtype=numpy.int64), numpy.empty(n,
-			dtype=numpy.int64), numpy.empty(n, dtype=numpy.float64), numpy.empty(n,
-			dtype=numpy.int64), numpy.empty(0 if single else n, dtype=numpy.int64)]
-		_each(self._pool, n_chunks, lambda c: _entry_gather(keys, order, values,
-			not single, shift, slot_bits, tile_bits, n_groups, cuts[c], cuts[c +
-			1], *out))
-		positions, slots, values, group_ids, tids_out = out
+			def order(positions=positions, track_ids=track_ids, keyed=keyed):
+				again = numpy.empty(n, dtype=numpy.int64)
+				_entry_keys(positions, track_ids, keyed, not single, self._group_of,
+					self._slot_of, n_groups, shift, slot_bits, tile_bits, _MERGE_REACH,
+					again, 0, n)
+				return numpy.argsort(again, kind='stable')
+
+		out = [numpy.empty(n, dtype=numpy.int64), numpy.empty(n, dtype=numpy.int64),
+			numpy.empty(n, dtype=numpy.int64), numpy.empty(0 if single else n,
+			dtype=numpy.int64)]
+		repeats = []
+		if merge:
+			gathered = numpy.empty(n, dtype=numpy.float64)
+			_each(self._pool, n_chunks, lambda c: repeats.append(_entry_gather(keys,
+				order, values, not single, shift, slot_bits, tile_bits, n_groups,
+				cuts[c], cuts[c + 1], out[0], out[1], gathered, out[2], out[3])))
+			values = gathered
+		else:
+			_each(self._pool, n_chunks, lambda c: repeats.append(_entry_decode(keys,
+				not single, shift, slot_bits, tile_bits, n_groups, cuts[c], cuts[c +
+				1], *out)))
+		repeats = [r for r in repeats if r >= 0]
+		positions, slots, group_ids, tids_out = out
 		if not single:
 			tids = tids_out
-		return order, tids, positions, slots, group_ids, values, keys
+		return order, tids, positions, slots, group_ids, values, keys, min(repeats,
+			default=-1), (shift + slot_bits + tile_bits, shift + slot_bits)
 
 	def _write_group(self, g, tid, starts, ends, values, by_base, dtype=None):
 		"""Encode one group's items on one chromosome, in order, into chunks,
@@ -3147,40 +3263,51 @@ def _each(pool, n, task):
 			future.result()
 
 
-def _radix_order(keys, bits, pool, n_chunks):
+def _radix_order(keys, bits, pool, n_chunks, low=0, values=None):
 	"""The stable order of non-negative int64 keys below 2**bits, and the
 	keys in it, by a least significant digit radix sort whose passes are
 	cut into `n_chunks` pieces that the pool takes at once. A digit every
-	key shares is skipped. `keys` is overwritten."""
+	key shares is skipped. With `low`, only the bits from `low` up are
+	sorted on: the keys must be in order of their `low` lowest bits wherever
+	their higher bits agree. With `values`, the values move with their keys,
+	as float64, in place of the order, and (keys, values) is returned.
+	`keys` is overwritten."""
 
 	n = len(keys)
 	cuts = numpy.arange(n_chunks + 1, dtype=numpy.int64) * n // n_chunks
-	passes = max(1, -(-bits // _RADIX_BITS))
-	digit = -(-bits // passes)
+	passes = max(1, -(-(bits - low) // _RADIX_BITS))
+	digit = max(1, -(-(bits - low) // passes))
 	mask = (1 << digit) - 1
-	order = numpy.empty(n, dtype=numpy.int64)
 	keys_out = numpy.empty(n, dtype=numpy.int64)
-	order_out = numpy.empty(n, dtype=numpy.int64)
-	first = True
-	for shift in range(0, bits, digit):
-		counts = numpy.zeros((n_chunks, mask + 1), dtype=numpy.int64)
+	counts = numpy.empty((n_chunks, mask + 1), dtype=numpy.int64)
+	starts = numpy.empty((n_chunks, mask + 1), dtype=numpy.int64)
+	# What moves with the keys: their places in the input, or their values,
+	# from `moved` into `spare`.
+	moved = spare = None
+	for shift in range(low, bits, digit):
 		_each(pool, n_chunks, lambda c: _radix_counts(keys, cuts[c], cuts[c + 1],
 			shift, mask, counts[c]))
-		if counts.sum(axis=0).max() == n:
-			continue
-
 		# Each digit's slots start after every smaller digit's, and a chunk's
 		# after the earlier chunks' keys of its digit.
-		flat = counts.T.ravel()
-		starts = (numpy.cumsum(flat) - flat).reshape(mask + 1, n_chunks).T.copy()
-		_each(pool, n_chunks, lambda c: _radix_scatter(keys, order, first,
-			cuts[c], cuts[c + 1], shift, mask, starts[c], keys_out, order_out))
+		if _radix_starts(counts, n, starts):
+			continue
+		if spare is None:
+			spare = numpy.empty(n, dtype=numpy.int64 if values is None else
+				numpy.float64)
+		if values is None:
+			first = moved is None
+			_each(pool, n_chunks, lambda c: _radix_scatter(keys, keys if first else
+				moved, first, cuts[c], cuts[c + 1], shift, mask, starts[c], keys_out,
+				spare))
+		else:
+			source = values if moved is None else moved
+			_each(pool, n_chunks, lambda c: _radix_scatter_values(keys, source,
+				cuts[c], cuts[c + 1], shift, mask, starts[c], keys_out, spare))
 		keys, keys_out = keys_out, keys
-		order, order_out = order_out, order
-		first = False
-	if first:
-		order = numpy.arange(n, dtype=numpy.int64)
-	return order, keys
+		moved, spare = spare, moved
+	if values is not None:
+		return keys, values.astype(numpy.float64) if moved is None else moved
+	return numpy.arange(n, dtype=numpy.int64) if moved is None else moved, keys
 
 
 def _join_records(arrays):
