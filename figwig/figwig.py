@@ -5481,16 +5481,37 @@ class FigWigReader:
 			firsts, totals, cut_inside = _batch_cuts(bounds, live.astype(
 				numpy.int64), int(cap), int(most), continues, bins > 1)
 			batches = zip(firsts[:-1].tolist(), firsts[1:].tolist(), totals.tolist())
+		batches = list(batches)
+
+		# Every batch's arrays as slices of the group's, found at once: a
+		# batch's live chunks, and its pairs' chunks among them, -1 for a
+		# zero tile. Twenty numpy calls a batch took the calling thread a
+		# third of a second for a single cell's 8,551 batches.
+		live_before = numpy.concatenate([[0], numpy.cumsum(live)])
+		chosen = unique[live]
+		live_kinds = chunk_kinds[live]
+		live_offsets = offsets[chosen]
+		live_sizes = sizes[chosen].astype(numpy.int64)
+		live_crcs = crcs[chosen]
+		cuts = numpy.array([a for a, _, _ in batches] + [len(unique)],
+			dtype=numpy.int64)
+		edges = numpy.append(first[cuts[:-1]], total)
+		base = numpy.zeros(total, dtype=numpy.int64)
+		base[edges[0]:] = numpy.repeat(live_before[cuts[:-1]], numpy.diff(edges))
+		pair_chunks = numpy.where(live[inverse], live_before[inverse] - base, -1)
+		del base
+		pair_bases = local * tile
+		window_starts = starts[rows]
+		window_stops = _empty_pairs if stops is None else stops[rows]
+		few = int((slots >= 0).sum()) * _FEW_TRACKS < len(slots)
 		for a, b, total_bytes in batches:
 			p0, p1 = int(first[a]), int(first[b]) if b < len(unique) else total
-			chunk = numpy.where(live[inverse[p0:p1]], inverse[p0:p1] - a, -1)
-			tasks.append(_Task(self, g, slots, unique[a:b][live[a:b]],
-				chunk_kinds[a:b][live[a:b]], offsets[unique[a:b][live[a:b]]],
-				sizes[unique[a:b][live[a:b]]].astype(numpy.int64), int(total_bytes),
-				_compact(chunk, live[a:b]), local[p0:p1] * tile, starts[rows[p0:p1]],
-				rows[p0:p1], out, width, mode, accumulate, bins, crcs[unique[a:b][
-				live[a:b]]], _empty_pairs if stops is None else stops[rows[p0:p1]],
-				nan_mode))
+			x, y = int(live_before[a]), int(live_before[b])
+			tasks.append(_Task(self, g, slots, chosen[x:y], live_kinds[x:y],
+				live_offsets[x:y], live_sizes[x:y], int(total_bytes), pair_chunks[
+				p0:p1], pair_bases[p0:p1], window_starts[p0:p1], rows[p0:p1], out,
+				width, mode, accumulate, bins, live_crcs[x:y], _empty_pairs if stops is
+				None else window_stops[p0:p1], nan_mode, few=few))
 
 		return tasks, bool(cut_inside)
 
@@ -6085,14 +6106,6 @@ def _batch_cuts_loop(bounds, live, cap, most, continues, binned):
 	return batches, cut_inside
 
 
-def _compact(chunk, live):
-	"""Chunk positions among a batch's live chunks, from positions among all
-	of its chunks, with -1 kept for the zero ones."""
-
-	mapping = numpy.cumsum(live) - 1
-	return numpy.where(chunk >= 0, mapping[numpy.maximum(chunk, 0)], -1)
-
-
 def _inflate_exact(stream, n, error):
 	"""The n bytes a zlib stream holds, or a ValueError."""
 
@@ -6316,7 +6329,7 @@ class _Task:
 
 	def __init__(self, reader, g, slots, gtiles, kinds, offsets, sizes, bound,
 		pair_chunks, pair_bases, pair_starts, pair_rows, out, width, mode,
-		accumulate, bins, crcs, pair_stops, nan_mode=0, pair_tracks=None):
+		accumulate, bins, crcs, pair_stops, nan_mode=0, pair_tracks=None, few=None):
 		self.reader, self.g, self.slots = reader, g, slots
 		self.gtiles, self.kinds, self.crcs = gtiles, kinds, crcs
 		self.offsets, self.sizes, self.bound = offsets, sizes, bound
@@ -6329,7 +6342,7 @@ class _Task:
 		self.accumulate, self.bins, self.nan_mode = accumulate, bins, nan_mode
 		self.pair_tracks = pair_tracks
 		self.entries = None
-		self._few = None
+		self._few = few
 
 	def split(self, parts, by_window=False):
 		"""This task as `parts` tasks over the same chunks, each with a
@@ -6369,7 +6382,7 @@ class _Task:
 					self.pair_rows[a:b], self.out, self.width, self.mode,
 					self.accumulate, self.bins, self.crcs, self.pair_stops[a:b] if
 					len(self.pair_stops) else self.pair_stops, self.nan_mode, None if
-					self.pair_tracks is None else self.pair_tracks[a:b]))
+					self.pair_tracks is None else self.pair_tracks[a:b], few=self._few))
 		return out, cut_inside
 
 	def few(self):
