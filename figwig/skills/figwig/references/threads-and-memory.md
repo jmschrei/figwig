@@ -25,7 +25,10 @@ stable, and the last section measures the numbers where they matter.
   side by side in position order; `labels=` over several groups of integer
   tracks runs in bands of windows side by side; a few long windows summed
   per bin (a browser's view) are read as parts of whole bins, whose float
-  sums differ from one thread's only in rounding. The indexes a read needs
+  sums differ from one thread's only in rounding. A read of fewer than 1 in
+  16 of a group's tracks (one cell of thousands) passes over chunks that hold
+  none of them; each batch loads in one GIL-free call where libc's `pread`
+  and the `deflate` package both load (not on Windows). The indexes a read needs
   load on the calling thread while each spans fewer than 131,072 tiles, and
   from the first that spans more on up to 8 threads, each holding the one
   it lays out (a browser session of six genome-wide groups peaks at 169 MB
@@ -45,7 +48,8 @@ stable, and the last section measures the numbers where they matter.
   thread of at least 4 MB of tiles per call, and intervals and partial
   tiles there too, but a tile a call continues or leaves open; the writer
   holds about 0.5 GB plus two to three times one call's values, so aim for
-  calls of a few hundred MB. `bw2fw` stops gaining near `-p 8`; the
+  calls of a few hundred MB. `write_sparse` sorts and checks a call's
+  entries on the pool. `bw2fw` stops gaining near `-p 8`; the
   track-order writer does not gain.
 - `figwig bam2bw`: gains end near `-p 8`; peak memory is a few GB for a
   10 GB BAM, nearly double with `-u -f`. `-c` on a sorted, indexed BAM of
