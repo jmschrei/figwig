@@ -1593,6 +1593,34 @@ def test_paired_sums(tmp_path, order, monkeypatch):
 		reader.sums('chr1', starts, ends, tracks=[3] * 40, paired=True)
 
 
+
+def test_paired_float_batches_take_every_thread(tmp_path, monkeypatch):
+	"""Paired sums run batches of integer tracks, whose sums are exact in
+	any order, side by side on a thread each, and read each batch of float
+	tracks on every thread asked for, as one after another they were, since
+	a batch's float sums depend on the threads it is read on."""
+
+	rng = numpy.random.default_rng(9)
+	monkeypatch.setattr(figwig.figwig, '_PAIRED_TRACKS', 1)
+	starts = rng.integers(0, 900, 30)
+	ends = starts + rng.integers(1, 100, 30)
+	which = rng.integers(0, 4, 30)
+	whole = FigWigReader.sums
+	for dtype, values in (('uint8', rng.integers(0, 4, (1, 4, 1000))),
+			('float64', rng.lognormal(0, 4, (1, 4, 1000)))):
+		path = str(tmp_path / '{}.fw'.format(dtype))
+		write_figwig(path, {'chr1': 1000}, [{'name': 'r{}'.format(i), 'dtype':
+			dtype} for i in range(4)], 'chr1', [0], values.astype(numpy.float64),
+			tile=64, groups=2)
+		reader = FigWigReader(path)
+		inner = []
+		monkeypatch.setattr(FigWigReader, 'sums', lambda self, *args, **kwargs: (
+			inner.append(kwargs.get('n_jobs')) or whole(self, *args, **kwargs)))
+		reader.sums('chr1', starts, ends, tracks=which, paired=True, n_jobs=8)
+		assert len(inner) > 2 and set(inner[1:]) == ({1} if dtype == 'uint8'
+			else {8}), (dtype, inner)
+		monkeypatch.setattr(FigWigReader, 'sums', whole)
+
 def test_crafted_matrix_chunk_fails_without_a_crash():
 	"""A matrix chunk whose middle row pointer is far past its values once
 	read memory past the chunk; it is now a failed chunk."""

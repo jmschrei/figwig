@@ -563,6 +563,78 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 
 
 @numba.njit(nogil=True, cache=True)
+def _encode_pieces(tile, piece_tracks, piece_tiles, class_at, classes,
+	stats, sums_at, tile_sums, tiles, first, tracks, positions, values,
+	allow_matrix, compressed, out, bounds, kinds, t0):
+	"""`_encode_entries` of each piece of a batch in turn, from tile t0 of
+	the batch on, into one buffer. Piece p is tiles piece_tiles[p] to
+	piece_tiles[p + 1] - 1 of `tiles`, of a group of piece_tracks[p] tracks
+	whose classes are classes[class_at[p]:class_at[p + 1]], whose
+	statistics are those rows of `stats`, and whose tile sums are the
+	(tiles, tracks) block of `tile_sums` from sums_at[p], or are not kept
+	when `tile_sums` is empty. `first` indexes the batch's entries; `bounds`
+	and `kinds` cover its tiles from t0 on, bounds[0] where the first chunk
+	starts in `out`. Returns the tile of the batch that encoding stopped
+	before, as `_encode_entries` stops, or the number of tiles."""
+
+	n_pieces = piece_tracks.shape[0]
+	t = t0
+	p = 0
+	while p < n_pieces and piece_tiles[p + 1] <= t:
+		p += 1
+	while p < n_pieces:
+		a = max(t, piece_tiles[p])
+		b = piece_tiles[p + 1]
+		k = piece_tracks[p]
+		if tile_sums.shape[0] > 0:
+			s0 = sums_at[p] + (a - piece_tiles[p]) * k
+			sums = tile_sums[s0:s0 + (b - a) * k].reshape((b - a, k))
+		else:
+			sums = tile_sums.reshape((0, k))
+		done = _encode_entries(tile, k, tiles[a:b], first[a:b + 1], tracks,
+			positions, values, classes[class_at[p]:class_at[p + 1]], allow_matrix,
+			compressed, out, bounds[a - t0:b - t0 + 1], kinds[a - t0:b - t0],
+			stats[class_at[p]:class_at[p + 1]], sums)
+		if done < b - a:
+			return a + done
+		t = b
+		p += 1
+	return t
+
+
+@numba.njit(nogil=True, cache=True)
+def _sorted_tile_sums(positions, values, tile, tiles, sums):
+	"""Each tile's sum of one track's entries, positions ascending: the
+	distinct tiles go to `tiles` and their sums, a NaN counting 0, to
+	`sums`, each added base by base from 0.0 in order as numpy.bincount
+	adds its weights. Returns the number of tiles."""
+
+	k = -1
+	last = -1
+	for i in range(positions.shape[0]):
+		t = positions[i] // tile
+		if t != last:
+			k += 1
+			tiles[k] = t
+			sums[k] = 0.0
+			last = t
+		v = values[i]
+		sums[k] += v if v == v else 0.0
+	return k + 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _any_infinite(values):
+	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
+	pass without a branch, which vectorizes."""
+
+	found = False
+	for i in range(values.shape[0]):
+		found |= numpy.abs(values[i]) == numpy.inf
+	return found
+
+
+@numba.njit(nogil=True, cache=True)
 def _fold_batch(stats, rows, batch):
 	"""Fold a batch's (tracks, 6) statistics into the writer's for the
 	tracks `rows`: the compensated sum, the nonzero bases, the minimum,
@@ -580,6 +652,40 @@ def _fold_batch(stats, rows, batch):
 		else:
 			stats[g, 5] += (v - t) + total
 		stats[g, 0] = t
+		stats[g, 1] += batch[k, 1]
+		if batch[k, 2] < stats[g, 2]:
+			stats[g, 2] = batch[k, 2]
+		if batch[k, 3] > stats[g, 3]:
+			stats[g, 3] = batch[k, 3]
+		f = numpy.int64(stats[g, 4]) | numpy.int64(batch[k, 4])
+		stats[g, 4] = numpy.float64(f)
+		if flagged < 0 and f & _FLAG_OVERFLOW:
+			flagged = g
+	return flagged
+
+
+@numba.njit(nogil=True, cache=True)
+def _fold_exact(stats, rows, batch, exact, folded):
+	"""`_fold_batch`, with each track's sum folded from its sum over each
+	tile, exact[t] (float64), in order, for the tiles `folded` marks, as
+	`_fold_stats` folds them when the tiles are encoded on the writing
+	thread: the same sums, to the bit, from tiles encoded on the pool.
+	Returns the first track whose flags hold an overflow, or -1."""
+
+	flagged = -1
+	for k in range(rows.shape[0]):
+		g = rows[k]
+		for t in range(exact.shape[0]):
+			if not folded[t]:
+				continue
+			v = exact[t, k]
+			total = stats[g, 0]
+			s = total + v
+			if abs(total) >= abs(v):
+				stats[g, 5] += (total - s) + v
+			else:
+				stats[g, 5] += (v - s) + total
+			stats[g, 0] = s
 		stats[g, 1] += batch[k, 1]
 		if batch[k, 2] < stats[g, 2]:
 			stats[g, 2] = batch[k, 2]
@@ -732,7 +838,8 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	"""Encode block[:, c0:c0 + width], one tile of a group, as one chunk at
 	`position` of `out`. Returns its kind byte, 0 for a tile whose values
 	are all zero, and where the chunk ends. `summary`, a float32 row of one
-	value per track, gets each track's sum over the tile.
+	value per track, gets each track's sum over the tile, or a float64 row
+	the sum itself.
 
 	Each track's row is scanned once without a branch for its nonzero bases
 	and changes of value, then for its nonzero bases, which are collected
@@ -776,7 +883,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 			collected = False
 
 	for g in range(n_tracks):
-		summary[g] = numpy.float32(sums[g])
+		summary[g] = sums[g]
 	if total == 0:
 		return 0, position
 
@@ -879,7 +986,7 @@ def _encode_tiles(tile, tiles, lo, hi, starts, ends, values, by_base, buffer,
 	and kinds[t] is its kind byte. A tile whose values are all zero takes no
 	bytes. stats[g] accumulates the sum, nonzero bases, minimum, maximum and
 	flags of the encoded values of track g, whose class is classes[g], and
-	tile_sums[t, g], float32, is track g's sum over tile t. With
+	tile_sums[t, g], float32 or float64, is track g's sum over tile t. With
 	`allow_matrix`, a tile may be stored as a matrix chunk; `compressed`
 	says whether the chunks will be deflated.
 
@@ -996,9 +1103,10 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 	group, with the value values[e]. A tile is stored as the kind
 	`_encode_block` would pick for the rows the entries fill, but with a
 	runs chunk weighed by the changes it would hold, where `_encode_block`
-	counts each NaN base as one. The chunks, `bounds`, `kinds` and `stats`
-	are as in `_encode_tiles`. Encoding stops before a tile whose chunk
-	might not fit the rest of `out`; returns the number of tiles encoded.
+	counts each NaN base as one. The chunks, `bounds`, `kinds`, `stats` and
+	`tile_sums` are as in `_encode_tiles`, and a `tile_sums` with no rows
+	keeps none. Encoding stops before a tile whose chunk might not fit the
+	rest of `out`; returns the number of tiles encoded.
 
 	Only the tracks a tile touches are visited per tile: their statistics
 	are reset after the tile and folded into `stats`, where a group of
@@ -1077,9 +1185,10 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 			adjacent += (p == last + 1) & (nnz[g] > 1)
 			last = p
 
-		for k in range(n_touched):
-			g = touched[k]
-			tile_sums[t, g] = numpy.float32(sums[g])
+		if tile_sums.shape[0] > 0:
+			for k in range(n_touched):
+				g = touched[k]
+				tile_sums[t, g] = numpy.float32(sums[g])
 		if total == 0:
 			kinds[t] = _ZERO
 			bounds[t + 1] = position

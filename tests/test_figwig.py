@@ -510,6 +510,43 @@ def test_intervals_write_what_windows_write(tmp_path, ref):
 	numpy.testing.assert_array_equal(y[0], dense)
 
 
+def test_stats_fold_in_the_order_of_one_thread(tmp_path):
+	"""A window's partial edge tiles and an interval batch's tiles fold into
+	the statistics as one thread folds them, before the whole tiles in
+	flight, so values that cancel give the same sum, and file, on any
+	number of threads; a value beyond float32 raises from its own call."""
+
+	files = []
+	for n_jobs in (1, 2, 4):
+		path = str(tmp_path / 'w{}.fw'.format(n_jobs))
+		with FigWigWriter(path, {'chr1': 10000}, [{'name': 'a', 'dtype':
+				'float64'}], tile=256, n_jobs=n_jobs) as writer:
+			v = numpy.zeros((2, 1, 640))
+			v[0, 0, 0], v[0, 0, 128], v[0, 0, 384] = 1e16, 1.0, 0.3
+			v[1, 0, 0], v[1, 0, 224] = -1e16, 0.1
+			writer.write('chr1', [128, 800], v)
+			starts = numpy.arange(2000, 4000, 100)
+			values = numpy.where(numpy.arange(20) % 7 == 3, -1e16, 0.7)
+			values[0] = 1e16
+			writer.write('chr1', starts, values[:, None], ends=starts + 90)
+		with open(path, 'rb') as handle:
+			files.append(handle.read())
+	assert files[1] == files[0] and files[2] == files[0]
+
+	for n_jobs in (1, 4):
+		path = str(tmp_path / 'o{}.fw'.format(n_jobs))
+		writer = FigWigWriter(path, {'chr1': 100000}, [{'name': 'a', 'dtype':
+			'float32'}], tile=64, n_jobs=n_jobs)
+		starts = numpy.arange(0, 2000, 10)
+		writer.write('chr1', starts, numpy.ones(200)[:, None], ends=starts + 5)
+		values = numpy.ones(200)
+		values[150] = 1e39
+		with pytest.raises(ValueError, match="beyond float32's range"):
+			writer.write('chr1', starts + 3000, values[:, None], ends=starts +
+				3005)
+		writer._abandon()
+
+
 def test_groups_as_a_count(tmp_path):
 	path = str(tmp_path / 'g.fw')
 	with FigWigWriter(path, {'chr1': 100}, ['a', 'b', 'c', 'd', 'e'], groups=2,
@@ -3481,6 +3518,32 @@ def test_short_runs_read_as_written(runs_fw, read_batching):
 	assert_identical(rebuilt, numpy.nan_to_num(expected[:5]))
 
 
+def test_capped_float_sums_match_every_thread(tmp_path, monkeypatch):
+	"""A read takes fewer threads than it asks for when its bytes are few,
+	but sums of float tracks that every asked thread would cut a window of
+	are summed in a copy per thread, whose floats depend on the threads, so
+	that read takes them all: the sums are those of a read without the cap,
+	bit for bit."""
+
+	rng = numpy.random.default_rng(3)
+	path = str(tmp_path / 'f.fw')
+	length = 12_221
+	values = rng.lognormal(0, 4, (1, 6, length)) * rng.choice([-1, 1], (1, 6,
+		length))
+	values[:, :, rng.random(length) < 0.3] = 0
+	write_figwig(path, {'chr1': length}, [{'name': 't{}'.format(i), 'dtype':
+		'float64'} for i in range(6)], 'chr1', [0], values, tile=16, groups=[[
+		't0', 't1', 't2'], ['t3', 't4', 't5']])
+	starts = rng.integers(0, 12_000, 30)
+	ends = numpy.minimum(starts + rng.integers(1, 800, 30), length)
+	reader = FigWigReader(path)
+	got = {n_jobs: reader.sums('chr1', starts, ends, n_jobs=n_jobs) for n_jobs
+		in (8, 16, 32)}
+	monkeypatch.setattr(figwig.figwig, '_THREAD_READ_BYTES', 1)
+	for n_jobs, sums in got.items():
+		assert_identical(sums, reader.sums('chr1', starts, ends, n_jobs=n_jobs))
+
+
 def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
 	"""A read of a chromosome of dense chunks plans at least as many
 	batches as threads, each chunk in one batch, where one batch of
@@ -3506,7 +3569,10 @@ def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
 	got = reader.read('chr1', starts, 200, n_jobs=8)
 	numpy.testing.assert_array_equal(got, numpy.stack([values[:, s:s + 200] for
 		s in starts]))
+	# The read may take fewer threads than it asked for, as few bytes as
+	# these are, but plans a batch for each thread it takes.
 	tasks, n_threads = seen[-1]
-	assert n_threads == 8 and len(tasks) >= 8
+	assert figwig.figwig._MIN_READ_THREADS <= n_threads <= 8
+	assert len(tasks) >= n_threads
 	tiles = numpy.concatenate([task.gtiles for task in tasks])
 	assert len(tiles) == len(numpy.unique(tiles)) == 600

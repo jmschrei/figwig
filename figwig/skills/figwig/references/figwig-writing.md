@@ -50,8 +50,9 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
   ones on a chromosome, and a group cannot return to a chromosome it left.
   A window may run past its chromosome's end only where its values are NaN
   or 0. A call that raises writes nothing.
-- `write` with `ends=` (intervals) encodes on the calling thread, whole-tile
-  windows on the pool: write windows for speed.
+- `write` with `ends=` (intervals) encodes on the pool as windows do; only
+  a tile an earlier call left open, or that the call leaves open, is
+  encoded on the calling thread.
 - The file is written beside its path and moved there at `close`, so a
   failed write leaves the path as it was and a converter may write over its
   input. A writer never closed warns and writes nothing. The chunks depend

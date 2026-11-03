@@ -11,10 +11,12 @@ import warnings
 import threading
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait
 from itertools import pairwise
 
 import numpy
 
+from ._kernels import _compiled
 from ._kernels import _inflate_blocks
 from ._kernels import _pread
 from ._kernels import _pread_into
@@ -761,6 +763,22 @@ def _decoder(engine):
 	return _isal_decoder(required=engine == 'isal') or _ZlibDecoder()
 
 
+_POOL = None
+_POOL_LOCK = threading.Lock()
+
+
+def _shared_pool(n_threads):
+	"""A thread pool of at least `n_threads` threads, kept between reads,
+	since a converter's thousands of reads each started and joined their
+	own; made again in a process that forked with one."""
+
+	global _POOL
+	with _POOL_LOCK:
+		if _POOL is None or _POOL[0] != os.getpid() or _POOL[1] < n_threads:
+			_POOL = (os.getpid(), n_threads, ThreadPoolExecutor(n_threads))
+		return _POOL[2]
+
+
 def _run(reads, n_jobs):
 	"""Run every batch of every read, on up to `n_jobs` threads.
 
@@ -773,15 +791,15 @@ def _run(reads, n_jobs):
 
 	tasks = [(read, k) for read in reads for k in range(read.n_batches)]
 	first = []
-	if tasks and not getattr(_read_windows, 'signatures', True):
+	if tasks and not _compiled(_read_windows):
 		first.append(tasks[0])
 
 	# A decoder whose library did not load, as zlib's or ISA-L's may not on
 	# Windows, leaves every block to its decompress and is never compiled.
 	compressed = [task for task in tasks if task[0].decoder is not None and
 		task[0].decoder.functions is not None]
-	if compressed and not getattr(compressed[0][0].decoder.kernel, 'signatures',
-			True) and compressed[0] not in first:
+	if compressed and not _compiled(compressed[0][0].decoder.kernel) and \
+			compressed[0] not in first:
 		first.append(compressed[0])
 
 	rest = [task for task in tasks if task not in first]
@@ -796,8 +814,39 @@ def _run(reads, n_jobs):
 			for read, k in rest:
 				read.run(k)
 		else:
-			with ThreadPoolExecutor(min(n_jobs, len(rest))) as pool:
-				list(pool.map(lambda task: task[0].run(task[1]), rest))
+			# Each share takes the next batch as it finishes one, so that the
+			# pool, which may be larger, runs at most n_jobs at once; every
+			# share ends before the files are closed, and a failure stops
+			# the others taking more.
+			n_threads = min(n_jobs, len(rest))
+			batches = iter(rest)
+			lock = threading.Lock()
+			failed = []
+
+			def share():
+				while not failed:
+					with lock:
+						task = next(batches, None)
+					if task is None:
+						return
+					try:
+						task[0].run(task[1])
+					except BaseException:
+						failed.append(True)
+						raise
+
+			pool = _shared_pool(n_threads)
+			futures = [pool.submit(share) for _ in range(n_threads)]
+			try:
+				wait(futures)
+			except BaseException:
+				# An interrupt here stops the shares, which end before the
+				# files are closed.
+				failed.append(True)
+				wait(futures)
+				raise
+			for future in futures:
+				future.result()
 	finally:
 		for read in reads:
 			read.close()

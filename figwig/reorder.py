@@ -91,6 +91,10 @@ def _reorder(path, output, order, tile=None, groups=None, level=None, n_jobs=1,
 			attributes=reader.attributes, tile=tile, groups=groups, level=level,
 			n_jobs=n_jobs, order=order, zooms=len(reader.zooms),
 			summary_index=summary_index) as writer:
+		# A chromosome's entries come sorted by track and position, finite
+		# and one per base, which in track order, each track its own group,
+		# is the order the writer encodes in, so it is spared its sort.
+		writer._sorted_entries = writer.order == 'tracks'
 		for chrom in reader.chrom_sizes:
 			entries = reader.read_entries(chroms=[chrom], n_jobs=n_jobs)
 			if len(entries.values) > 0:
