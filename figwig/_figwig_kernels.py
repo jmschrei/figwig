@@ -624,6 +624,28 @@ def _sorted_tile_sums(positions, values, tile, tiles, sums):
 
 
 @numba.njit(nogil=True, cache=True)
+def _declared_ranges(tracks, values, declared, lows, highs):
+	"""Each declared track's lowest and highest value among the entries,
+	into `lows` and `highs`, in one pass; entry k is of track tracks[k], and
+	declared[t] whether track t has a declared integer dtype. Returns the
+	first entry of a declared track whose value is NaN or not an integer, as
+	soon as it is found, or -1."""
+
+	for k in range(tracks.shape[0]):
+		t = tracks[k]
+		if not declared[t]:
+			continue
+		v = numpy.float64(values[k])
+		if v != v or v != numpy.floor(v):
+			return k
+		if v < lows[t]:
+			lows[t] = v
+		if v > highs[t]:
+			highs[t] = v
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
 def _any_infinite(values):
 	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
 	pass without a branch, which vectorizes."""
@@ -749,6 +771,14 @@ def _crcs_of(data, cuts, tables, out):
 
 	for k in range(cuts.shape[0] - 1):
 		out[k] = _crc32_of(data, cuts[k], cuts[k + 1], tables)
+
+
+@numba.njit(nogil=True, cache=True)
+def _crcs_of_libdeflate(crc32, data, cuts, out):
+	"""`_crcs_of` with libdeflate's crc32."""
+
+	for k in range(cuts.shape[0] - 1):
+		out[k] = crc32(0, data[cuts[k]:].ctypes, cuts[k + 1] - cuts[k])
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1516,6 +1546,45 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 		_fold_stats(stats, nnz, mins, maxs, sums, flags, nans)
 
 	return first.shape[0] - 1
+
+
+@numba.njit(nogil=True, cache=True)
+def _encode_tracks_blocks(positions, values, cuts, size, classes, out, bounds,
+	kinds, stats):
+	"""`_encode_blocks` of several tracks' entries one after another, each
+	cut as `_flush_track` cuts it: track j's entries are cuts[j] to
+	cuts[j + 1] - 1, in blocks of `size` and a last of the rest, of class
+	classes[j], with its statistics row in stats[j]. Block k's bytes are
+	out[bounds[k]:bounds[k + 1]]. Returns the number of blocks."""
+
+	most = 0
+	for j in range(cuts.shape[0] - 1):
+		most = max(most, cuts[j + 1] - cuts[j])
+	first = numpy.empty(most // size + 2, dtype=numpy.int64)
+	k = 0
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		n = b - a
+		n_blocks = (n + size - 1) // size
+		for i in range(n_blocks + 1):
+			first[i] = min(i * size, n)
+		_encode_blocks(positions[a:b], values[a:b], first[:n_blocks + 1],
+			classes[j], out, bounds[k:k + n_blocks + 1], kinds[k:k + n_blocks],
+			stats[j:j + 1])
+		k += n_blocks
+	return k
+
+
+@numba.njit(nogil=True, cache=True)
+def _tracks_tile_sums(positions, values, cuts, tile, tiles, sums, counts):
+	"""`_sorted_tile_sums` of several tracks' entries, track j's being
+	cuts[j] to cuts[j + 1] - 1: track j's tiles and sums go to tiles and
+	sums from cuts[j], and their number to counts[j]."""
+
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		counts[j] = _sorted_tile_sums(positions[a:b], values[a:b], tile,
+			tiles[a:b], sums[a:b])
 
 
 @numba.njit(nogil=True, cache=True)
@@ -2356,7 +2425,7 @@ def _bin_into(dst, src, src0, s0, s1, bins, nan_mode):
 @numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins,
-	pair_stops, nan_mode):
+	pair_stops, nan_mode, pair_tracks=None):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
@@ -2386,6 +2455,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	per chunk, or one without a scratch tile, bins each pair's bases
 	straight into its row. `nan_mode` is what a NaN base adds to a binned
 	sum, as `_pick` takes it.
+
+	With `pair_tracks`, pair q reads track pair_tracks[q] of the chunk alone
+	into channel 0 of its row, as `sums(..., paired=True)` does.
 	"""
 
 	width = out.shape[2] * bins
@@ -2394,6 +2466,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	selected = numpy.flatnonzero(slots >= 0)
 	targets = numpy.unique(slots[selected])
 	n_pairs = pair_chunks.shape[0]
+	paired = pair_tracks is not None
+	alone = numpy.full(n_tracks if paired else 0, -1, dtype=numpy.int64)
+	only = numpy.zeros(1, dtype=numpy.int64)
 	decoded = -1
 	q = 0
 	while q < n_pairs:
@@ -2424,8 +2499,8 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		# tile, from which each window is copied or binned; otherwise each
 		# pair is decoded on its own, binned straight into its row when
 		# summing, which needs no scratch however many tracks there are.
-		via_scratch = scratch.shape[0] > 0 and q1 - q >= _SCRATCH_PAIRS and (
-			bins > 1 or kind != _DENSE)
+		via_scratch = not paired and scratch.shape[0] > 0 and q1 - q >= \
+			_SCRATCH_PAIRS and (bins > 1 or kind != _DENSE)
 		if via_scratch and chunk != decoded:
 			base = pair_bases[q]
 			if accumulate:
@@ -2446,6 +2521,16 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			b = min(stop, base + tile)
 			if b <= a:
 				continue
+			if paired:
+				t = pair_tracks[r]
+				alone[t] = 0
+				only[0] = t
+				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
+					alone, only, base, start, a, b, out[row], accumulate or bins > 1,
+					bool(False), row, int(0), empty, empty, empty, empty_values, bins,
+					nan_mode)
+				alone[t] = -1
+				continue
 			if not via_scratch:
 				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
 					slots, selected, base, start, a, b, out[row], accumulate or bins
@@ -2463,6 +2548,30 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		q = q1
 
 	return 0
+
+
+@numba.njit(nogil=True, cache=True)
+def _read_groups(tile, data, positions, lengths, kinds, chunk_at, n_tracks_of,
+	slots, slots_at, pair_chunks, pair_bases, pair_starts, pair_rows, out,
+	scratch, bins, failed):
+	"""`_check_chunks`, then `_read_tiles` adding into `out`, for each of
+	several groups in turn over one batch of their chunks: group j's chunks
+	are chunk_at[j] to chunk_at[j + 1] of the batch, its tracks' slots
+	slots_at[j] to slots_at[j + 1] of `slots`, and its pairs' chunks row j
+	of `pair_chunks`, the pairs being the same for every group. Returns the
+	first group a chunk of which fails its check, or -1."""
+
+	empty = numpy.zeros(0, dtype=numpy.int64)
+	for j in range(n_tracks_of.shape[0]):
+		c0, c1 = chunk_at[j], chunk_at[j + 1]
+		mine = slots[slots_at[j]:slots_at[j + 1]]
+		if c1 > c0 and _check_chunks(tile, data, positions[c0:c1], lengths[
+				c0:c1], kinds[c0:c1], n_tracks_of[j], mine, failed[c0:c1]) > 0:
+			return j
+		_read_tiles(tile, data, positions[c0:c1], kinds[c0:c1], n_tracks_of[j],
+			mine, pair_chunks[j], pair_bases, pair_starts, pair_rows, out,
+			bool(True), scratch, bins, empty, int(0))
+	return -1
 
 
 @numba.njit(nogil=True, cache=True)

@@ -9,6 +9,7 @@ import shutil
 import struct
 import zlib
 import subprocess
+import time
 
 import numpy
 import pytest
@@ -2160,6 +2161,70 @@ def test_track_order_blocks_and_calls(tmp_path, ref, monkeypatch):
 		reader.stats['nonzero'][0]),)
 
 
+# The tile sums of a value beyond float32 overflow as they are cast, on main
+# too.
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+def test_track_order_tracks_encode_together(tmp_path, monkeypatch):
+	"""Many tracks' blocks, encoded a task of tracks at a time, give one
+	file at any n_jobs, with or without blocks encoded before a call ends,
+	and a value beyond float32 raises, naming its track."""
+
+	monkeypatch.setattr(figwig.figwig, '_BLOCK_ENTRIES', 16)
+	rng = numpy.random.default_rng(12)
+	sizes = {'chr1': 4000, 'chr2': 900}
+	tracks = [{'name': 't{}'.format(i), 'dtype': dtype} for i, dtype in
+		enumerate(['uint8', 'float32', 'int16', None] * 10)]
+	calls = []
+	for chrom, length in sizes.items():
+		span = length // 3
+		for c in range(3):
+			key = numpy.unique(rng.integers(0, 40 * span, int(rng.integers(2000,
+				6000))))
+			ids = key // span
+			values = rng.integers(1, 100, len(key)).astype(numpy.float64)
+			values[ids % 4 == 1] += 0.5
+			calls.append((chrom, c * span + key % span, ids, values))
+
+	def write(path, n_jobs, flagged=None):
+		with FigWigWriter(path, sizes, tracks, order='tracks', level=6,
+				n_jobs=n_jobs) as writer:
+			for chrom, positions, ids, values in calls:
+				if flagged is not None:
+					values = numpy.where(ids == flagged, 1e39, values)
+				writer.write_sparse(chrom, positions, ids, values)
+
+	paths = []
+	for n_jobs, entries in ((1, 1 << 20), (1, 50), (4, 1 << 20)):
+		monkeypatch.setattr(figwig.figwig, '_BLOCK_JOB_ENTRIES', entries)
+		paths.append(str(tmp_path / 'f{}-{}.fw'.format(n_jobs, entries)))
+		write(paths[-1], n_jobs)
+	data = [pathlib.Path(path).read_bytes() for path in paths]
+	assert data[0] == data[1] == data[2]
+
+	# Each block record spans exactly its own entries of its track.
+	reader = FigWigReader(paths[0])
+	assert reader.stats['nonzero'].sum() == sum(len(c[1]) for c in calls)
+	names = list(sizes)
+	for t in range(len(tracks)):
+		blocks = reader._read_track_index(t)
+		for block in blocks:
+			chrom = names[int(block['chrom'])]
+			mine = numpy.concatenate([positions[ids == t] for c, positions, ids, _
+				in calls if c == chrom])
+			assert ((mine >= block['first']) & (mine <= block['last'])).sum() == \
+				block['n']
+	for chrom, positions, ids, values in calls[:2]:
+		got = reader.read(chrom, positions, 1, tracks=ids.tolist(), dtype=
+			'float64')
+		numpy.testing.assert_array_equal(got[numpy.arange(len(ids)), numpy.arange(
+			len(ids)), 0], numpy.where(ids % 4 == 1, values.astype(numpy.float32),
+			values))
+
+	for n_jobs in (1, 4):
+		with pytest.raises(ValueError, match="value of track 't7' lies beyond"):
+			write(str(tmp_path / 'bad.fw'), n_jobs, flagged=7)
+
+
 def test_track_order_writer(tmp_path):
 	path = str(tmp_path / 't.fw')
 	writer = FigWigWriter(path, {'chr1': 300, 'chr2': 100}, ['a', 'b'],
@@ -2238,6 +2303,327 @@ def test_labels_sum_the_same_on_threads(cells, monkeypatch):
 		for _ in range(5):
 			many = reader.read(chroms, starts, 300, labels=labels, n_jobs=8)
 			assert_identical(many, one)
+
+
+def test_labels_over_groups_run_in_bands(cells, tmp_path, monkeypatch):
+	"""A read with labels over several groups of integer tracks runs in
+	bands of windows, each band over every group: its sums equal a read on
+	one thread, which sums a group at a time, and the reference, with bins,
+	into float32 straight and into an integer type; float tracks, and a
+	read whose sums could round, sum a group at a time; a corrupt chunk
+	raises from a band as from a batch."""
+
+	ref, entries, paths = cells
+	reader = FigWigReader(paths['positions', 8])
+	rng = numpy.random.default_rng(51)
+	chroms, starts = random_windows(rng, 300, 320)
+	labels = rng.integers(-1, 4, 120)
+	planned = []
+	plan_bands = FigWigReader._plan_bands
+	monkeypatch.setattr(FigWigReader, '_plan_bands', lambda self, *args:
+		planned.append(len(plan_bands(self, *args))) or plan_bands(self, *args))
+	lengths = numpy.array([CHROM_SIZES[c] for c in chroms])
+	want = numpy.zeros((300, 4, 320))
+	for j, (c, s) in enumerate(zip(chroms, starts)):
+		for k in range(4):
+			want[j, k, :max(0, min(320, lengths[j] - s))] = ref[c][labels == k,
+				s:s + 320].sum(axis=0)
+	for kwargs in ({}, {'bins': 32}, {'dtype': 'float32'}, {'dtype': 'int32'},
+			{'bins': 32, 'dtype': 'float32'}):
+		one = reader.read(chroms, starts, 320, labels=labels, n_jobs=1, **kwargs)
+		many = reader.read(chroms, starts, 320, labels=labels, n_jobs=8,
+			**kwargs)
+		assert many.dtype == one.dtype
+		assert_identical(many, one)
+		bins = kwargs.get('bins', 1)
+		expected = want.reshape(300, 4, 320 // bins, bins).sum(axis=3)
+		if bins == 1 and many.dtype.kind == 'f':
+			# Bases past a chromosome's end read as NaN, and count 0 in bins.
+			past = numpy.arange(320)[None, :] >= (lengths - starts)[:, None]
+			expected[numpy.broadcast_to(past[:, None, :], expected.shape)] = numpy.nan
+		numpy.testing.assert_array_equal(many, expected.astype(many.dtype))
+	assert len(planned) == 5 and min(planned) > 1
+
+	planned.clear()
+	floats = str(tmp_path / 'floats.fw')
+	values = numpy.random.default_rng(52).random((1, 24, 3000)).astype(
+		numpy.float32)
+	write_figwig(floats, {'chr1': 3000}, ['f{}'.format(i) for i in range(24)],
+		'chr1', [0], values, tile=64, groups=8)
+	got = FigWigReader(floats).read('chr1', numpy.arange(0, 2600, 10), 320,
+		labels=numpy.arange(24) % 3, n_jobs=8, dtype='float64')
+	numpy.testing.assert_allclose(got[5, 1], values[0, 1::3, 50:370].astype(
+		numpy.float64).sum(axis=0), rtol=1e-12)
+	assert_identical(FigWigReader(floats).read('chr1', numpy.arange(0, 2600,
+		10), 320, labels=numpy.arange(24) % 3, n_jobs=8, dtype='float32'),
+		got.astype(numpy.float32))
+	assert planned == []
+
+	broken = str(tmp_path / 'broken.fw')
+	with FigWigWriter(broken, CHROM_SIZES, ['cell{}'.format(i) for i in range(
+			120)], tile=64, groups=8, level=0) as writer:
+		for chrom, (positions, which, values) in entries.items():
+			writer.write_sparse(chrom, positions, which, values)
+	kinds, sizes, raws, offsets, crcs = FigWigReader(broken)._group_index(3)
+	tile = int(numpy.flatnonzero(kinds)[5])
+	with open(broken, 'r+b') as handle:
+		handle.seek(int(offsets[tile]))
+		handle.write(b'\xff' * 8)
+	monkeypatch.setattr(figwig.figwig, '_CHUNKS_PER_THREAD', 1)
+	with pytest.raises(ValueError, match="tile {} of the group of 'cell24' is "
+			"corrupt".format(tile)):
+		FigWigReader(broken).read(['chr1'] * 40, numpy.arange(0, 4000, 100), 100,
+			labels=numpy.zeros(120, dtype=numpy.int64), n_jobs=8)
+	assert len(planned) == 1
+
+
+def test_long_binned_windows_read_in_parts(tmp_path, monkeypatch):
+	"""A few long windows summed per bin are read as parts of whole bins on
+	the threads, and give one thread's sums of the whole windows, to the
+	bit: integer tracks under every nan mode, labels, one track, windows
+	past a chromosome's end and a width whose bins do not split evenly, and
+	float tracks with NaN, of values that cancel, under every nan mode.
+	Labels that leave out every track give an empty result."""
+
+	path = str(tmp_path / 'b.fw')
+	rng = numpy.random.default_rng(53)
+	values = rng.integers(0, 50, (1, 6, 5000)).astype(numpy.float64)
+	values[:, :, rng.integers(0, 5000, 300)] = 0
+	write_figwig(path, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'int16' if i % 2 else 'uint8'} for i in range(6)], 'chr1', [0], values,
+		tile=64, groups=3)
+	reader = FigWigReader(path)
+	monkeypatch.setattr(figwig.figwig, '_SPLIT_BYTES', 1)
+	whole = FigWigReader._read
+	calls = []
+	monkeypatch.setattr(FigWigReader, '_read', lambda self, *args: calls.append(
+		len(args[1])) or whole(self, *args))
+	for starts, width, bins, kwargs in (([0], 4096, 64, {}), ([100, 4100],
+			1536, 32, {'nan': 'skip'}), ([700], 4000, 50, {'nan': 'count'}), ([0,
+			10], 2560, 128, {'labels': [0, 1, 0, 1, -1, 0]}), ([300], 2048, 16,
+			{'tracks': 't2', 'nan': 'skip'})):
+		calls.clear()
+		one = reader.read('chr1', starts, width, bins=bins, n_jobs=1, **kwargs)
+		many = reader.read('chr1', starts, width, bins=bins, n_jobs=8, **kwargs)
+		assert len(calls) > 2 + len(starts) and set(calls[2:]) == {1}, calls
+		assert many.shape == one.shape and many.dtype == one.dtype
+		assert_identical(many, one)
+
+	empty = reader.read('chr1', [0], 4096, bins=64, labels=[-1] * 6, n_jobs=8)
+	assert empty.shape == (1, 0, 64)
+
+	floats = str(tmp_path / 'f.fw')
+	values = rng.lognormal(0, 4, (1, 4, 5000)) * rng.choice([-1, 1], (1, 4,
+		5000))
+	values[0, 1, rng.integers(0, 5000, 40)] = numpy.nan
+	write_figwig(floats, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'float64' if i % 2 else 'float32'} for i in range(4)], 'chr1', [0],
+		values, tile=64)
+	reader = FigWigReader(floats)
+	for kwargs in ({}, {'nan': 'skip'}, {'nan': 'count'}, {'labels': [0, 1, 0,
+			1]}):
+		calls.clear()
+		one = reader.read('chr1', [0], 4096, bins=16, n_jobs=1, **kwargs)
+		many = reader.read('chr1', [0], 4096, bins=16, n_jobs=8, **kwargs)
+		assert len(calls) > 3 and set(calls[2:]) == {1}, calls
+		assert_identical(many, one)
+
+
+def test_long_binned_window_parts_are_waited_for(tmp_path, monkeypatch):
+	"""An interrupt while a long window's parts are handed to the pool
+	propagates only once every part handed over has finished."""
+
+	path = str(tmp_path / 'b.fw')
+	rng = numpy.random.default_rng(54)
+	write_figwig(path, {'chr1': 5000}, [{'name': 't{}'.format(i), 'dtype':
+		'uint8'} for i in range(6)], 'chr1', [0], rng.integers(0, 50, (1, 6,
+		5000)).astype(numpy.float64), tile=64, groups=3)
+	reader = FigWigReader(path)
+	monkeypatch.setattr(figwig.figwig, '_SPLIT_BYTES', 1)
+	pool = reader._pool_for(8)
+	handed = []
+
+	class Interrupting:
+		def submit(self, *args):
+			if len(handed) == 2:
+				raise KeyboardInterrupt
+			handed.append(pool.submit(*args))
+			return handed[-1]
+
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: Interrupting())
+	with pytest.raises(KeyboardInterrupt):
+		reader.read('chr1', [0], 4096, bins=64, n_jobs=8)
+	assert len(handed) == 2 and all(future.done() for future in handed)
+
+
+def test_track_order_pieces_with_zeros_are_their_own(tmp_path):
+	"""A track-order write_sparse leaves zeros out of its pending pieces:
+	a piece with zeros is a copy of its other entries, which its track
+	frees when it flushes, and a piece without is a view of the call's."""
+
+	path = str(tmp_path / 'z.fw')
+	with FigWigWriter(path, {'chr1': 1000}, [{'name': 'a', 'dtype': 'uint8'},
+			{'name': 'b', 'dtype': 'uint8'}], order='tracks') as writer:
+		writer.write_sparse('chr1', [1, 2, 3, 5, 6], [0, 0, 0, 1, 1], numpy.array(
+			[1, 0, 2, 3, 4]))
+		a, b = writer._pending[0], writer._pending[1]
+		assert a[3] == 2 and a[1][0].tolist() == [1, 3] and a[1][0].base is None
+		assert b[3] == 2 and b[1][0].tolist() == [5, 6] and b[1][0].base is not \
+			None
+	numpy.testing.assert_array_equal(FigWigReader(path).read('chr1', [0], 8,
+		dtype='float64')[0], [[0, 1, 0, 2, 0, 0, 0, 0], [0, 0, 0, 0, 0, 3, 4, 0]])
+
+
+def test_write_sparse_declared_dtypes_take_any_value_type(tmp_path):
+	"""Values of a byte order, float16 or longdouble, which the range kernel
+	does not take, are checked as float64, as `_check_values_fit` checks
+	them: the same file as from int64 values, and the same error."""
+
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'}]
+	positions, which = [3, 7, 9, 2], [0, 0, 1, 1]
+	values = numpy.array([5, 200, -30, 7])
+	reference = str(tmp_path / 'r.fw')
+	with FigWigWriter(reference, {'chr1': 100}, tracks) as writer:
+		writer.write_sparse('chr1', positions, which, values)
+	for dtype in ('>i4', '>i8', '>f8', 'float16', 'longdouble'):
+		path = str(tmp_path / 'v.fw')
+		with FigWigWriter(path, {'chr1': 100}, tracks) as writer:
+			writer.write_sparse('chr1', positions, which, values.astype(dtype))
+		assert pathlib.Path(path).read_bytes() == pathlib.Path(
+			reference).read_bytes(), dtype
+		with FigWigWriter(path, {'chr1': 100}, tracks) as writer:
+			with pytest.raises(ValueError, match="'a' is uint8, and a value is "
+					"outside 0 to 255"):
+				writer.write_sparse('chr1', [3], [0], numpy.array([300], dtype=dtype))
+
+
+def test_track_order_plan_in_slices(tmp_path, monkeypatch):
+	"""A track-order read pairs its windows with the blocks of tracks a
+	slice of tracks at a time, holding only the windows each track's
+	blocks can reach: the same values in slices of a few pairs."""
+
+	path = str(tmp_path / 't.fw')
+	rng = numpy.random.default_rng(7)
+	sizes = {'chr1': 300_000, 'chr2': 200_000}
+	n_tracks = 60
+	with FigWigWriter(path, sizes, [{'name': 'r{}'.format(i), 'dtype':
+			'uint8'} for i in range(n_tracks)], order='tracks') as writer:
+		for chrom, length in sizes.items():
+			starts = rng.integers(0, length - 3000, n_tracks)
+			ids = numpy.repeat(numpy.arange(n_tracks), 30)
+			positions = numpy.repeat(starts, 30) + numpy.tile(numpy.arange(0, 3000,
+				100), n_tracks)
+			writer.write_sparse(chrom, positions, ids, rng.integers(1, 9,
+				len(ids)))
+	reader = FigWigReader(path)
+	chroms = rng.choice(list(sizes), 200)
+	starts = rng.integers(0, 199_000, 200)
+	labels = rng.integers(-1, 3, n_tracks)
+	for kwargs in ({}, {'labels': labels}, {'sparse': True}):
+		whole = reader.read(chroms, starts, 1000, n_jobs=4, **kwargs)
+		monkeypatch.setattr(figwig.figwig, '_PLAN_PAIRS', 3)
+		sliced = reader.read(chroms, starts, 1000, n_jobs=4, **kwargs)
+		monkeypatch.undo()
+		if kwargs.get('sparse'):
+			for x, y in zip(whole, sliced):
+				numpy.testing.assert_array_equal(x, y)
+		else:
+			assert_identical(whole, sliced)
+
+
+def test_paired_sums_read_at_once_as_the_batches_would(tmp_path, monkeypatch):
+	"""Paired sums read every interval at once only where that gives what
+	the batches give: not for intervals of many tiles, which the batches
+	take from the tile sums; not with nan='count'; and into an integer type
+	only where no sum of these tracks can fall outside it, since a batch
+	raises for any sum of its tracks."""
+
+	path = str(tmp_path / 'p.fw')
+	values = numpy.zeros((1, 2, 400))
+	values[0, 0, 10:50] = 5
+	values[0, 0, 200] = 8
+	values[0, 1, 10:50] = -3
+	write_figwig(path, {'chr1': 400}, [{'name': 'a', 'dtype': 'int16'},
+		{'name': 'b', 'dtype': 'int16'}], 'chr1', [0], values, tile=16)
+	reader = FigWigReader(path)
+	once = []
+	whole = FigWigReader._read
+	monkeypatch.setattr(FigWigReader, '_read', lambda self, *args, **kwargs: (
+		once.append(kwargs.get('pairs') is not None) or whole(self, *args,
+		**kwargs)))
+
+	starts, ends = numpy.array([10, 200]), numpy.array([50, 201])
+	got = reader.sums('chr1', starts, ends, tracks=['a', 'a'], paired=True)
+	assert once[0] and got.tolist() == [200, 8]
+
+	once.clear()
+	reader.sums('chr1', [0], [400], tracks=['a'], paired=True)
+	assert not any(once)
+
+	once.clear()
+	got = reader.sums('chr1', starts, ends, tracks=['a', 'b'], paired=True,
+		nan='count')
+	assert not any(once)
+
+	once.clear()
+	with pytest.raises(ValueError, match="outside what uint32 holds"):
+		reader.sums('chr1', starts, ends, tracks=['a', 'b'], paired=True,
+			dtype='uint32')
+	assert not any(once)
+
+
+def test_repeated_track_summed_into_float32_as_in_float64(tmp_path,
+	monkeypatch):
+	"""A track named twice in a sum into float32 gives what the float64
+	accumulator gives, whether or not the sums would be exact in float32."""
+
+	path = str(tmp_path / 'd.fw')
+	values = numpy.zeros((1, 2, 64))
+	values[0, 0] = numpy.arange(64) % 5
+	write_figwig(path, {'chr1': 64}, [{'name': 'a', 'dtype': 'uint8'},
+		{'name': 'b', 'dtype': 'uint8'}], 'chr1', [0], values, tile=16)
+	reader = FigWigReader(path)
+	got = reader.read('chr1', [0], 40, tracks=['a', 'a'], bins=10,
+		dtype='float32')
+	sums = reader.sums('chr1', [0, 5], [30, 60], tracks=['a', 'a'],
+		dtype='float32')
+	monkeypatch.setattr(FigWigReader, '_exact_sums', lambda *args, **kwargs:
+		False)
+	assert_identical(got, reader.read('chr1', [0], 40, tracks=['a', 'a'],
+		bins=10, dtype='float32'))
+	assert_identical(sums, reader.sums('chr1', [0, 5], [30, 60], tracks=['a',
+		'a'], dtype='float32'))
+
+
+def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
+	"""write_sparse checks the entries of tracks with a declared integer
+	dtype in one pass: the first entry, in the order given, whose value is
+	NaN or not an integer names its track, then the first declared track
+	with a value outside its dtype is named, and tracks without a declared
+	integer dtype take any value."""
+
+	path = str(tmp_path / 'd.fw')
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'},
+		{'name': 'c', 'dtype': 'float32'}, {'name': 'd'}]
+	for which, values, message in (
+			([0, 1, 1, 0], [3, numpy.nan, 1.5, 2], "'b' is int16, and a value is NaN"),
+			([1, 0, 1], [2, 2.5, numpy.nan], "'a' is uint8, and a value is not an "
+				"integer"),
+			([2, 3, 1, 0], [numpy.nan, 0.5, 40000, 300], "'a' is uint8, and a value "
+				"is outside 0 to 255"),
+			([2, 3, 1, 0], [numpy.nan, 0.5, -40000, 255], "'b' is int16, and a value "
+				"is outside -32768 to 32767"),
+			([1, 0], numpy.array([5, 256]), "'a' is uint8, and a value is outside")):
+		with pytest.raises(ValueError, match=message):
+			with FigWigWriter(path, {'chr1': 100}, tracks, tile=64) as writer:
+				writer.write_sparse('chr1', numpy.arange(len(which)) * 3, which,
+					numpy.asarray(values))
+	with FigWigWriter(path, {'chr1': 100}, tracks, tile=64) as writer:
+		writer.write_sparse('chr1', [0, 3, 6, 9, 12], [0, 1, 2, 3, 1],
+			numpy.array([255, -32768, numpy.nan, 0.25, 32767]))
+	y = FigWigReader(path).read('chr1', [0], 13, dtype='float64')[0]
+	assert y[[0, 1, 1, 3], [0, 3, 12, 9]].tolist() == [255, -32768, 32767, 0.25]
+	assert numpy.isnan(y[2, 6])
 
 
 ###
@@ -2846,6 +3232,189 @@ def test_index_of_empty_groups_is_small(tmp_path):
 	assert all(index is None for index in copy._index)
 
 
+def test_indexes_load_on_threads_once_one_is_large(tmp_path, monkeypatch):
+	"""Group indexes load on this thread while each spans fewer than
+	_INDEX_POOL_TILES tiles, and the rest on up to n_threads and 8 threads
+	from the first that spans more; a group whose index cannot be read
+	raises either way."""
+
+	path = str(tmp_path / 'i.fw')
+	names = ['t{}'.format(i) for i in range(40)]
+	with FigWigWriter(path, {'chr1': 2 ** 24}, names, groups=1, tile=256) \
+			as writer:
+		writer.write('chr1', [2 ** 20], numpy.arange(400).reshape(1, 40, 10))
+
+	asked = []
+	pool_for = FigWigReader._pool_for
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: asked.append(
+		n) or pool_for(self, n))
+	for threshold, groups, n_threads, expected in ((1 << 17, 40, 32, []), (1, 40,
+			32, [8]), (1, 40, 4, [4]), (1, 3, 32, [2]), (1, 2, 32, []), (1, 40, 1,
+			[])):
+		monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', threshold)
+		reader = FigWigReader(path)
+		asked.clear()
+		reader._load_indexes(list(range(groups)), n_threads)
+		assert asked == expected
+		assert all(index is not None for index in reader._index[:groups])
+		assert all(index is None for index in reader._index[groups:])
+		assert reader.read('chr1', [2 ** 20], 10, n_jobs=8).sum() == \
+			400 * 399 // 2
+
+	reader = FigWigReader(path)
+	with open(path, 'rb') as handle:
+		data = bytearray(handle.read())
+	data[int(reader._directory[17]) + 8] ^= 0xFF
+	bad = str(tmp_path / 'bad.fw')
+	with open(bad, 'wb') as handle:
+		handle.write(data)
+	for threshold in (1, 1 << 17):
+		monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', threshold)
+		for n_jobs in (1, 32):
+			with pytest.raises(ValueError, match="checksum"):
+				FigWigReader(bad).read('chr1', [2 ** 20], 10, n_jobs=n_jobs)
+
+
+def test_index_loads_on_threads_raise_the_first_failure(tmp_path, monkeypatch):
+	"""Of several groups whose indexes fail to load on threads, the first in
+	order raises, as on one thread, whichever thread reaches it last."""
+
+	path = str(tmp_path / 'i.fw')
+	with FigWigWriter(path, {'chr1': 2 ** 20}, ['t{}'.format(i) for i in range(
+			5)], groups=1, tile=256) as writer:
+		writer.write('chr1', [2 ** 19], numpy.ones((1, 5, 10)))
+
+	read_group_index = FigWigReader._read_group_index
+
+	def failing(self, g):
+		if g == 2:
+			time.sleep(0.3)
+		if g in (2, 3):
+			raise ValueError("group {} cannot be read".format(g))
+		return read_group_index(self, g)
+
+	monkeypatch.setattr(FigWigReader, '_read_group_index', failing)
+	monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', 1)
+	with pytest.raises(ValueError, match="group 2 cannot"):
+		FigWigReader(path)._load_indexes(list(range(5)), 2)
+
+
+def test_index_loads_on_threads_stop_at_an_interrupt(tmp_path, monkeypatch):
+	"""An interrupt while group indexes load on threads stops the threads
+	taking more groups."""
+
+	path = str(tmp_path / 'i.fw')
+	with FigWigWriter(path, {'chr1': 2 ** 20}, ['t{}'.format(i) for i in range(
+			40)], groups=1, tile=256) as writer:
+		writer.write('chr1', [2 ** 19], numpy.ones((1, 40, 10)))
+
+	read_group_index = FigWigReader._read_group_index
+	loaded = []
+
+	def slow(self, g):
+		time.sleep(0.05)
+		loaded.append(g)
+		return read_group_index(self, g)
+
+	reader = FigWigReader(path)
+	pool = reader._pool_for(2)
+
+	class Interrupting:
+		def map(self, fn, items):
+			[pool.submit(fn, item) for item in items]
+			while len(loaded) < 5:
+				time.sleep(0.01)
+			raise KeyboardInterrupt
+
+	monkeypatch.setattr(FigWigReader, '_read_group_index', slow)
+	monkeypatch.setattr(FigWigReader, '_pool_for', lambda self, n: Interrupting())
+	monkeypatch.setattr(figwig.figwig, '_INDEX_POOL_TILES', 1)
+	with pytest.raises(KeyboardInterrupt):
+		reader._load_indexes(list(range(40)), 2)
+	pool.shutdown(wait=True)
+	assert len(loaded) < 10, loaded
+
+
+@pytest.mark.parametrize('sliced,room', [(256, 1 << 30), (1, 1 << 30), (10 **
+	9, 1 << 30), (10 ** 9, 0), (10 ** 9, 2000)])
+def test_runs_laid_out_at_once_as_one_at_a_time(monkeypatch, sliced, room):
+	"""A group's runs of chunks are checked and laid out at once, in batches
+	of whatever size, or a slice at a time when they are long, with the
+	offsets and coverage of laying them out one at a time, and refused
+	exactly when one at a time refuses one of them; with no room for the
+	runs' own arrays they are left to be laid out one at a time."""
+
+	monkeypatch.setattr(figwig.figwig, '_SLICED_RUN_TILES', sliced)
+
+	rng = numpy.random.default_rng(3)
+	limit = numpy.uint64(1 << 20)
+
+	def one_at_a_time(runs, sizes, n):
+		offsets = numpy.zeros(n, dtype=numpy.int64)
+		covered = numpy.zeros(n, dtype=numpy.bool_)
+		for run in runs:
+			first, last = int(run['first']), int(run['last'])
+			if first > last or last >= n or covered[first:last + 1].any() or \
+					run['offset'] > limit or run['bytes'] > limit - run['offset']:
+				return None
+			chunk_sizes = sizes[first:last + 1].astype(numpy.int64)
+			if int(chunk_sizes.sum()) != int(run['bytes']):
+				return None
+			covered[first:last + 1] = True
+			offsets[first:last + 1] = int(run['offset']) + numpy.cumsum(
+				chunk_sizes) - chunk_sizes
+		return offsets, covered, (sizes[~covered] != 0).any()
+
+	refused = strays = 0
+	for trial in range(2000):
+		n = int(rng.integers(1, 200))
+		sizes = rng.integers(0, 50, n).astype(numpy.uint32)
+		sizes[rng.random(n) < 0.5] = 0
+		cuts = numpy.sort(rng.choice(n + 1, min(n + 1, int(rng.integers(1, 12))),
+			replace=False))
+		spans = [(int(a), int(b) - 1) for a, b in zip(cuts[:-1], cuts[1:])]
+		spans = [span for span in spans if rng.random() < 0.8]
+		rng.shuffle(spans)
+		runs = numpy.zeros(len(spans), dtype=figwig.figwig._RUN)
+		at = 64
+		for j, (first, last) in enumerate(spans):
+			runs[j] = (first, last, at, int(sizes[first:last + 1].sum()))
+			at += int(runs[j]['bytes'])
+		if len(runs) and trial % 2:
+			j = int(rng.integers(len(runs)))
+			fault = int(rng.integers(6))
+			if fault == 0:
+				runs[j]['bytes'] += 1
+			elif fault == 1:
+				runs[j]['last'] = n + int(rng.integers(3))
+			elif fault == 2:
+				runs[j]['first'] = runs[j]['last'] + 1
+			elif fault == 3:
+				runs[j]['offset'] = int(limit) + 1
+			elif fault == 4:
+				runs[j]['bytes'] = int(limit) - int(runs[j]['offset']) + 1
+			elif len(runs) > 1:
+				runs[j]['first'] = runs[(j + 1) % len(runs)]['last']
+
+		expected = one_at_a_time(runs, sizes, n)
+		total = int(sizes.sum(dtype=numpy.uint64))
+		got = figwig.figwig._runs_offsets(runs, sizes, total, n, limit, 24 * len(
+			runs) + room)
+		if len(runs):
+			assert figwig.figwig._runs_offsets(runs, sizes, total, n, limit, 24 *
+				len(runs) - 1) is None
+		assert (got is None) == (expected is None), trial
+		if expected is None:
+			refused += 1
+		else:
+			assert got[0].dtype == numpy.int64 and got[1].dtype == numpy.bool_
+			assert numpy.array_equal(got[0], expected[0]), trial
+			assert numpy.array_equal(got[1], expected[1]), trial
+			assert got[2] == expected[2], trial
+			strays += bool(expected[2])
+	assert 300 < refused < 1000 and strays > 50
+
+
 def test_same_stats_whatever_the_call_split(tmp_path):
 	"""The sum of a float track is compensated, so splitting the values
 	between calls differently gives the same statistics table."""
@@ -3451,6 +4020,30 @@ def test_chunk_crcs_are_zlibs():
 	for n in range(0, 40):
 		piece = data[:n]
 		assert _crcs(piece, numpy.array([0, n])).tolist() == [zlib.crc32(piece)]
+
+
+@pytest.mark.parametrize('engine', ['libdeflate', 'table'])
+def test_chunk_crcs_with_and_without_libdeflate(monkeypatch, engine):
+	"""libdeflate's crc32 and the table kernel it stands in for give zlib's
+	values on pieces of every length, from bytes and from arrays."""
+
+	import zlib
+
+	from figwig.figwig import _crcs
+
+	if engine == 'table':
+		monkeypatch.setattr(figwig.figwig, '_libdeflate_crc32', lambda: None)
+	elif figwig.figwig._libdeflate_crc32() is None:
+		pytest.skip("libdeflate is not installed")
+	rng = numpy.random.default_rng(1)
+	data = rng.integers(0, 256, 300_000, dtype=numpy.uint8)
+	cuts = numpy.concatenate([[0, 0], numpy.sort(rng.integers(0, len(data),
+		200)), [len(data)]])
+	expected = [zlib.crc32(data[a:b].tobytes()) for a, b in zip(cuts[:-1],
+		cuts[1:])]
+	assert _crcs(data, cuts).tolist() == expected
+	assert _crcs(data.tobytes(), cuts).tolist() == expected
+	assert _crcs(b'', numpy.array([0, 0])).tolist() == [0]
 
 
 # Dense tracks: short runs decode in place, and a chromosome of dense chunks
