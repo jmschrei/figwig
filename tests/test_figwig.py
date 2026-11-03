@@ -302,6 +302,52 @@ def test_read_without_inflate_libraries(fw, ref, monkeypatch, without):
 	assert_identical(y, exp)
 
 
+@pytest.mark.parametrize('level', [None, 0])
+@pytest.mark.parametrize('verify', [False, True])
+def test_batches_load_alike_in_one_kernel_and_without(tmp_path, ref, monkeypatch,
+	level, verify):
+	"""A batch of chunks reads, checks and inflates to the same chunks at
+	the same positions in the one kernel call as in the code that takes
+	over where libc's pread or libdeflate does not load: whole groups, runs
+	of chunks out of order and apart, stored chunks and a file of none
+	compressed; and without either library there is no kernel to call."""
+
+	from figwig.figwig import _fast_loader, _load_batch, _open_read
+
+	if _fast_loader() is None:
+		pytest.skip("libdeflate or libc's pread is not available")
+	path = str(tmp_path / 'batches.fw')
+	write_reference(path, ref, level=level)
+	reader = FigWigReader(path, verify=verify)
+	rng = numpy.random.default_rng(3)
+	fd = _open_read(path)
+	try:
+		for g in range(len(reader._groups)):
+			kinds, sizes, raws, offsets, crcs = reader._group_index(g)
+			live = numpy.flatnonzero(kinds > 0)
+			for take in (live, rng.permutation(live)[:max(1, len(live) // 2)],
+					live[::3]):
+				args = (offsets[take].astype(numpy.int64), sizes[take].astype(
+					numpy.int64), kinds[take], int(raws[take].sum()) + 8 * len(take),
+					crcs[take])
+				fast = _load_batch(reader, fd, *args)
+				with monkeypatch.context() as m:
+					m.setattr(figwig.figwig, '_libdeflate_inflate', lambda: None)
+					assert _fast_loader() is None
+					slow = _load_batch(reader, fd, *args)
+				# Bytes between and after chunks are padding, never read.
+				numpy.testing.assert_array_equal(fast[1], slow[1])
+				numpy.testing.assert_array_equal(fast[2], slow[2])
+				for at, n in zip(fast[1].tolist(), fast[2].tolist()):
+					numpy.testing.assert_array_equal(fast[0][at:at + n], slow[0][at:at + n])
+	finally:
+		os.close(fd)
+	with monkeypatch.context() as m:
+		m.setattr(figwig.figwig, '_libc_pread', lambda: None)
+		assert _fast_loader() is None
+	assert _fast_loader() is not None
+
+
 def test_read_empty(fw):
 	reader = FigWigReader(fw)
 	y = reader.read([], [], 10)

@@ -100,6 +100,7 @@ from ._figwig_kernels import _list_tiles
 from ._figwig_kernels import _read_blocks
 from ._figwig_kernels import _read_tiles
 from ._figwig_kernels import _check_chunks_few
+from ._figwig_kernels import _load_chunks
 from ._figwig_kernels import _read_groups
 from ._figwig_kernels import _radix_counts
 from ._figwig_kernels import _radix_scatter
@@ -5798,6 +5799,8 @@ class FigWigReader:
 		else:
 			kernels = (_list_tiles if tasks[0].mode == 'list' else _read_tiles,
 				_check_chunks_few if tasks[0].few() else _check_chunks)
+		if _fast_loader() is not None:
+			kernels += (_load_chunks,)
 		first = []
 		if any(not _compiled(kernel) for kernel in kernels):
 			first.append(tasks[0])
@@ -6129,11 +6132,53 @@ def _inflate_stream(stream, n, error, pad=0):
 	return _inflate_exact(stream, n, error)
 
 
+def _fast_loader():
+	"""(pread, alloc_decompressor, zlib_decompress, free_decompressor,
+	crc32) for `_load_chunks`, from libc and libdeflate, or None where one
+	does not load. The libraries are asked each time, and the one tuple
+	of them is kept, since a kernel given the same tuple types it fast."""
+
+	parts = (_libc_pread(), _libdeflate_inflate(), _libdeflate_crc32())
+	if any(part is None for part in parts):
+		return None
+	if not _FAST_LOADER or _FAST_LOADER[0] != parts:
+		pread, inflate, crc32 = parts
+		_FAST_LOADER[:] = [parts, (pread, inflate[0], inflate[1], inflate[2], crc32)]
+	return _FAST_LOADER[1]
+
+
+_FAST_LOADER = []
+
+
 def _load_batch(reader, fd, offsets, sizes, kinds, bound, crcs=None):
 	"""A batch's chunks or blocks, read with one pread per run of adjacent
 	ones and inflated into one buffer, as (data, positions, lengths); a
 	chunk whose kind byte says it is stored as it is is copied. With the
 	reader's `verify`, every chunk's bytes are checked against `crcs`."""
+
+	# One kernel call without the GIL reads, checks and inflates the batch
+	# where libc's pread and libdeflate load; the code below takes the
+	# rest, and any batch the kernel gives up on, raising what it finds.
+	fast = _fast_loader()
+	if fast is not None:
+		check = 2 if reader.verify and crcs is not None else 1 if crcs is not None \
+			and reader._codec != _CODEC_NONE else 0
+		sizes_in = numpy.ascontiguousarray(sizes, dtype=numpy.int64)
+		n = len(sizes_in)
+		raw = numpy.empty(int(sizes_in.sum()) + 8, dtype=numpy.uint8)
+		buffer = numpy.empty(bound + 8 * n if reader._codec != _CODEC_NONE else 0,
+			dtype=numpy.uint8)
+		starts, positions, lengths = (numpy.empty(n, dtype=numpy.int64) for _ in
+			range(3))
+		used = _load_chunks(fast, fd, numpy.ascontiguousarray(offsets,
+			dtype=numpy.int64), sizes_in, numpy.ascontiguousarray(kinds,
+			dtype=numpy.uint8), _NO_PAIRS if crcs is None else
+			numpy.ascontiguousarray(crcs, dtype=numpy.int64), check, raw, buffer,
+			starts, positions, lengths)
+		if used >= 0:
+			if reader._codec == _CODEC_NONE:
+				return raw, starts, sizes_in.copy()
+			return buffer[:used], positions, lengths
 
 	order = numpy.argsort(offsets, kind='stable')
 	o, s = offsets[order], sizes[order]

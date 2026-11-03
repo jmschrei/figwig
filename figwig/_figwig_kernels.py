@@ -1688,6 +1688,85 @@ def _inflate_chunks_libdeflate(decompress, decompressor, data, starts, sizes,
 
 
 @numba.njit(nogil=True, cache=True)
+def _load_chunks(functions, fd, offsets, sizes, kinds, crcs, check, raw, buffer,
+	starts, positions, lengths):
+	"""A batch's chunks or blocks as `_load_batch` gives them, without the
+	GIL: read into `raw`, which holds all of them and 8 bytes, with one
+	pread per run of adjacent ones, the CRC-32 of every one checked when
+	`check` is 2 and of those stored as they are when it is 1, and, when
+	`buffer` has room, inflated by libdeflate into it. `starts` gets where
+	each chunk lies in `raw`, `positions` and `lengths` where each lies in
+	`buffer` and its bytes. Returns the bytes of `buffer` used, or -1
+	where a run reads short, a CRC differs, a chunk does not inflate into
+	the buffer or no decompressor is had, for `_load_batch` to read the
+	batch again its own way. `functions` are libc's pread and libdeflate's
+	alloc_decompressor, zlib_decompress, free_decompressor and crc32, in
+	one tuple: numba types two ctypes functions given apart in tens of us
+	a call, under the GIL, one tuple of them in a few."""
+
+	pread, alloc, decompress, free, crc32 = functions
+	n = offsets.shape[0]
+	order = numpy.argsort(offsets, kind='mergesort')
+	total = 0
+	for j in range(n):
+		starts[order[j]] = total
+		total += sizes[order[j]]
+
+	# One pread per run of chunks adjacent in the file.
+	j = 0
+	while j < n:
+		a = j
+		while j + 1 < n and offsets[order[j + 1]] == offsets[order[j]] + sizes[
+				order[j]]:
+			j += 1
+		lo = starts[order[a]]
+		want = starts[order[j]] + sizes[order[j]] - lo
+		done = 0
+		while done < want:
+			got = pread(fd, raw[lo + done:].ctypes, want - done, offsets[order[a]] +
+				done)
+			if got <= 0:
+				break
+			done += got
+		if done != want:
+			return -1
+		j += 1
+
+	for k in range(n if check > 0 else 0):
+		if (check == 2 or (kinds[k] & _STORED) > 0) and numpy.int64(crc32(0, raw[
+				starts[k]:].ctypes, sizes[k])) != crcs[k]:
+			return -1
+	if buffer.shape[0] == 0:
+		return 0
+
+	decompressor = alloc()
+	if decompressor == 0:
+		return -1
+	length = numpy.zeros(1, dtype=numpy.uintp)
+	position = 0
+	status = 0
+	for k in range(n):
+		size = sizes[k]
+		if (kinds[k] & _STORED) > 0:
+			if position + size > buffer.shape[0]:
+				status = 1
+				break
+			for i in range(size):
+				buffer[position + i] = raw[starts[k] + i]
+			lengths[k] = size
+		elif decompress(decompressor, raw[starts[k]:].ctypes, size, buffer[
+				position:].ctypes, buffer.shape[0] - position, length.ctypes) != 0:
+			status = 1
+			break
+		else:
+			lengths[k] = numpy.int64(length[0])
+		positions[k] = position
+		position = _pad8(position + lengths[k])
+	free(decompressor)
+	return -1 if status != 0 else position
+
+
+@numba.njit(nogil=True, cache=True)
 def _pread_runs(pread, fd, raw, offsets, starts, ends, got):
 	"""Read each run of adjacent chunks, raw[starts[k]:ends[k]] from byte
 	offsets[k] of the file, with libc's pread and without the GIL, which
