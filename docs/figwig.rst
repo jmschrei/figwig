@@ -112,10 +112,9 @@ the pinned buffer as ``out`` is the shorter path.
 A ``FigWigReader`` reads the file's tables and metadata when it is opened,
 and each group's index on the first read that touches it, after which the
 index is kept, 17 bytes per tile of the genome per group. A read uses one
-thread per 64 chunks it touches, up to ``n_jobs``, and no more than its
-bytes keep busy (:doc:`threads`), and keeps its threads between reads, so
-a read of 64 windows runs on the calling thread and a read of 8,192 on 8.
-A reader checks on every read that the file at its
+thread per 64 chunks it touches, up to ``n_jobs``, and keeps its threads
+between reads, so a read of 64 windows runs on the calling thread and a
+read of 8,192 on 8. A reader checks on every read that the file at its
 path is the one it opened, by its inode and header, and raises if a
 conversion has replaced it; it can be read from several threads at once
 and pickled, so it can go to DataLoader workers under any start method,
@@ -281,16 +280,14 @@ mean over covered bases is one over the other:
 
     covered = fw.sums(chroms, starts, ends, nan="skip") / fw.sums(chroms, starts, ends, nan="count")
 
-``read`` takes ``nan`` with ``bins`` the same way.
-``sums(..., paired=True)`` takes one track per interval and sums interval
-``i`` over track ``i`` alone, in reads of a few tracks of one group each,
-side by side on the threads in position order where the tracks are
-integers, for a reads dimension where each read's span is its own track;
-without it, a sum of every track over every interval is quadratic in the
-reads. It costs about 0.03 ms per interval on one thread on 90,543
-Fiber-seq reads, and 0.02 ms on 32. An analysis of count tracks ported
-from those tools gives other means for regions with uncovered bases unless
-the file was written so. ``sums`` takes any number
+``read`` takes ``nan`` with ``bins`` the same way. ``sums(..., paired=True)``
+takes one track per interval and sums interval ``i`` over track ``i``
+alone, in reads of a few tracks of one group at a time, for a reads
+dimension where each read's span is its own track; without it, a sum of
+every track over every interval is quadratic in the reads. It costs about
+0.03 ms per interval on 90,543 Fiber-seq reads. An analysis of count
+tracks ported from those tools gives other means for regions with
+uncovered bases unless the file was written so. ``sums`` takes any number
 of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
 same as a sparse read's sums; a chunk that fewer than four windows fall
 on, or a read of more tracks than a scratch tile holds (256 MB), is binned

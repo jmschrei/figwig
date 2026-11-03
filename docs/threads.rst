@@ -40,52 +40,33 @@ once, 8 to 32 threads are where the gains were; on the full set of 167,750
 windows, 8 threads were 6.1 times faster than one, and 32 were 11 times
 faster.
 
-A figwig file is read the same way, in batches of chunks on up to ``n_jobs``
-threads, each batch read with one ``pread`` per run of adjacent chunks and
-inflated by libdeflate, or by zlib where the ``deflate`` package is not
-installed. A read uses one thread per 64 chunks it touches, up to
+A figwig file is read the same way, in batches of chunks on up to
+``n_jobs`` threads, each batch read with one ``pread`` per run of adjacent
+chunks and inflated by libdeflate, or by zlib where the ``deflate`` package
+is not installed. A read uses one thread per 64 chunks it touches, up to
 ``n_jobs``, since a read of a few dozen windows is done in under a
-millisecond and gains nothing from waking threads, and no more than one per
-256 KB of the chunks it decodes and per 2 MB of a dense output it fills, but
-at least 4 where it asks for that many, since a read of a few hundred KB of
-chunks took longer on 16 or 32 threads than on 2 to 8, while a read summed
-per bin over fewer windows than threads keeps them all, to split its
-windows' batches, as does a float sum that they would cut across tasks,
-whose sums in a copy of the output per thread depend on the threads; it
-keeps its threads between reads, and on a read of several groups each thread
-takes the next batch as it finishes one. Windows packed into a few tiles are
-cut over the threads by window rather than by chunk, and a read of few large
-chunks, as dense float tracks have, is cut into at least two batches per
-thread rather than batches of 32 MB. A read of many small groups, whose own
-two batches per thread would be a chunk or two each, takes batches of up to
-128 KB per thread of the whole read's chunks instead, since a batch costs
-the calling thread its dispatch whatever its size. On the six genome-wide
-count tracks of :doc:`benchmarks`, 8,192 windows took 0.12 s on one thread
-and 0.05 s on 8, and nothing more was gained past 8; on three dense
-conservation tracks over chr22 they took 0.51, 0.070 and 0.034 s on 1, 8 and
-32 threads. Sums per label run a group's batches at a time, each writing its
-own cells of the output, so they take no copy of the output per thread in
-position order; sums per bin without labels, as ``sums`` takes, run every
-group's batches at once, since each group's tracks have their own cells,
-unless each group has one batch and together they hold less than 1 MB of
-chunks. In track order sums take a copy of the output per thread, which the
-8 GiB guard counts. In position order ``sums(..., paired=True)`` sums its
-batches of tracks side by side, a thread each, where their sums are exact
-in any order, as integer tracks' are.
+millisecond and gains nothing from waking threads, and keeps its threads
+between reads; windows packed into a few tiles are cut over the threads by
+window rather than by chunk, and a read of few large chunks, as dense
+float tracks have, is cut into at least two batches per thread rather
+than batches of 32 MB. On the six genome-wide count tracks of
+:doc:`benchmarks`, 8,192 windows took 0.12 s on one thread and 0.05 s on
+8, and nothing more was gained past 8; on three dense conservation tracks
+over chr22 they took 0.51, 0.070 and 0.034 s on 1, 8 and 32 threads. Sums per label and per bin run a group's batches at a
+time, each writing its own cells of the output, so they take no copy of
+the output per thread in position order; in track order they do, one per
+thread, which the 8 GiB guard counts.
 
 Writing
 -------
 
-A ``FigWigWriter`` encodes whole tiles that a ``write`` call's windows
-cover on its pool, in up to one task per thread of at least 4 MB of tiles
-per call, and intervals and windows' partial tiles there too, but for a
-tile that an earlier call left open or a later one may continue and a
-single partial tile, which it encodes on the calling thread; it compresses
-on the pool, and holds about 0.5 GB plus two to three times the call's
-values, so a call of a few hundred MB at a time is the size to aim for;
-``bw2fw`` and ``fw2bw`` read each piece of a chromosome on a thread of
-their own while the writers take the last, and ``bw2fw`` stops gaining at
-``-p 8``. A bigWig writer takes values in
+A ``FigWigWriter`` encodes whole tiles that a ``write`` call's windows cover
+on its pool, in up to one task per thread of at least 4 MB of tiles per
+call, and partial tiles on the calling thread, compresses on the pool, and
+holds about 0.5 GB plus two to three times the call's values, so a call of
+a few hundred MB at a time is the size to aim for; ``bw2fw`` reads
+each piece of a chromosome on one thread while the writer takes the last,
+and ``-p 8`` is where it stops gaining. A bigWig writer takes values in
 batches of about a million items on one thread, or 786,432 with threads,
 where a planning thread lays each batch out as data blocks, up to ``n_jobs``
 pool threads encode and compress them, and a summary thread folds the batch
