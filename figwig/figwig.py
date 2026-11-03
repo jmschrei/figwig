@@ -2360,17 +2360,16 @@ class FigWigWriter:
 		records['raw'] = raw
 		records['crc'] = crcs
 		byte_at = numpy.concatenate([[0], numpy.cumsum(sizes)])
-		lives, totals, batch_stats, summaries = [], [], [], []
+		lives, totals, summaries = [], [], []
 		for p, piece in enumerate(pieces):
 			lo, hi = int(live_at[p]), int(live_at[p + 1])
 			lives.append(records[lo:hi])
 			totals.append(int(byte_at[hi] - byte_at[lo]))
-			batch_stats.append(stats[class_at[p]:class_at[p + 1]])
 			a, b = int(piece_tiles[p]), int(piece_tiles[p + 1])
 			summaries.append(self._summary_of(piece[1], tiles[a:b], tile_sums[
 				sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p]))) if
 				self._summaries else None)
-		return compressed[:int(byte_at[-1])], lives, totals, batch_stats, summaries
+		return compressed[:int(byte_at[-1])], lives, totals, stats, summaries
 
 	def _encode_dense(self, g, tid, values, items, columns, tiles, dtype):
 		"""Encode whole tiles covered by windows, each tile from window
@@ -2990,21 +2989,22 @@ class FigWigWriter:
 
 	def _write_pieces(self, result, groups):
 		"""Write a packed task's pieces, as `_write_result` writes each: its
-		chunks in one write, then each piece's stats, summary, live records
-		and run of the file, in order."""
+		chunks in one write, every piece's stats folded in piece order in one
+		call, then each piece's summary, live records and run of the file,
+		in order. The stats are a row per track of each piece in turn."""
 
 		compressed, lives, totals, stats, summaries = result
 		offset = self._file.tell()
 		self._file.write(compressed)
-		for g, live, total, batch, summary in zip(groups, lives, totals, stats,
-				summaries):
-			flagged = _fold_batch(self._stats, numpy.asarray(self._groups[g],
-				dtype=numpy.int64), numpy.ascontiguousarray(batch,
-				dtype=numpy.float64))
-			if flagged >= 0:
-				raise ValueError("a value of track {!r} lies beyond float32's "
-					"range; declare the track float64 to keep it.".format(
-					self.tracks[int(flagged)]['name']))
+		# One fold for the task's pieces, since on many threads each call
+		# that lets the GIL go waits to take it back.
+		flagged = _fold_batch(self._stats, numpy.concatenate([numpy.asarray(
+			self._groups[g], dtype=numpy.int64) for g in groups]), stats)
+		if flagged >= 0:
+			raise ValueError("a value of track {!r} lies beyond float32's "
+				"range; declare the track float64 to keep it.".format(
+				self.tracks[int(flagged)]['name']))
+		for g, live, total, summary in zip(groups, lives, totals, summaries):
 			if summary is not None:
 				self._sums[g].append(summary)
 			if len(live) == 0:
