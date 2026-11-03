@@ -587,6 +587,16 @@ def _track_indices(tracks, track_ids, n_tracks, whose):
 		raise TypeError("tracks must be a name, an index, or a list of them, "
 			"not {}.".format(type(tracks).__name__))
 
+	# An array of indices, as a contact map's rows are read, is checked at
+	# once; the first out of range is the one named.
+	if isinstance(items, numpy.ndarray) and items.ndim == 1 and \
+			items.dtype.kind in 'iu':
+		outside = (items < 0) | (items >= n_tracks)
+		if outside.any():
+			raise ValueError("track {} is out of range; there are {} tracks."
+				.format(items[int(numpy.argmax(outside))], n_tracks))
+		return items.astype(numpy.int64), single
+
 	ids = []
 	for item in items:
 		if isinstance(item, str):
@@ -5188,9 +5198,12 @@ class FigWigReader:
 					copy=False), (n, n_channels, width))
 		else:
 			if parts:
-				rows = numpy.concatenate([p[0] for p in parts])
-				channels = numpy.concatenate([p[1] for p in parts])
-				offsets = numpy.concatenate([p[2] for p in parts])
+				rows = numpy.concatenate([p[0] for p in parts]).astype(numpy.int64,
+					copy=False)
+				channels = numpy.concatenate([p[1] for p in parts]).astype(numpy.int64,
+					copy=False)
+				offsets = numpy.concatenate([p[2] for p in parts]).astype(numpy.int64,
+					copy=False)
 				values = numpy.concatenate([p[3] for p in parts])
 			else:
 				rows = channels = offsets = numpy.zeros(0, dtype=numpy.int64)
@@ -6239,6 +6252,14 @@ class _Fold:
 		self.pieces, self.entries = [], []
 
 
+def _part_index(width):
+	"""The type of a sparse read's rows, channels and offsets in a task's
+	entries, before they are gathered into int64: int32 while an offset in
+	a window fits it, which no read's rows or channels pass."""
+
+	return numpy.int32 if width < 2 ** 31 else numpy.int64
+
+
 class _Task:
 	"""One batch of a position-order read: a group's live chunks and the
 	(window, tile) pairs that fall in them, including pairs on zero tiles."""
@@ -6324,9 +6345,10 @@ class _Task:
 				self.slots), self.slots, self.pair_chunks, self.pair_bases,
 				self.pair_starts, self.pair_rows, self.width, False, empty, empty,
 				empty, numpy.zeros(0, dtype=numpy.float64))
-			rows = numpy.empty(count, dtype=numpy.int64)
-			channels = numpy.empty(count, dtype=numpy.int64)
-			offsets = numpy.empty(count, dtype=numpy.int64)
+			index = _part_index(self.width)
+			rows = numpy.empty(count, dtype=index)
+			channels = numpy.empty(count, dtype=index)
+			offsets = numpy.empty(count, dtype=index)
 			values = numpy.empty(count, dtype=numpy.float64)
 			_list_tiles(reader.tile, data, positions, self.kinds, len(self.slots),
 				self.slots, self.pair_chunks, self.pair_bases, self.pair_starts,
@@ -6438,9 +6460,10 @@ class _BlockTask:
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
 				False, True, False, empty, empty, empty, numpy.zeros(0,
 				dtype=numpy.float64), scratch, 1, empty, 0)
-			rows = numpy.empty(count, dtype=numpy.int64)
-			channels = numpy.empty(count, dtype=numpy.int64)
-			offsets = numpy.empty(count, dtype=numpy.int64)
+			index = _part_index(self.width)
+			rows = numpy.empty(count, dtype=index)
+			channels = numpy.empty(count, dtype=index)
+			offsets = numpy.empty(count, dtype=index)
 			values = numpy.empty(count, dtype=numpy.float64)
 			_read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,

@@ -2756,6 +2756,32 @@ def test_write_sparse_checks_declared_dtypes_in_one_pass(tmp_path):
 	assert numpy.isnan(y[2, 6])
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_sparse_reads_past_two_to_the_31(tmp_path, order):
+	"""A sparse read of a window wider than 2**31 bases, and the entries of
+	a chromosome that long, give offsets past 2**31 exactly, in either
+	order."""
+
+	path = str(tmp_path / 'long.fw')
+	size = 2 ** 31 + 70000
+	positions = numpy.array([5, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 65537, size - 1])
+	with FigWigWriter(path, {'chrL': size, 'chr2': 100}, ['a', 'b'], tile=65536,
+			order=order) as writer:
+		writer.write_sparse('chrL', positions, [0, 1, 0, 1, 0], [1, 2, 3, 4, 5])
+		writer.write_sparse('chr2', [7], [1], [9])
+	reader = FigWigReader(path)
+	found = reader.read(['chrL'], [0], size, sparse=True)
+	assert found.offsets.dtype == numpy.int64
+	keep = numpy.lexsort((found.offsets, found.channels))
+	assert found.channels[keep].tolist() == [0, 0, 0, 1, 1]
+	assert found.offsets[keep].tolist() == [5, 2 ** 31, size - 1, 2 ** 31 - 1,
+		2 ** 31 + 65537]
+	assert found.values[keep].tolist() == [1, 3, 5, 2, 4]
+	entries = reader.read_entries()
+	assert entries.positions.tolist() == [5, 2 ** 31, size - 1, 2 ** 31 - 1,
+		2 ** 31 + 65537, 7]
+
+
 def test_write_sparse_checks_in_parts_raise_as_one_pass(tmp_path, monkeypatch):
 	"""A call's checks cut into parts on the pool raise what one thread
 	raises, with the same message, for a bad entry in any part and bad
