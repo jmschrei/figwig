@@ -239,3 +239,91 @@ def test_bigwigs_written_on_their_own_threads_are_one_threads(tmp_path, fw,
 	assert written[0] == written[1]
 	assert len(written[0]) == 6
 	assert 0 < max(leads) <= ahead
+
+
+def test_bigwigs_of_a_group_of_more_tracks_than_threads_take_no_more(
+		tmp_path, monkeypatch):
+	"""A group of more tracks than -p has its bigWigs written at most -p at a
+	time, and still more than one at a time, none taking two writes at once,
+	with the bytes one thread writes."""
+
+	path = str(tmp_path / 'one_group.fw')
+	write_reference(path, reference_tracks(), groups=5)
+	monkeypatch.setattr(figwig.fw2bw, '_PIECE', 1 << 9)
+	monkeypatch.setattr(figwig.fw2bw, '_WINDOW', 1 << 7)
+	lock = threading.Lock()
+	writing, most = [0], [0]
+
+	class Counted(figwig.fw2bw.BigWigWriter):
+		"""A bigWig writer that counts the writes running at once."""
+
+		busy = False
+
+		def write(self, *args, **kwargs):
+			with lock:
+				assert not self.busy, 'two writes at once'
+				self.busy = True
+				writing[0] += 1
+				most[0] = max(most[0], writing[0])
+			time.sleep(0.005)
+			try:
+				return super().write(*args, **kwargs)
+			finally:
+				with lock:
+					self.busy = False
+					writing[0] -= 1
+
+	written = []
+	for threads in ('1', '2'):
+		out = tmp_path / ('bw' + threads)
+		with monkeypatch.context() as patch:
+			if threads != '1':
+				patch.setattr(figwig.fw2bw, 'BigWigWriter', Counted)
+			main(['fw2bw', path, '-o', str(out), '-p', threads])
+		written.append({name: (out / name).read_bytes() for name in os.listdir(
+			out)})
+	assert written[0] == written[1]
+	assert len(written[0]) == 6
+	assert most[0] == 2
+
+
+def test_bigwigs_of_a_group_of_as_many_tracks_as_threads_run_ahead(tmp_path,
+		monkeypatch):
+	"""A group of as many tracks as -p writes each track's bigWig on a
+	thread of its own: the others start a second piece while a slowed one
+	is still on the first."""
+
+	path = str(tmp_path / 'one_group.fw')
+	write_reference(path, reference_tracks(), groups=5)
+	monkeypatch.setattr(figwig.fw2bw, '_PIECE', 1 << 9)
+	monkeypatch.setattr(figwig.fw2bw, '_WINDOW', 1 << 7)
+	monkeypatch.setattr(figwig.fw2bw, '_AHEAD', 2)
+	lock = threading.Lock()
+	active, leads = [], []
+
+	class Slowed(figwig.fw2bw.BigWigWriter):
+		"""A bigWig writer that records how far it is ahead of the group's
+		last, the group's first one slowed."""
+
+		def __init__(self, *args, **kwargs):
+			super().__init__(*args, **kwargs)
+			self.started = self.finished = 0
+			with lock:
+				active.append(self)
+
+		def write(self, *args, **kwargs):
+			with lock:
+				self.started += 1
+				leads.append(self.started - min(w.finished for w in active))
+				slow = self is active[0]
+			if slow:
+				time.sleep(0.01)
+			try:
+				return super().write(*args, **kwargs)
+			finally:
+				with lock:
+					self.finished += 1
+
+	monkeypatch.setattr(figwig.fw2bw, 'BigWigWriter', Slowed)
+	main(['fw2bw', path, '-o', str(tmp_path / 'bw'), '-p', '5'])
+	assert max(leads) == 2
