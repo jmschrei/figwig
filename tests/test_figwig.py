@@ -2975,6 +2975,91 @@ def test_write_sparse_checks_in_parts_raise_as_one_pass(tmp_path, monkeypatch):
 	assert written[0] == written[1]
 
 
+@pytest.mark.parametrize('wave', [1, 1 << 23])
+def test_write_checks_and_copies_in_parts_as_one_thread(tmp_path, monkeypatch,
+		wave):
+	"""A write's checks and its copy of each group's channels, cut into
+	parts on the pool, and copied in waves of a block each or of every
+	block, raise what one thread raises with the checks in numpy, with the
+	same message, for a bad value in any part, and write the file it
+	writes: for channels given out of the groups' order, a block that is
+	not contiguous, windows running past their chromosome's end with NaN
+	there, intervals, and values the compiled passes do not take (float16,
+	big-endian)."""
+
+	for name, value in (('_RADIX_PARALLEL', 1), ('_COPY_ON_POOL', 1),
+			('_COPY_PART_BYTES', 1), ('_GATHER_BASES', 5), ('_COPY_WAVE_BYTES',
+			wave), ('_CHECK_PART_BYTES', 1)):
+		monkeypatch.setattr(figwig.figwig, name, value)
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'},
+		{'name': 'c'}, {'name': 'd', 'dtype': 'float32'}, {'name': 'e',
+		'dtype': 'uint8'}, {'name': 'f'}]
+	groups = [['a', 'c'], ['b', 'd', 'e'], ['f']]
+	order = ['f', 'e', 'a', 'd', 'c', 'b']
+	sizes = {'chr1': 3000, 'chr2': 700, 'chr3': 300, 'chr4': 300, 'chr5': 500}
+
+	def block(**at):
+		values = numpy.zeros((3, 6, 200)) + numpy.arange(3, 9)[None, :, None]
+		values[:, :, ::7] = 0
+		for name, (j, c, p) in at.items():
+			values[j, order.index(c), p] = {'nan': numpy.nan, 'fraction': 0.5,
+				'wide': 300, 'negative': -2, 'inf': numpy.inf}[name.rstrip('2')]
+		return values
+
+	cases = [block(nan=(2, 'a', 190)), block(nan=(0, 'e', 3), fraction=(2, 'b', 150)),
+		block(fraction=(1, 'b', 199)), block(wide=(2, 'e', 0)),
+		block(negative=(0, 'a', 120), nan2=(2, 'e', 7)), block(inf=(2, 'c', 199)),
+		block(inf=(0, 'f', 1), nan=(1, 'a', 2)), block(negative=(2, 'e', 50)),
+		block(inf=(2, 'b', 199))]
+	big = block().astype(numpy.int64)
+	big[2, 3, 100] = 2 ** 53 + 1
+	cases.append(big)
+
+	# One thread checks as numpy does, without the compiled passes.
+	compiled = figwig.figwig._kernel_values
+
+	def message(n_jobs, values, ends=None):
+		monkeypatch.setattr(figwig.figwig, '_kernel_values', compiled if n_jobs >
+			1 else lambda dtype: False)
+		with FigWigWriter(str(tmp_path / 'p.fw'), sizes, tracks, tile=64,
+				groups=groups, n_jobs=n_jobs) as writer:
+			with pytest.raises((ValueError, TypeError)) as error:
+				writer.write('chr1', [0, 900, 2000], values, ends=ends, tracks=order)
+		return str(error.value)
+
+	for k, values in enumerate(cases):
+		assert message(1, values) == message(4, values), k
+
+	# Intervals, a value each, which stay in numpy.
+	for k, at in enumerate(({'nan': (2, 'a')}, {'negative': (1, 'e')}, {'fraction':
+			(0, 'b')}, {'wide': (2, 'e')}, {'negative': (0, 'a'), 'nan2': (2, 'e')})):
+		values = block(**{name: (j, c, 0) for name, (j, c) in at.items()})[:, :, 0]
+		ends = [100, 1000, 2100]
+		assert message(1, values, ends) == message(4, values, ends), k
+
+	strided = numpy.full((3, 6, 400), 2.0, dtype=numpy.float32)[:, :, ::2]
+	past = block()
+	past[2, :, 101:] = numpy.nan
+	past[2, order.index('e'), 101:] = 0
+	written = []
+	for n_jobs in (1, 4):
+		monkeypatch.setattr(figwig.figwig, '_kernel_values', compiled if n_jobs >
+			1 else lambda dtype: False)
+		path = str(tmp_path / 'ok{}.fw'.format(n_jobs))
+		with FigWigWriter(path, sizes, tracks, tile=64, groups=groups,
+				n_jobs=n_jobs) as writer:
+			writer.write('chr1', [0, 900, 2000], block(), tracks=order)
+			writer.write('chr1', [2200, 2500, 2800], strided, tracks=order)
+			writer.write('chr2', [0, 250, 599], past, tracks=order)
+			for chrom, dtype in (('chr3', 'float16'), ('chr4', '>f4')):
+				writer.write(chrom, [0], block()[:1].astype(dtype), tracks=order)
+			writer.write('chr5', [0, 10], numpy.full((2, 6), 4, dtype=numpy.int32),
+				ends=[5, 400], tracks=order)
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
+
+
 ###
 # The format's second round: groups in any order, exact integers, runs,
 # stored chunks, sums per bin, and the writer's and reader's guards

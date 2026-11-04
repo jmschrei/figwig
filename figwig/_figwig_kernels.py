@@ -668,6 +668,56 @@ def _any_infinite(values):
 
 
 @numba.njit(nogil=True, cache=True)
+def _fit_flags(values, channels, limits, lows, highs, j0, j1, c0, c1, flags):
+	"""How windows j0 to j1, bases c0 to c1, of a (window, channel, base)
+	block fail the declared integer types of the channels listed, as bits
+	ORed into flags[k] for channel channels[k]: 1 a NaN, 2 a value that is
+	not an integer, 4 one below lows[k], 8 one above highs[k], each value
+	taken as float64. A window's bases from limits[j] on are passed over,
+	when `limits` is not empty."""
+
+	for k in range(channels.shape[0]):
+		c = channels[k]
+		lo, hi = lows[k], highs[k]
+		nan = fraction = below = above = False
+		for j in range(j0, j1):
+			stop = min(c1, limits[j]) if limits.shape[0] > 0 else c1
+			if stop <= c0:
+				continue
+			row = values[j, c, c0:stop]
+			for p in range(row.shape[0]):
+				v = numpy.float64(row[p])
+				nan |= v != v
+				fraction |= v != numpy.floor(v)
+				below |= v < lo
+				above |= v > hi
+		flags[k] |= numpy.uint8(nan) | (numpy.uint8(fraction) << 1) | (numpy.uint8(
+			below) << 2) | (numpy.uint8(above) << 3)
+
+
+@numba.njit(nogil=True, cache=True)
+def _gather_block(values, first, slots, out, t0, t1, width):
+	"""Pieces t0 to t1 of a block copied into `out`, of shape (windows,
+	slots, bases): piece t is bases q * width to (q + 1) * width of row r,
+	for r, q = t // pieces per row, t % pieces per row, and row r is
+	channel slots[r % len(slots)] of window first + r // len(slots) of
+	`values`."""
+
+	n_slots = slots.shape[0]
+	bases = out.shape[2]
+	per_row = -(-bases // width)
+	for t in range(t0, t1):
+		r, q = t // per_row, t % per_row
+		j, s = r // n_slots, r % n_slots
+		c0 = q * width
+		c1 = min(bases, c0 + width)
+		src = values[first + j, slots[s]]
+		dst = out[j, s]
+		for p in range(c0, c1):
+			dst[p] = src[p]
+
+
+@numba.njit(nogil=True, cache=True)
 def _fold_batch(stats, rows, batch):
 	"""Fold a batch's (tracks, 6) statistics into the writer's for the
 	tracks `rows`: the compensated sum, the nonzero bases, the minimum,

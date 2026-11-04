@@ -37,6 +37,8 @@ chunks and blocks; `docs/figwig.rst` gives every field.
 
 from __future__ import annotations
 
+import bisect
+import collections
 import itertools
 import json
 import os
@@ -62,6 +64,8 @@ from ._figwig_kernels import _key_segments
 from ._figwig_kernels import _fold_batch
 from ._figwig_kernels import _fold_exact
 from ._figwig_kernels import _any_infinite
+from ._figwig_kernels import _fit_flags
+from ._figwig_kernels import _gather_block
 from ._figwig_kernels import _value_range
 from ._figwig_kernels import _declared_ranges
 from ._figwig_kernels import _tile_cuts
@@ -242,7 +246,11 @@ _PLAN_PAIRS = 1 << 22  # (window, run) pairs a track-order plan takes at once
 _PAIRED_TILES = 4  # tiles per interval of paired sums read at once, on average
 _PACK_ROWS = 1 << 14  # tracks of a packed entries task's pieces, at most
 _ENTRIES_GO_BYTES = _BATCH_BYTES  # an entries task's buffer, less one tile
-_COPY_ON_POOL = 1 << 26  # bytes of a write's block above which its copy is made on the pool
+_COPY_ON_POOL = 1 << 22  # bytes of a write's block above which its copy is made on the pool
+_COPY_PART_BYTES = 1 << 21  # bytes of such a copy per part, at least
+_GATHER_BASES = 1 << 16  # bases of a row per piece of such a copy
+_COPY_WAVE_BYTES = 1 << 22  # bytes of a write's copies per thread in a wave
+_CHECK_PART_BYTES = 1 << 25  # bytes of a write's values per part of a check, at least
 
 # Whether a tile whose few tracks have values may be stored as a matrix
 # chunk, which a compressed file chooses only when the sparse chunk's
@@ -626,16 +634,17 @@ def _check_exact(values, pool=None, parts=1):
 	"""Raise for a 64-bit integer array with a value beyond 2**53, which
 	float64, and so the file, cannot hold exactly, and for an infinite
 	value, which no figwig file holds: a base is a finite value or NaN. A
-	native C-contiguous 1-D array is checked in `parts` pieces on the pool."""
+	native C-contiguous array is checked in `parts` pieces on the pool."""
 
 	values = numpy.asarray(values)
-	split = pool is not None and parts > 1 and values.ndim == 1 and \
+	split = pool is not None and parts > 1 and values.ndim >= 1 and \
 		values.dtype.isnative and values.flags.c_contiguous
 	if values.dtype.kind in 'iu' and values.dtype.itemsize == 8 and values.size:
 		if split:
-			cuts = numpy.arange(parts + 1, dtype=numpy.int64) * len(values) // parts
+			flat = values.reshape(-1)
+			cuts = numpy.arange(parts + 1, dtype=numpy.int64) * len(flat) // parts
 			found = [None] * parts
-			_each(pool, parts, lambda c: found.__setitem__(c, _value_range(values,
+			_each(pool, parts, lambda c: found.__setitem__(c, _value_range(flat,
 				cuts[c], cuts[c + 1])))
 			low, high = min(int(f[0]) for f in found), max(int(f[1]) for f in found)
 		else:
@@ -686,6 +695,14 @@ def _check_values_fit(name, dtype, values):
 	if block.size and (block.min() < info.min or block.max() > info.max):
 		raise ValueError("track {!r} is {}, and a value is outside {} to {}."
 			.format(name, dtype, info.min, info.max))
+
+
+def _kernel_values(dtype):
+	"""Whether a compiled pass takes values of this dtype as they are:
+	native integers and float32 or float64, not float16 or longdouble."""
+
+	return dtype.isnative and (dtype.kind in 'iu' and dtype.itemsize in (1, 2, 4,
+		8) or dtype.char in 'fd')
 
 
 def _header_crc(header_bytes):
@@ -1456,7 +1473,7 @@ class FigWigWriter:
 		groups = self._whole_groups(ids)
 
 		values = numpy.asarray(values)
-		_check_exact(values)
+		_check_exact(values, self._pool, self._check_parts(values.nbytes))
 		if values.dtype.kind not in 'iuf':
 			raise TypeError("values must be numbers, not {}.".format(values.dtype))
 
@@ -1552,21 +1569,12 @@ class FigWigWriter:
 
 		# A declared dtype is checked against the values inside the
 		# chromosome; the bases of a window past its end are NaN or 0.
-		inside = None
-		if values.ndim == 3 and len(over) > 0 and any(self.tracks[i]['dtype']
-				not in (None, 'float32', 'float64') for members in groups.values()
-				for i in members):
-			inside = numpy.arange(values.shape[2])[None, :] < (ends - starts)[:,
-				None]
-		for g, members in groups.items():
-			for i, channel in members.items():
-				if self.tracks[i]['dtype'] in (None, 'float32', 'float64'):
-					continue
-				block = values[:, channel]
-				if inside is not None:
-					block = block[inside]
-				_check_values_fit(self.tracks[i]['name'], self.tracks[i]['dtype'],
-					block)
+		declared = [(i, channel) for members in groups.values() for i, channel in
+			members.items() if self.tracks[i]['dtype'] not in (None, 'float32',
+			'float64')]
+		if declared:
+			self._check_declared(values, declared, ends - starts if values.ndim ==
+				3 and len(over) > 0 else None)
 
 		self._written = True
 		if self.order == 'tracks':
@@ -1596,28 +1604,28 @@ class FigWigWriter:
 		else:
 			dtype = numpy.float64
 
+		# The groups' blocks of windows are copied in waves, each in one pass
+		# on the pool before any of its blocks is encoded, so that the copies
+		# do not wait behind the encoding of the groups before them; a wave
+		# is copied once the encoding of all but the last wave is done, so
+		# that the copies a call holds stay within two waves. Each other
+		# block is made as it is encoded.
+		blocks, copies = [], []
 		for g, members in groups.items():
 			slots = numpy.array([members[int(i)] for i in self._groups[g]],
 				dtype=numpy.int64)
 			identity = len(slots) == values.shape[1] and bool((slots ==
 				numpy.arange(len(slots))).all())
 			for a, b in zip(bounds[:-1], bounds[1:]):
-				block = values[a:b] if identity else values[a:b, slots]
-				if block.ndim == 2:
-					# Intervals: one value per track, converted here, since
-					# the block is small, and copied when the pool encodes
-					# them after this call returns, unless `_copies` is off.
-					block = numpy.array(block[:, :, None], dtype=dtype, order='C') \
-						if self._pool is not None and self._copies else \
-						numpy.ascontiguousarray(block[:, :, None], dtype=dtype)
-				elif self._copies and self._pool is not None:
-					block = self._copy(block)
+				chosen = None if identity else slots
+				if values.ndim == 3 and self._pool is not None and (self._copies or
+						not identity):
+					copies.append((len(blocks), a, b, chosen))
+					blocks.append([g, a, b, (b - a) * len(slots) * values.shape[2] *
+						values.dtype.itemsize])
 				else:
-					# Without a pool every task runs inside this call, so the
-					# caller's array is not read after it returns.
-					block = numpy.ascontiguousarray(block)
-				self._write_group(g, int(tids[a]), starts[a:b], ends[a:b], block,
-					values.ndim == 3, dtype)
+					blocks.append([g, a, b, chosen])
+		self._write_waves(blocks, copies, values, tids, starts, ends, dtype)
 
 		# Batches are written as they finish compressing, keeping a few in
 		# flight per thread, so that a long call does not hold every chunk
@@ -1886,6 +1894,15 @@ class FigWigWriter:
 			return 1
 		return max(1, min(self.n_jobs, _PRESENT_BYTES // max(1, row_bytes)))
 
+	def _check_parts(self, nbytes):
+		"""How many parts a pass over a write's `nbytes` of values is cut into
+		on the pool: one per _CHECK_PART_BYTES, up to one per thread, since a
+		part costs a dispatch that a smaller pass does not repay."""
+
+		if self._pool is None:
+			return 1
+		return max(1, min(self.n_jobs, nbytes // _CHECK_PART_BYTES))
+
 	def _entry_ranges(self, positions, track_ids):
 		"""The lowest and highest position and track index of a call's
 		entries, and which tracks are present, or None where neither the
@@ -2141,32 +2158,156 @@ class FigWigWriter:
 
 		self._note_written(g, tid, int(ends[-1]))
 
-	def _copy(self, block):
-		"""A C-contiguous copy of a block in its own type, made in slices on
-		the pool when the block is large, since one thread's memcpy would
-		otherwise be most of what a write of many tracks costs here."""
+	def _write_waves(self, blocks, copies, values, tids, starts, ends, dtype):
+		"""Encode a write's blocks in order, those of `copies` copied first
+		in waves of at most _COPY_WAVE_BYTES per thread: a block to copy is
+		[g, a, b, its bytes], and `copies` holds (its index, a, b, slots);
+		any other is [g, a, b, slots], made by `_block_of` as it is encoded.
+		Before a wave is copied the writer waits for the encoding of the
+		waves before the last one, so that a call holds the copies of two
+		waves at most, whatever its size."""
 
-		if self._pool is None or block.nbytes < _COPY_ON_POOL or block.shape[
-				0] * block.shape[1] < 2:
-			return numpy.array(block, order='C')
-		out = numpy.empty(block.shape, dtype=block.dtype)
-		flat_in = block.reshape(-1, block.shape[2]) if block.flags.c_contiguous \
-			else None
-		rows = block.shape[0] * block.shape[1]
-		parts = min(self.n_jobs, rows)
-		cuts = numpy.linspace(0, rows, parts + 1).astype(numpy.int64)
-		flat_out = out.reshape(-1, block.shape[2])
+		cap = max(_COPY_ON_POOL, _COPY_WAVE_BYTES * self.n_jobs)
+		queued = {k: job for job in copies for k in (job[0],)}
+		waves = collections.deque()
+		k = 0
+		while k < len(blocks):
+			wave, size, end = [], 0, k
+			while end < len(blocks) and (end == k or size < cap):
+				if end in queued:
+					wave.append(queued[end])
+					size += blocks[end][3]
+				end += 1
+			while len(waves) > 1:
+				wait(waves.popleft())
+			for (j, _, _, _), block in zip(wave, self._private(values, wave)):
+				blocks[j][3] = block
+			before = len(self._inflight)
+			for g, a, b, block in blocks[k:end]:
+				if k not in queued:
+					block = self._block_of(values, a, b, block, dtype)
+				blocks[k][3] = None
+				self._write_group(g, int(tids[a]), starts[a:b], ends[a:b], block,
+					values.ndim == 3, dtype)
+				k += 1
+			waves.append([item[0] for item in self._inflight[before:] if hasattr(
+				item[0], 'done')])
 
-		def copy(k):
-			a, b = int(cuts[k]), int(cuts[k + 1])
-			if flat_in is not None:
-				flat_out[a:b] = flat_in[a:b]
-			else:
-				for r in range(a, b):
-					flat_out[r] = block[r // block.shape[1], r % block.shape[1]]
+	def _block_of(self, values, a, b, slots, dtype):
+		"""Windows or intervals a to b of a write's values, with the channels
+		`slots` (every one when None), as the encoders take them. Intervals,
+		a value per track, are converted here, since the block is small, and
+		copied when the pool encodes them after the call returns, unless
+		`_copies` is off; windows are copied by `_private` when the pool
+		encodes them, and otherwise every task runs inside the call, so the
+		caller's array is not read after it returns."""
 
-		list(self._pool.map(copy, range(parts)))
-		return out
+		block = values[a:b] if slots is None else values[a:b, slots]
+		if values.ndim == 2:
+			if self._pool is not None and self._copies:
+				return numpy.array(block[:, :, None], dtype=dtype, order='C')
+			return numpy.ascontiguousarray(block[:, :, None], dtype=dtype)
+		return numpy.ascontiguousarray(block)
+
+	def _private(self, values, jobs):
+		"""Copies of blocks of a write's values, each job (k, a, b, slots)
+		windows a to b with the channels `slots`, or every channel when
+		None, as a C-contiguous array of its own in its own type: in pieces
+		on the pool, cut over every job's at once, when they are large
+		together, since one thread's copy, and a second one where a group
+		takes some of the channels, would otherwise be most of what this
+		thread does in a write of many tracks."""
+
+		if not jobs:
+			return []
+		width, itemsize = values.shape[2], values.dtype.itemsize
+		n_slots = [values.shape[1] if slots is None else len(slots) for _, _, _,
+			slots in jobs]
+		nbytes = sum((b - a) * n * width * itemsize for (_, a, b, _), n in zip(jobs,
+			n_slots))
+		if nbytes < _COPY_ON_POOL or not _kernel_values(values.dtype):
+			return [numpy.array(values[a:b], order='C') if slots is None else
+				numpy.ascontiguousarray(values[a:b, slots]) for _, a, b, slots in jobs]
+
+		outs, indexes = [], []
+		per_row = -(-width // _GATHER_BASES)
+		firsts = [0]
+		for (_, a, b, slots), n in zip(jobs, n_slots):
+			outs.append(numpy.empty((b - a, n, width), dtype=values.dtype))
+			indexes.append(numpy.arange(n, dtype=numpy.int64) if slots is None else
+				numpy.ascontiguousarray(slots, dtype=numpy.int64))
+			firsts.append(firsts[-1] + (b - a) * n * per_row)
+		pieces = firsts[-1]
+		parts = max(1, min(self.n_jobs, pieces, nbytes // _COPY_PART_BYTES))
+		cuts = (numpy.arange(parts + 1, dtype=numpy.int64) * pieces // parts).tolist()
+
+		def part(c):
+			# The pieces of part c, of one job after another.
+			lo, hi = cuts[c], cuts[c + 1]
+			j = bisect.bisect_right(firsts, lo) - 1
+			while lo < hi:
+				end = min(hi, firsts[j + 1])
+				_gather_block(values, jobs[j][1], indexes[j], outs[j], lo - firsts[j],
+					end - firsts[j], _GATHER_BASES)
+				lo = end
+				j += 1
+
+		_each(self._pool, parts, part)
+		return outs
+
+	def _check_declared(self, values, declared, limits):
+		"""Raise if the values of a write's channels for tracks with declared
+		integer types do not fit them, as `_check_values_fit` raises for the
+		first that does not, `declared` being (track, channel) in the order
+		they are checked. A window's bases from limits[j] on are passed over,
+		when given. One compiled pass over the channels, in parts on the
+		pool for a large call, for windows of more than one base."""
+
+		# Intervals and windows of one base stay in numpy, which checks them
+		# as fast, at a lower peak.
+		if not _kernel_values(values.dtype) or values.ndim == 2 or values.shape[
+				2] == 1:
+			inside = None if limits is None else numpy.arange(values.shape[2])[None,
+				:] < limits[:, None]
+			for i, channel in declared:
+				block = values[:, channel]
+				if inside is not None:
+					block = block[inside]
+				_check_values_fit(self.tracks[i]['name'], self.tracks[i]['dtype'],
+					block)
+			return
+
+		n, width = values.shape[0], values.shape[2]
+		stops = _NO_PAIRS if limits is None else numpy.minimum(limits,
+			width).astype(numpy.int64)
+		channels = numpy.array([channel for _, channel in declared],
+			dtype=numpy.int64)
+		info = [numpy.iinfo(self.tracks[i]['dtype']) for i, _ in declared]
+		lows = numpy.array([float(x.min) for x in info], dtype=numpy.float64)
+		highs = numpy.array([float(x.max) for x in info], dtype=numpy.float64)
+		parts = self._check_parts(n * len(declared) * width * values.dtype.itemsize)
+		flags = numpy.zeros((parts, len(declared)), dtype=numpy.uint8)
+		# Parts cut the bases of a call of few windows, and the windows of
+		# a call of many.
+		by_bases = width >= parts * _GATHER_BASES or n < parts
+		cuts = numpy.arange(parts + 1, dtype=numpy.int64) * (width if by_bases
+			else n) // parts
+		_each(self._pool, parts, lambda c: _fit_flags(values, channels, stops,
+			lows, highs, 0 if by_bases else cuts[c], n if by_bases else cuts[c +
+			1], cuts[c] if by_bases else 0, cuts[c + 1] if by_bases else width,
+			flags[c]))
+		found = numpy.bitwise_or.reduce(flags, axis=0)
+		for k, (i, _) in enumerate(declared):
+			name, dtype = self.tracks[i]['name'], self.tracks[i]['dtype']
+			if found[k] & 1:
+				raise ValueError("track {!r} is {}, and a value is NaN.".format(name,
+					dtype))
+			if found[k] & 2:
+				raise ValueError("track {!r} is {}, and a value is not an integer."
+					.format(name, dtype))
+			if found[k] & 12:
+				raise ValueError("track {!r} is {}, and a value is outside {} to {}."
+					.format(name, dtype, info[k].min, info[k].max))
 
 	def _edges(self, starts, ends, values, by_base, dtype):
 		"""The items of a block that the buffer encoder sees, in the
@@ -3270,14 +3411,49 @@ def _moved(offsets, sizes, extents):
 
 
 def _each(pool, n, task):
-	"""task(c) for c in range(n), on the pool when there is one."""
+	"""task(c) for c in range(n), on the pool when there is one: the calling
+	thread takes the next part until none is left and the pool's threads
+	join in as they come free, so that parts never wait behind the pool's
+	earlier tasks, as a write's checks would behind its last call's
+	encoding. Returns once every part has run, raising the error of the
+	first part that raised; an interrupt of the calling thread leaves at
+	once."""
 
 	if pool is None or n == 1:
 		for c in range(n):
 			task(c)
-	else:
-		for future in [pool.submit(task, c) for c in range(n)]:
-			future.result()
+		return
+
+	lock = threading.Lock()
+	finished = threading.Condition(lock)
+	state = [0, 0]  # the next part, the parts running
+	errors = {}
+
+	def work():
+		while True:
+			with lock:
+				c = state[0]
+				if c >= n:
+					return
+				state[0] += 1
+				state[1] += 1
+			try:
+				task(c)
+			except Exception as error:
+				errors[c] = error
+			finally:
+				with lock:
+					state[1] -= 1
+					finished.notify_all()
+
+	for _ in range(n - 1):
+		pool.submit(work)
+	work()
+	with lock:
+		while state[1] > 0:
+			finished.wait()
+	if errors:
+		raise errors[min(errors)]
 
 
 def _radix_order(keys, bits, pool, n_chunks, low=0, values=None):
