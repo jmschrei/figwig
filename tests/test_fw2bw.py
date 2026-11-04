@@ -6,6 +6,8 @@ bigWigs, and for the round trip back through `figwig bw2fw`."""
 
 import os
 import sys
+import time
+import threading
 import subprocess
 
 import numpy
@@ -176,3 +178,64 @@ def test_failed_conversion_leaves_no_bigwig(tmp_path, fw, monkeypatch):
 	with pytest.raises(SystemExit, match="stopped part way"):
 		main(['fw2bw', fw, '-o', str(out)])
 	assert sorted(os.listdir(out)) == []
+
+
+@pytest.mark.parametrize('ahead', [1, 3])
+def test_bigwigs_written_on_their_own_threads_are_one_threads(tmp_path, fw,
+		monkeypatch, ahead):
+	"""Each track's bigWig, written on a thread of its own with the pieces of
+	its group in order, and up to `ahead` pieces at once, has the bytes one
+	thread writes, over chromosomes of many pieces: no bigWig takes two
+	writes at once, and none starts a piece `ahead` past the last its
+	group's slowest bigWig finished, though that one is slowed."""
+
+	monkeypatch.setattr(figwig.fw2bw, '_PIECE', 1 << 9)
+	monkeypatch.setattr(figwig.fw2bw, '_WINDOW', 1 << 7)
+	monkeypatch.setattr(figwig.fw2bw, '_AHEAD', ahead)
+	lock = threading.Lock()
+	active, leads = [], []
+
+	class Watched(figwig.fw2bw.BigWigWriter):
+		"""A bigWig writer that records its writes, its group's first one
+		slowed."""
+
+		def __init__(self, *args, **kwargs):
+			super().__init__(*args, **kwargs)
+			self.started = self.finished = 0
+			self.busy = False
+			with lock:
+				active.append(self)
+
+		def write(self, *args, **kwargs):
+			with lock:
+				assert not self.busy, 'two writes at once'
+				self.busy = True
+				self.started += 1
+				leads.append(self.started - min(w.finished for w in active))
+				slow = self is active[0]
+			if slow:
+				time.sleep(0.01)
+			try:
+				return super().write(*args, **kwargs)
+			finally:
+				with lock:
+					self.busy = False
+					self.finished += 1
+
+		def close(self):
+			with lock:
+				active.remove(self)
+			return super().close()
+
+	written = []
+	for threads in ('1', '4'):
+		out = tmp_path / ('bw' + threads)
+		with monkeypatch.context() as patch:
+			if threads != '1':
+				patch.setattr(figwig.fw2bw, 'BigWigWriter', Watched)
+			main(['fw2bw', fw, '-o', str(out), '-p', threads])
+		written.append({name: (out / name).read_bytes() for name in os.listdir(
+			out)})
+	assert written[0] == written[1]
+	assert len(written[0]) == 6
+	assert 0 < max(leads) <= ahead

@@ -13,6 +13,7 @@ that are NaN with `--missing nan`; a NaN is left out either way.
 """
 
 import argparse
+import collections
 import os
 import sys
 
@@ -28,6 +29,7 @@ from .figwig import FigWigReader
 from .writer import BigWigWriter
 
 _PIECE = 1 << 22
+_AHEAD = 2  # pieces of a group whose bigWigs are being written at once, at most
 _WINDOW = 1 << 16
 
 
@@ -131,30 +133,35 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 		by_group.setdefault(int(reader._group_of[i]), []).append(i)
 
 	# A group's tracks are read together and their bigWigs written at once,
-	# one track per thread, each writer compressing on its share of the
-	# threads.
+	# each track's on a thread of its own, its pieces in order, so that a
+	# bigWig that takes longer does not hold up the others at every piece,
+	# each writer compressing on its share of the threads.
 	# Each bigWig is written beside its name and moved there once complete,
 	# so that a conversion that fails or is killed leaves no half-written
 	# bigWig under a final name.
 	paths, partials = {}, {}
-	pool = ThreadPoolExecutor(n_jobs) if n_jobs > 1 else None
 	reading = ThreadPoolExecutor(1)
 	for g, members in by_group.items():
-		writers = {}
+		writers, lanes, ahead = {}, {}, collections.deque()
 		try:
 			for i in members:
 				paths[i] = os.path.join(directory, names[i])
 				partials[i] = _temporary_path(paths[i])
 				writers[i] = BigWigWriter(partials[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
+				if n_jobs > 1:
+					lanes[i] = ThreadPoolExecutor(1)
 
 			def write(chrom, starts, values):
-				if pool is None:
+				if not lanes:
 					for k, i in enumerate(members):
 						writers[i].write(chrom, starts, values[:, k], missing=missing)
-				else:
-					list(pool.map(lambda k: writers[members[k]].write(chrom, starts,
-						values[:, k], missing=missing), range(len(members))))
+					return
+				while len(ahead) >= _AHEAD:
+					for written in ahead.popleft():
+						written.result()
+				ahead.append([lanes[i].submit(writers[i].write, chrom, starts, values[:,
+					k], missing=missing) for k, i in enumerate(members)])
 
 			def read(piece):
 				return reader.read(piece[0], piece[1], piece[2], tracks=members,
@@ -175,6 +182,9 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 						in members)), file=sys.stderr)
 					told = True
 				write(piece[0], piece[1], values)
+			while ahead:
+				for written in ahead.popleft():
+					written.result()
 			if verbose and not told:
 				print("{}: group {}: {}".format(path, g, ', '.join(paths[i] for i in
 					members)), file=sys.stderr)
@@ -185,6 +195,8 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 				os.replace(partials[i], paths[i])
 		except BaseException as error:
 			reading.shutdown()
+			for lane in lanes.values():
+				lane.shutdown(cancel_futures=True)
 			for writer in writers.values():
 				writer.__exit__(type(error), error, error.__traceback__)
 			for i in members:
@@ -193,8 +205,9 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 				except OSError:
 					pass
 			raise
-	if pool is not None:
-		pool.shutdown()
+		finally:
+			for lane in lanes.values():
+				lane.shutdown()
 	reading.shutdown()
 
 	keys = ['file', 'name', 'dtype']
