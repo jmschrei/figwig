@@ -255,6 +255,8 @@ _COPY_PART_BYTES = 1 << 21  # bytes of such a copy per part, at least
 _GATHER_BASES = 1 << 16  # bases of a row per piece of such a copy
 _COPY_WAVE_BYTES = 1 << 22  # bytes of a write's copies per thread in a wave
 _CHECK_PART_BYTES = 1 << 25  # bytes of a write's values per part of a check, at least
+_SPOOL_BYTES = 1 << 26  # bytes a writer queues for its writes' thread, at most
+_SPOOL_THREADS = 'figwig-writes'
 
 # Whether a tile whose few tracks have values may be stored as a matrix
 # chunk, which a compressed file chooses only when the sparse chunk's
@@ -962,6 +964,7 @@ class FigWigWriter:
 		self.summary_index = summary_index
 		self._index_builder = None
 		self._pool = None
+		self._spool = None
 		self._partial = None
 		self._length = None
 		self._times = None
@@ -1075,6 +1078,7 @@ class FigWigWriter:
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
 		self._inflight = []
+		self._spooled, self._spooled_bytes = collections.deque(), 0
 		self._folds = []
 		self._block_jobs = []
 		self._block_entries = 0
@@ -1089,6 +1093,7 @@ class FigWigWriter:
 			self._partial = _temporary_path(self.path)
 			self._file = open(self._partial, 'w+b')
 			self._file.write(bytes(_HEADER.itemsize))
+			self._end = _HEADER.itemsize
 		else:
 			# The file itself: the new chunks go after what the header says
 			# is its end, and the tables, the index and last the header are
@@ -1099,9 +1104,14 @@ class FigWigWriter:
 			_lock_for_appending(handle, self.path)
 			self._file = handle
 			self._file.seek(self._length)
+			self._end = self._length
 
 		if self.n_jobs > 1:
 			self._pool = ThreadPoolExecutor(self.n_jobs)
+			# Chunks and blocks are written in order on a thread of their own,
+			# so that the calling thread does not wait on the file between
+			# batches.
+			self._spool = ThreadPoolExecutor(1, thread_name_prefix=_SPOOL_THREADS)
 
 		if source is not None:
 			self._adopt(source, first=True)
@@ -1138,6 +1148,13 @@ class FigWigWriter:
 			# finalized on one of the pool's own threads.
 			self._pool.shutdown(wait=False, cancel_futures=True)
 			self._pool = None
+		if self._spool is not None:
+			# A write that runs on after the file is cut back would extend it
+			# again, so the one running is waited for, unless this is its
+			# own thread.
+			self._spool.shutdown(wait=not threading.current_thread().name.startswith(
+				_SPOOL_THREADS), cancel_futures=True)
+			self._spool = None
 		if self._file is not None:
 			if self._length is not None:
 				# Cut back to the file as it was, with its modification time,
@@ -1356,6 +1373,7 @@ class FigWigWriter:
 			ends = ends[numpy.append(firsts[1:], len(ends)) - 1]
 		dests = numpy.zeros(len(starts), dtype=numpy.int64)
 
+		self._settle_writes()
 		fd = _open_read(source.path)
 		try:
 			for k in range(len(starts)):
@@ -1370,6 +1388,7 @@ class FigWigWriter:
 					position += len(piece)
 		finally:
 			os.close(fd)
+			self._end = self._file.tell()
 
 		return starts, dests
 
@@ -3222,6 +3241,35 @@ class FigWigWriter:
 
 		del self._inflight[:n_batches]
 
+	def _put(self, data):
+		"""Write `data` after what the writer has written, and return where it
+		starts: on the writes' thread with a pool, waiting while more than
+		_SPOOL_BYTES are queued for it, so that the bytes it holds stay
+		bounded; on this thread otherwise."""
+
+		offset = self._end
+		self._end += len(data)
+		if self._spool is None:
+			self._file.write(data)
+			return offset
+		self._spooled.append((self._spool.submit(self._file.write, data), len(
+			data)))
+		self._spooled_bytes += len(data)
+		while self._spooled_bytes > _SPOOL_BYTES and len(self._spooled) > 1:
+			future, size = self._spooled.popleft()
+			self._spooled_bytes -= size
+			future.result()
+		return offset
+
+	def _settle_writes(self):
+		"""Wait for every write queued on the writes' thread, raising the
+		first that failed."""
+
+		while self._spooled:
+			future, size = self._spooled.popleft()
+			self._spooled_bytes -= size
+			future.result()
+
 	def _write_pieces(self, result, groups):
 		"""Write a packed task's pieces, as `_write_result` writes each: its
 		chunks in one write, every piece's stats folded in piece order in one
@@ -3229,8 +3277,7 @@ class FigWigWriter:
 		in order. The stats are a row per track of each piece in turn."""
 
 		compressed, lives, totals, stats, summaries = result
-		offset = self._file.tell()
-		self._file.write(compressed)
+		offset = self._put(compressed)
 		# One fold for the task's pieces, since on many threads each call
 		# that lets the GIL go waits to take it back.
 		flagged = _fold_batch(self._stats, numpy.concatenate([numpy.asarray(
@@ -3268,8 +3315,7 @@ class FigWigWriter:
 			raise ValueError("a value of track {!r} lies beyond float32's "
 				"range; declare the track float64 to keep it.".format(
 				self.tracks[int(flagged)]['name']))
-		records['offset'] += self._file.tell()
-		self._file.write(compressed)
+		records['offset'] += self._put(compressed)
 		at = 0
 		for t, n, summary in zip(tracks, blocks.tolist(), summaries):
 			if summary is not None:
@@ -3301,8 +3347,7 @@ class FigWigWriter:
 		if len(where) == 0:
 			return
 
-		offset = self._file.tell()
-		self._file.write(compressed[:sizes.sum()])
+		offset = self._put(compressed[:sizes.sum()])
 		total = int(sizes.sum())
 
 		live = numpy.zeros(len(where), dtype=_LIVE)
@@ -3388,6 +3433,7 @@ class FigWigWriter:
 					for g in range(cuts[k], cuts[k + 1])], range(len(cuts) - 1)) for
 					record in part]
 			index_size = self._index_builder.size() if self._index_builder else 0
+			self._settle_writes()
 			index_at = self._file.tell()
 			if index_size:
 				self._metadata[_summary_index.METADATA_KEY] = {

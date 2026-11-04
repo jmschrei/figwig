@@ -3092,6 +3092,98 @@ def test_write_checks_and_copies_in_parts_as_one_thread(tmp_path, monkeypatch,
 	assert written[0] == written[1]
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_writes_on_their_own_thread_write_the_file_one_thread_writes(tmp_path,
+		monkeypatch, order):
+	"""Chunks and blocks written on the writes' thread, with every write
+	waiting for the one before it, give the file one thread writes, as do
+	an append to it and a file that writes entries and then adds it by
+	`add_file`; a write that fails raises at close, and the path keeps what
+	it held."""
+
+	monkeypatch.setattr(figwig.figwig, '_SPOOL_BYTES', 1)
+	rng = numpy.random.default_rng(3)
+	sizes = {'chr1': 5000, 'chr2': 3000}
+	tracks = ['t{}'.format(i) for i in range(6)]
+	positions = numpy.sort(rng.choice(5000, 900, replace=False))
+	ids = rng.integers(0, 6, 900)
+
+	def write(path, n_jobs, append=False):
+		with FigWigWriter(path, sizes, tracks if not append else None, tile=64,
+				order=order if not append else None, n_jobs=n_jobs,
+				append=append) as writer:
+			if append:
+				writer.write_sparse('chr2', positions[:400] % 3000, ids[:400], numpy.full(
+					400, 2.0))
+			else:
+				writer.write_sparse('chr1', positions, ids, rng.integers(1, 9, 900))
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	one = write(str(tmp_path / 'one.fw'), 1)
+	rng = numpy.random.default_rng(3)
+	positions = numpy.sort(rng.choice(5000, 900, replace=False))
+	ids = rng.integers(0, 6, 900)
+	many = write(str(tmp_path / 'many.fw'), 4)
+	assert one == many
+	assert write(str(tmp_path / 'one.fw'), 1, True) == write(str(tmp_path /
+		'many.fw'), 4, True)
+
+	class Slow:
+		"""A file whose writes each take 20 ms, so that the last write is
+		still queued when `add_file` copies its chunks."""
+
+		def __init__(self, handle):
+			self.handle = handle
+
+		def write(self, data):
+			time.sleep(0.02)
+			return self.handle.write(data)
+
+		def __getattr__(self, name):
+			return getattr(self.handle, name)
+
+	copies = []
+	for n_jobs in (1, 4):
+		path = str(tmp_path / 'copy{}.fw'.format(n_jobs))
+		with FigWigWriter(path, sizes, ['u0', 'u1'], tile=64, order=order,
+				n_jobs=n_jobs) as writer:
+			writer._file = Slow(writer._file)
+			writer.write_sparse('chr1', positions[:300], ids[:300] % 2, numpy.full(
+				300, 3.0))
+			writer.add_file(str(tmp_path / 'one.fw'))
+		with open(path, 'rb') as handle:
+			copies.append(handle.read())
+	assert copies[0] == copies[1]
+
+	class Failing:
+		"""A file whose third write fails, as a full disk would."""
+
+		def __init__(self, handle):
+			self.handle, self.writes = handle, 0
+
+		def write(self, data):
+			self.writes += 1
+			if self.writes == 3:
+				raise OSError(28, 'No space left on device')
+			return self.handle.write(data)
+
+		def __getattr__(self, name):
+			return getattr(self.handle, name)
+
+	path = str(tmp_path / 'full.fw')
+	writer = FigWigWriter(path, sizes, tracks, tile=64, order=order, n_jobs=4)
+	writer._file = Failing(writer._file)
+	for lo, hi in ((0, 1600), (1600, 3200), (3200, 5000)):
+		keep = (positions >= lo) & (positions < hi)
+		writer.write_sparse('chr1', positions[keep], ids[keep], numpy.full(int(
+			keep.sum()), 1.0))
+	with pytest.raises(OSError, match='No space'):
+		writer.close()
+	assert not os.path.exists(path)
+	assert os.listdir(str(tmp_path)).count('full.fw') == 0
+
+
 ###
 # The format's second round: groups in any order, exact integers, runs,
 # stored chunks, sums per bin, and the writer's and reader's guards
