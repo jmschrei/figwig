@@ -2121,6 +2121,40 @@ def test_write_sparse_tasks_of_many_goes_write_one_goes_file(tmp_path, monkeypat
 	assert write('c.fw', go_bytes=256, kernels=False) == one_go
 
 
+def test_write_sparse_entries_in_order_write_and_raise_as_sorted_ones(tmp_path,
+		monkeypatch):
+	"""Entries given in the writer's order, which are not sorted, their
+	integer values widened in parts on the pool, write the file the same
+	entries out of order write, and two of them on one base are named by
+	their own indices."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	rng = numpy.random.default_rng(17)
+	sizes = {'chr1': 64 * 300}
+	positions = numpy.sort(rng.choice(64 * 300, 5000, replace=False))
+	values = rng.integers(1, 100, len(positions)).astype(numpy.int32)
+	ids = numpy.zeros(len(positions), dtype=numpy.int64)
+	mix = rng.permutation(len(positions))
+
+	def write(name, p, v):
+		path = str(tmp_path / name)
+		with FigWigWriter(path, sizes, ['t'], tile=64, n_jobs=3) as writer:
+			writer.write_sparse('chr1', p, ids, v)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	assert write('in.fw', positions, values) == write('mixed.fw', positions[mix],
+		values[mix])
+
+	twice = positions.copy()
+	twice[3001] = twice[3000]
+	with FigWigWriter(str(tmp_path / 'twice.fw'), sizes, ['t'], tile=64,
+			n_jobs=3) as writer:
+		with pytest.raises(ValueError, match="entries 3000 and 3001 both name "
+				"base {} ".format(twice[3000])):
+			writer.write_sparse('chr1', twice, ids, values)
+
+
 @pytest.mark.parametrize('n_jobs', [1, 3])
 def test_write_sparse_sorts_tracks_interleaved_in_tiles_by_radix(tmp_path,
 	monkeypatch, n_jobs):

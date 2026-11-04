@@ -1904,15 +1904,28 @@ class FigWigWriter:
 				group_ids[a])
 
 		# A group that has written nothing, sealed no tile and left none open
-		# has nothing for its piece to come after.
-		for k, a in enumerate(bounds[:-1].tolist()):
+		# has nothing for its piece to come after. Each piece is tested here
+		# as `_check_order_of` tests it, which a file of a track per cell
+		# would otherwise call for thousands of pieces a call, and called
+		# only for a piece that fails, to raise what it raises.
+		entries = self.order == 'positions'
+		tile = self.tile
+		last_of, done_of, sealed_of, open_of = (self._last, self._done,
+			self._sealed, self._open)
+		for k, (a, tid, low) in enumerate(zip(bounds[:-1].tolist(), tids[
+				bounds[:-1]].tolist(), lows.tolist())):
 			g = group_at(a)
-			if self._last[g] is None and not self._done[g] and self._sealed[g] is \
-					None and self._open[g] is None:
+			last, done, sealed, open_ = last_of[g], done_of[g], sealed_of[g], \
+				open_of[g]
+			if last is None and not done and sealed is None and open_ is None:
 				continue
-			self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
-				1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
-				entries=self.order == 'positions')
+			if tid in done or (last is not None and tid == last[0] and low < last[
+					1]) or (sealed is not None and tid == sealed[0] and low // tile <=
+					sealed[1]) or (entries and open_ is not None and tid == open_[0]
+					and low // tile == open_[1]):
+				self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
+					1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
+					entries=entries)
 
 		self._written = True
 		pieces = []
@@ -2057,7 +2070,20 @@ class FigWigWriter:
 		back += int((positions[cuts[1:-1]] < positions[cuts[1:-1] - 1]).sum())
 		merge = descents <= _MERGE_RUNS or (n_chunks == 1 and far * _MERGE_FAR <= n
 			and (descents * _MERGE_DESCENTS <= n or n < _MERGE_SMALL))
-		if merge:
+		if descents == 0:
+			# Keys already in order, as entries given in the writer's order
+			# are: the stable order is the entries' own, so nothing is sorted
+			# and the values are taken as they are, in parts on the pool.
+			merge = False
+			if values.dtype != numpy.float64:
+				widened = numpy.empty(n, dtype=numpy.float64)
+				_each(self._pool, n_chunks, lambda c: numpy.copyto(widened[cuts[c]:cuts[
+					c + 1]], values[cuts[c]:cuts[c + 1]]))
+				values = widened
+
+			def order(n=n):
+				return numpy.arange(n)
+		elif merge:
 			# Keys in a few runs, or on one thread keys out of order only
 			# near each other and seldom, as reads given in position order
 			# are, sort faster by numpy's merge sort; a contact map's columns
