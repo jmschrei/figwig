@@ -2089,6 +2089,38 @@ def test_write_sparse_sorts_by_either_sort_alike(tmp_path, monkeypatch, n_jobs):
 			assert took_radix == (name != 'runs'), name
 
 
+def test_write_sparse_tasks_of_many_goes_write_one_goes_file(tmp_path, monkeypatch):
+	"""write_sparse tasks whose chunks take many of the encoder's goes, each
+	go's compressed into a stream of its own and the streams joined, write
+	the file of a go per task, and the file of the numpy path."""
+
+	rng = numpy.random.default_rng(11)
+	tracks = ['t{}'.format(i) for i in range(40)]
+	sizes = {'chr1': 64 * 400, 'chr2': 64 * 90}
+	calls = []
+	for chrom, n in sizes.items():
+		positions = numpy.sort(rng.choice(n, n // 3, replace=False))
+		calls.append((chrom, positions, rng.integers(0, 40, len(positions)),
+			rng.integers(1, 50, len(positions)).astype(float)))
+
+	def write(name, go_bytes=None, kernels=True):
+		with monkeypatch.context() as patch:
+			if go_bytes is not None:
+				patch.setattr(figwig.figwig, '_ENTRIES_GO_BYTES', go_bytes)
+			if not kernels:
+				patch.setattr(figwig.figwig, '_deflate_functions', lambda: None)
+			path = str(tmp_path / name)
+			with FigWigWriter(path, sizes, tracks, tile=64, n_jobs=1) as writer:
+				for chrom, positions, ids, values in calls:
+					writer.write_sparse(chrom, positions, ids, values)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	one_go = write('a.fw')
+	assert write('b.fw', go_bytes=256) == one_go
+	assert write('c.fw', go_bytes=256, kernels=False) == one_go
+
+
 @pytest.mark.parametrize('n_jobs', [1, 3])
 def test_write_sparse_sorts_tracks_interleaved_in_tiles_by_radix(tmp_path,
 	monkeypatch, n_jobs):

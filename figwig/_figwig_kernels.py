@@ -603,6 +603,157 @@ def _encode_pieces(tile, piece_tracks, piece_tiles, class_at, classes,
 
 
 @numba.njit(nogil=True, cache=True)
+def _entries_plan(tile, at, piece_tracks, piece_tids, tile_offsets, positions):
+	"""The tiles of a packed task of `write_sparse`'s pieces, for
+	`_entries_task`, as `FigWigWriter._entries_tasks` found them in numpy.
+	Piece p is entries at[p] to at[p + 1] - 1, of a group of piece_tracks[p]
+	tracks on chromosome piece_tids[p], sorted by tile, track and position;
+	a piece starts a tile of its own. Returns (each tile's first entry and
+	the task's end, each piece's first tile and the end, the tiles, their
+	file tiles, the most any chunk from each tile on may take, and the bytes
+	each tile and every one after it may, as the encoder bounds them)."""
+
+	n = positions.shape[0]
+	n_pieces = piece_tracks.shape[0]
+	# A tile is a power of two: a shift where a division by it would cost
+	# several nanoseconds an entry.
+	shift = 0
+	while (1 << shift) < tile:
+		shift += 1
+	first = numpy.empty(n + 1, dtype=numpy.int64)
+	piece_tiles = numpy.empty(n_pieces + 1, dtype=numpy.int64)
+	k = 0
+	p = 0
+	last = numpy.int64(-1)
+	for i in range(n):
+		here = positions[i] >> shift
+		starts = p < n_pieces and at[p] == i
+		if starts:
+			piece_tiles[p] = k
+			p += 1
+		if i == 0 or starts or here != last:
+			first[k] = i
+			k += 1
+		last = here
+	n_tiles = k
+	first[n_tiles] = n
+	piece_tiles[n_pieces] = n_tiles
+	first = first[:n_tiles + 1].copy()
+	tiles = numpy.empty(n_tiles, dtype=numpy.int64)
+	for j in range(n_tiles):
+		tiles[j] = positions[first[j]] >> shift
+
+	file_tiles = numpy.empty(n_tiles, dtype=numpy.int64)
+	need_after = numpy.empty(n_tiles + 1, dtype=numpy.int64)
+	room = numpy.empty(n_tiles + 1, dtype=numpy.int64)
+	need_after[n_tiles] = 0
+	room[n_tiles] = 0
+	for p in range(n_pieces - 1, -1, -1):
+		k = piece_tracks[p]
+		offset = tile_offsets[piece_tids[p]]
+		for j in range(piece_tiles[p + 1] - 1, piece_tiles[p] - 1, -1):
+			count = first[j + 1] - first[j]
+			file_tiles[j] = offset + tiles[j]
+			need = max(4 + 4 * k + 11 * count + 16, 24 + 18 * count + 16)
+			need_after[j] = max(need, need_after[j + 1])
+			room[j] = room[j + 1] + 4 * k + 24 + 18 * count
+	return first, piece_tiles, tiles, file_tiles, need_after, room
+
+
+@numba.njit(nogil=True, cache=True)
+def _entries_task(functions, level, tile, piece_tracks, first, piece_tiles,
+	tiles, file_tiles, need_after, room, classes, slots, positions, values,
+	keep_sums, allow_matrix, go_bytes, out):
+	"""A packed task of `write_sparse`'s pieces, planned by
+	`_entries_plan`, encoded and made ready for the file in one call
+	without the GIL, as `FigWigWriter._entries_tasks` did it in numpy around
+	its kernels. The encoder writes into `out` a go at a time, at most about
+	`go_bytes` and one tile, as `_encode_pieces` does, and each go's live
+	chunks are compressed, or at level 0 copied, by `_deflate_into` into a
+	stream of their own, sized from the bytes they took as
+	`_compress_blocks` sizes its buffer; the streams are joined at the end.
+	Returns (stream, bytes used, sizes, raw sizes, kind bytes, file tiles
+	and CRCs of the live chunks, each piece's first live chunk, the stats,
+	the tile sums when kept, status): status -1, -2 where no compressor was
+	had, -3 where a tile did not fit an empty buffer, or the first live
+	chunk that did not fit its stream."""
+
+	n_pieces = piece_tracks.shape[0]
+	n_tiles = tiles.shape[0]
+	class_at = numpy.zeros(n_pieces + 1, dtype=numpy.int64)
+	sums_at = numpy.zeros(n_pieces + 1, dtype=numpy.int64)
+	for p in range(n_pieces):
+		class_at[p + 1] = class_at[p] + piece_tracks[p]
+		sums_at[p + 1] = sums_at[p] + (piece_tiles[p + 1] - piece_tiles[p]) * \
+			piece_tracks[p]
+	stats = numpy.zeros((class_at[n_pieces], 6), dtype=numpy.float64)
+	stats[:, 2] = numpy.inf
+	stats[:, 3] = -numpy.inf
+	tile_sums = numpy.zeros(sums_at[n_pieces] if keep_sums else 0,
+		dtype=numpy.float32)
+
+	streams = []
+	used = []
+	sizes = numpy.empty(n_tiles, dtype=numpy.int64)
+	raw = numpy.empty(n_tiles, dtype=numpy.int64)
+	kinds_out = numpy.empty(n_tiles, dtype=numpy.uint8)
+	where = numpy.empty(n_tiles, dtype=numpy.int64)
+	crcs = numpy.empty(n_tiles, dtype=numpy.int64)
+	kinds_all = numpy.zeros(n_tiles, dtype=numpy.uint8)
+	j = 0
+	status = -1
+	t = 0
+	while t < n_tiles:
+		buffer = out[:min(room[t] + 16, go_bytes + need_after[t])]
+		bounds = numpy.zeros(n_tiles - t + 1, dtype=numpy.int64)
+		kinds = numpy.zeros(n_tiles - t, dtype=numpy.uint8)
+		done = _encode_pieces(tile, piece_tracks, piece_tiles, class_at, classes,
+			stats, sums_at, tile_sums, tiles, first, slots, positions, values,
+			allow_matrix, level > 0, buffer, bounds, kinds, t) - t
+		if done == 0:
+			status = -3
+			break
+		raw_bytes = bounds[done] - bounds[0]
+		stream = numpy.empty(raw_bytes + raw_bytes // 8 + 64 * done + 8,
+			dtype=numpy.uint8)
+		position, j, status = _deflate_into(functions, level, buffer, bounds,
+			kinds, done, 0, file_tiles[t:], stream, 0, sizes, raw, kinds_out, where,
+			crcs, j)
+		streams.append(stream)
+		used.append(position)
+		if status != -1:
+			break
+		for q in range(done):
+			kinds_all[t + q] = kinds[q]
+		t += done
+
+	live_at = numpy.zeros(n_pieces + 1, dtype=numpy.int64)
+	for p in range(n_pieces):
+		live = 0
+		for q in range(piece_tiles[p], piece_tiles[p + 1]):
+			live += kinds_all[q] != 0
+		live_at[p + 1] = live_at[p] + live
+	# The task's result is held until it is written, so one stream much
+	# larger than its bytes is copied down to them, as are several.
+	position = 0
+	for k in range(len(used)):
+		position += used[k]
+	if len(streams) == 1 and streams[0].shape[0] <= position + position // 4 + \
+			4096:
+		stream = streams[0]
+	else:
+		stream = numpy.empty(position, dtype=numpy.uint8)
+		put = 0
+		for k in range(len(streams)):
+			part = streams[k]
+			for q in range(used[k]):
+				stream[put + q] = part[q]
+			put += used[k]
+	return (stream, position, sizes[:j], raw[:j], kinds_out[:j], where[:j],
+		crcs[:j], live_at, stats, tile_sums, status)
+
+
+@numba.njit(nogil=True, cache=True)
 def _sorted_tile_sums(positions, values, tile, tiles, sums):
 	"""Each tile's sum of one track's entries, positions ascending: the
 	distinct tiles go to `tiles` and their sums, a NaN counting 0, to
@@ -832,6 +983,95 @@ def _crcs_of(data, cuts, tables, out):
 
 	for k in range(cuts.shape[0] - 1):
 		out[k] = _crc32_of(data, cuts[k], cuts[k + 1], tables)
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_live(functions, level, data, bounds, kinds, n_done, offset, tiles):
+	"""A batch's encoded chunks made ready for the file in one call without
+	the GIL, as `FigWigWriter._compress` makes them: the live chunks among
+	the first n_done (kind byte not 0), each from where it starts in `data`
+	to where the next live one, or the batch's end, starts, deflated at
+	`level` back to back into one stream, or stored as they are, with the
+	kind's stored bit, where deflate does not make them smaller, and the
+	CRC-32 of the bytes each takes in the stream. `functions` are
+	libdeflate's alloc_compressor, zlib_compress, free_compressor and
+	crc32, in one tuple. Returns (stream, its bytes used, sizes, raw sizes,
+	kind bytes, file tiles offset + tiles[k], CRCs, status): status is -1,
+	the first live chunk that did not fit, or -2 where no compressor was
+	had."""
+
+	n_live = 0
+	for k in range(n_done):
+		if kinds[k] != 0:
+			n_live += 1
+	total = 0
+	for k in range(n_done):
+		if kinds[k] != 0:
+			total = bounds[n_done] - bounds[k]
+			break
+	stream = numpy.empty(total + total // 8 + 64 * n_live + 8, dtype=numpy.uint8)
+	sizes = numpy.empty(n_live, dtype=numpy.int64)
+	raw = numpy.empty(n_live, dtype=numpy.int64)
+	kinds_out = numpy.empty(n_live, dtype=numpy.uint8)
+	gtiles = numpy.empty(n_live, dtype=numpy.int64)
+	crcs = numpy.empty(n_live, dtype=numpy.int64)
+	position, _, status = _deflate_into(functions, level, data, bounds, kinds,
+		n_done, offset, tiles, stream, 0, sizes, raw, kinds_out, gtiles, crcs, 0)
+	return stream, position, sizes, raw, kinds_out, gtiles, crcs, status
+
+
+@numba.njit(nogil=True, cache=True)
+def _deflate_into(functions, level, data, bounds, kinds, n_done, offset, tiles,
+	stream, position, sizes, raw, kinds_out, gtiles, crcs, j):
+	"""`_deflate_live`'s chunks written into `stream` from `position` and
+	recorded from entry j of the arrays given; at level 0 copied as they
+	are. Returns (the next position, the next entry, status)."""
+
+	alloc, compress, free, crc32 = functions
+	compressor = numpy.uintp(0)
+	if level > 0:
+		compressor = alloc(level)
+		if compressor == 0:
+			return position, j, -2
+
+	status = -1
+	k = 0
+	while k < n_done and kinds[k] == 0:
+		k += 1
+	while k < n_done:
+		after = k + 1
+		while after < n_done and kinds[after] == 0:
+			after += 1
+		a = bounds[k]
+		b = bounds[after] if after < n_done else bounds[n_done]
+		n_raw = b - a
+		raw[j] = n_raw
+		gtiles[j] = offset + tiles[k]
+		n = n_raw
+		if level > 0:
+			# size_t, which would make every count it meets float64.
+			n = numpy.int64(compress(compressor, data[a:].ctypes, n_raw, stream[
+				position:].ctypes, stream.shape[0] - position))
+			if n == 0:
+				status = j
+				break
+		if n >= n_raw:
+			piece = data[a:b]
+			into = stream[position:position + n_raw]
+			for q in range(n_raw):
+				into[q] = piece[q]
+			n = n_raw
+			kinds_out[j] = kinds[k] | _STORED if level > 0 else kinds[k]
+		else:
+			kinds_out[j] = kinds[k]
+		sizes[j] = n
+		crcs[j] = crc32(0, stream[position:].ctypes, n)
+		position += n
+		j += 1
+		k = after
+	if level > 0:
+		free(compressor)
+	return position, j, status
 
 
 @numba.njit(nogil=True, cache=True)

@@ -59,6 +59,9 @@ from ._figwig_kernels import _BLOCK_ENTRIES
 from ._figwig_kernels import _CRC_TABLES
 from ._figwig_kernels import _crcs_of
 from ._figwig_kernels import _crcs_of_libdeflate
+from ._figwig_kernels import _deflate_live
+from ._figwig_kernels import _entries_plan
+from ._figwig_kernels import _entries_task
 from ._figwig_kernels import _entry_ranges
 from ._figwig_kernels import _key_segments
 from ._figwig_kernels import _fold_batch
@@ -112,6 +115,7 @@ from ._figwig_kernels import _radix_scatter_values
 from ._figwig_kernels import _radix_starts
 from ._kernels import _compiled
 from ._kernels import _libc_pread
+from ._kernels import _libdeflate
 from ._kernels import _libdeflate_crc32
 from ._kernels import _libdeflate_inflate
 from ._kernels import _pread
@@ -2452,6 +2456,14 @@ class FigWigWriter:
 			positions = numpy.concatenate([piece[3] for piece in pieces])
 			values = numpy.concatenate([piece[4] for piece in pieces])
 
+		# One call without the GIL where libdeflate is the engine, or at level
+		# 0, and libdeflate's crc32 loads.
+		functions = _deflate_functions() if self.level == 0 or self.engine == \
+			'libdeflate' else None
+		if functions is not None:
+			return self._entries_task(pieces, lengths, slots, positions, values,
+				functions)
+
 		# The tiles of every piece, a piece starting a tile of its own.
 		all_tiles = positions // tile
 		change = numpy.empty(len(positions), dtype=numpy.bool_)
@@ -2528,6 +2540,56 @@ class FigWigWriter:
 				sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p]))) if
 				self._summaries else None)
 		return compressed[:int(byte_at[-1])], lives, totals, stats, summaries
+
+	def _entries_task(self, pieces, lengths, slots, positions, values,
+		functions):
+		"""`_entries_tasks` through `_entries_plan` and `_entries_task`, the
+		encoder's buffer between them from numpy, since numpy's large arrays
+		get huge pages where numba's do not, and a go may take 32 MB."""
+
+		at = numpy.zeros(len(pieces) + 1, dtype=numpy.int64)
+		numpy.cumsum(lengths, out=at[1:])
+		piece_tracks = numpy.array([piece[5] for piece in pieces],
+			dtype=numpy.int64)
+		piece_tids = numpy.array([piece[1] for piece in pieces], dtype=numpy.int64)
+		classes = numpy.concatenate([self._classes[piece[0]] for piece in pieces])
+		first, piece_tiles, tiles, file_tiles, need_after, room = _entries_plan(
+			self.tile, at, piece_tracks, piece_tids, self._tile_offsets, positions)
+		out = numpy.empty(int(min(room[0] + 16, _ENTRIES_GO_BYTES + need_after[0])),
+			dtype=numpy.uint8)
+		(stream, used, sizes, raw, kinds, where, crcs, live_at, stats, tile_sums,
+			status) = _entries_task(functions, self.level, self.tile, piece_tracks,
+			first, piece_tiles, tiles, file_tiles, need_after, room, classes, slots,
+			positions, values, self._summaries, self._matrix, _ENTRIES_GO_BYTES, out)
+		if status == -2:
+			raise MemoryError("libdeflate could not allocate a compressor.")
+		if status == -3:
+			raise RuntimeError("a tile did not fit an empty encode buffer.")
+		if status >= 0:
+			raise RuntimeError("block {} could not be compressed.".format(status))
+
+		# Split by piece: the live tiles, their bytes, stats and summaries.
+		records = numpy.zeros(len(where), dtype=_LIVE)
+		records['tile'] = where
+		records['kind'] = kinds
+		records['size'] = sizes
+		records['raw'] = raw
+		records['crc'] = crcs
+		byte_at = numpy.zeros(len(sizes) + 1, dtype=numpy.int64)
+		numpy.cumsum(sizes, out=byte_at[1:])
+		live_at, byte_at = live_at.tolist(), byte_at.tolist()
+		lives = [records[live_at[p]:live_at[p + 1]] for p in range(len(pieces))]
+		totals = [byte_at[live_at[p + 1]] - byte_at[live_at[p]] for p in range(
+			len(pieces))]
+		summaries = [None] * len(pieces)
+		if self._summaries:
+			sums_at = numpy.concatenate([[0], numpy.cumsum(numpy.diff(piece_tiles) *
+				piece_tracks)])
+			for p, piece in enumerate(pieces):
+				a, b = int(piece_tiles[p]), int(piece_tiles[p + 1])
+				summaries[p] = self._summary_of(piece[1], tiles[a:b], tile_sums[
+					sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p])))
+		return stream[:used], lives, totals, stats, summaries
 
 	def _encode_dense(self, g, tid, values, items, columns, tiles, dtype):
 		"""Encode whole tiles covered by windows, each tile from window
@@ -2816,9 +2878,24 @@ class FigWigWriter:
 
 	def _compress(self, tid, tiles, n_done, out, bounds, kinds):
 		"""Compress the first `n_done` encoded tiles of a batch. Returns
-		(compressed bytes, sizes, raw sizes, kind bytes, file tiles) of the
-		live tiles. A chunk that compression would grow is stored as it is,
-		and its kind byte says so."""
+		(compressed bytes, sizes, raw sizes, kind bytes, file tiles, CRCs) of
+		the live tiles. A chunk that compression would grow is stored as it
+		is, and its kind byte says so. With libdeflate this is one call
+		without the GIL, since on many threads each call that lets the GIL
+		go waits to take it back; the code below lets it go three times
+		among numpy's calls."""
+
+		functions = _deflate_functions() if self.level > 0 and self.engine == \
+			'libdeflate' else None
+		if functions is not None:
+			stream, used, sizes, raw, kinds, gtiles, crcs, status = _deflate_live(
+				functions, self.level, out, bounds, kinds, n_done, int(
+				self._tile_offsets[tid]), tiles)
+			if status == -2:
+				raise MemoryError("libdeflate could not allocate a compressor.")
+			if status >= 0:
+				raise RuntimeError("block {} could not be compressed.".format(status))
+			return stream[:used], sizes, raw, kinds, gtiles, crcs
 
 		live = numpy.flatnonzero(kinds[:n_done])
 		gtiles = self._tile_offsets[tid] + tiles[:n_done][live]
@@ -3527,6 +3604,24 @@ def _crcs(data, cuts):
 	else:
 		_crcs_of_libdeflate(crc32, data, cuts, out)
 	return out.astype(numpy.int64)
+
+
+def _deflate_functions():
+	"""libdeflate's (alloc_compressor, zlib_compress, free_compressor,
+	crc32) for `_deflate_live`, or None where one does not load. The
+	libraries are asked each time, and the one tuple of them is kept, since
+	a kernel given the same tuple types it fast."""
+
+	parts = (_libdeflate(), _libdeflate_crc32())
+	if any(part is None for part in parts):
+		return None
+	if not _DEFLATE_FUNCTIONS or _DEFLATE_FUNCTIONS[0] != parts:
+		(alloc, compress, free), crc32 = parts
+		_DEFLATE_FUNCTIONS[:] = [parts, (alloc, compress, free, crc32)]
+	return _DEFLATE_FUNCTIONS[1]
+
+
+_DEFLATE_FUNCTIONS = []
 
 
 def _gather_parts(parts):
