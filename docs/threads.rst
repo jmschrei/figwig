@@ -114,10 +114,22 @@ Zoom levels are built when the writer is closed, with the same threads, and
 add a pass over the data.
 
 ``write_sparse`` sorts a call's entries by a radix sort on the pool, from
-above a tile's offsets where the call's positions ascend, and runs its passes
-over the entries, its range and dtype checks and its search for two entries
-on one base, in parts on the pool, so that on many threads the calling thread
-mostly writes the encoded tasks' bytes.
+above a tile's offsets where the call's positions ascend, and takes entries
+already in the writer's order without sorting them; it runs its passes over
+the entries, its range and dtype checks and its search for two entries on
+one base, in parts on the pool, and each task of entries is encoded and
+compressed in two compiled calls that hold no GIL. ``write`` checks its
+values for infinity in parts on the pool, and windows' values against
+declared integer types too, and copies each group's block once, every
+group's of a call in one pass on the pool, in waves of at most 4 MB per
+thread, the next copied once the tiles of all but the last are encoded, so
+that a call holds two waves of copies at most; the calling thread takes a
+part itself where the pool's threads are busy, and they join in as they
+come free. A writer with threads writes its chunks and blocks to the file
+in order on a thread of its own, with at most 64 MB queued for it, so that
+the calling thread does not wait on the file between batches. ``fw2bw``
+writes each track's bigWig on a thread of its own, with at most two pieces
+of a group in flight.
 
 ``write`` converts the values of one call a batch at a time as well, so its
 working memory does not grow with the call: on 8 threads without zoom levels,
