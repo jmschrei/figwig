@@ -406,6 +406,9 @@ def _check_each_track(tracks, records, names):
 	"""Check each track, appending its record to `records` and its name to
 	`names`, all but the JSON of its attributes."""
 
+	# A dtype is looked up once for each distinct value given, since numpy
+	# takes microseconds a lookup and a file may hold a track per cell.
+	known = {}
 	for track in tracks:
 		if isinstance(track, str):
 			track = {'name': track}
@@ -428,10 +431,20 @@ def _check_each_track(tracks, records, names):
 		dtype = track.get('dtype')
 		if dtype is not None:
 			try:
-				dtype = numpy.dtype(dtype).name
+				found = known.get(dtype)
 			except TypeError:
-				raise TypeError("the dtype of track {!r} is not a dtype: {!r}."
-					.format(name, dtype)) from None
+				found = None
+			if found is None:
+				try:
+					found = numpy.dtype(dtype).name
+				except TypeError:
+					raise TypeError("the dtype of track {!r} is not a dtype: {!r}."
+						.format(name, dtype)) from None
+				try:
+					known[dtype] = found
+				except TypeError:
+					pass
+			dtype = found
 			if dtype not in _DTYPES:
 				raise ValueError("the dtype of track {!r} must be one of {}, not "
 					"{!r}.".format(name, ', '.join(_DTYPES), dtype))
@@ -1023,23 +1036,30 @@ class FigWigWriter:
 		else:
 			self._groups = _check_groups(groups, self.tracks) if self.tracks else []
 		self.tile = _check_tile(tile)
-		for group in self._groups:
-			if len(group) * self.tile > _MAX_GROUP_BASES:
-				raise ValueError("a group of {} tracks at a tile of {} bases "
-					"holds more than 2**29 values per chunk; use smaller groups "
-					"or tiles.".format(len(group), self.tile))
+		# Each group's bookkeeping as arrays, since a file of a track per
+		# read or cell has as many groups as tracks.
+		sizes = numpy.array([len(group) for group in self._groups],
+			dtype=numpy.int64)
+		wide = numpy.flatnonzero(sizes * self.tile > _MAX_GROUP_BASES)
+		if len(wide) > 0:
+			raise ValueError("a group of {} tracks at a tile of {} bases "
+				"holds more than 2**29 values per chunk; use smaller groups "
+				"or tiles.".format(int(sizes[wide[0]]), self.tile))
 
 		self._track_ids = {track['name']: i for i, track in enumerate(self.tracks)}
 		self._group_of = numpy.zeros(len(self.tracks), dtype=numpy.int64)
 		self._slot_of = numpy.zeros(len(self.tracks), dtype=numpy.int64)
-		for g, group in enumerate(self._groups):
-			self._group_of[group] = g
-			self._slot_of[group] = numpy.arange(len(group))
-			for i in group:
-				self.tracks[i]['group'] = g
-		self._classes = [numpy.array([_CLASSES.get(self.tracks[i]['dtype'],
-			_INTEGER) for i in group], dtype=numpy.int64) for group in
-			self._groups]
+		members = numpy.concatenate(self._groups).astype(numpy.int64) if \
+			self._groups else numpy.zeros(0, dtype=numpy.int64)
+		owners = numpy.repeat(numpy.arange(len(self._groups)), sizes)
+		self._group_of[members] = owners
+		self._slot_of[members] = numpy.arange(len(members)) - numpy.repeat(
+			numpy.cumsum(sizes) - sizes, sizes)
+		for i, g in zip(members.tolist(), owners.tolist()):
+			self.tracks[i]['group'] = g
+		classes = numpy.array([_CLASSES.get(track['dtype'], _INTEGER) for track in
+			self.tracks], dtype=numpy.int64)
+		self._classes = [classes[group] for group in self._groups]
 
 		if genome is not None and not isinstance(genome, str):
 			raise TypeError("genome must be a string or None, not {}.".format(
