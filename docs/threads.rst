@@ -128,8 +128,9 @@ part itself where the pool's threads are busy, and they join in as they
 come free. A writer with threads writes its chunks and blocks to the file
 in order on a thread of its own, with at most 64 MB queued for it, so that
 the calling thread does not wait on the file between batches. ``fw2bw``
-writes each track's bigWig on a thread of its own, with at most two pieces
-of a group in flight.
+writes the bigWigs of a group of at most ``-p`` tracks each on a thread of
+its own, with at most two pieces of the group in flight, and those of a
+larger group ``-p`` at a time, each piece whole before the next is read.
 
 ``write`` converts the values of one call a batch at a time as well, so its
 working memory does not grow with the call: on 8 threads without zoom levels,
