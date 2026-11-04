@@ -287,13 +287,13 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 
 
 @numba.njit(nogil=True, cache=True)
-def _isal_inflate_blocks(init, inflate, state, block_state, crc_flag, data,
+def _isal_inflate_blocks(functions, state, block_state, crc_flag, data,
 	starts, sizes, buffer, blocks):
 	"""Inflate data blocks as `_inflate_blocks` does, with ISA-L's stateless
 	inflate, without the GIL.
 
-	`init` and `inflate` are ISA-L's isal_inflate_init() and
-	isal_inflate_stateless(), and `state` the bytes of one struct
+	`functions` are ISA-L's isal_inflate_init() and isal_inflate_stateless(),
+	in one tuple, and `state` the bytes of one struct
 	inflate_state, at least 8-byte aligned, of which `block_state` and
 	`crc_flag` are the byte offsets of those fields. The struct starts with
 	next_out (a pointer), avail_out and total_out (32-bit), next_in (a
@@ -303,6 +303,7 @@ def _isal_inflate_blocks(init, inflate, state, block_state, crc_flag, data,
 	block_state ISAL_BLOCK_FINISH (5).
 	"""
 
+	init, inflate = functions
 	ints = state.view(numpy.uint32)
 	pointers = state.view(numpy.uint64)
 	position = 0

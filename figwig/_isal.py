@@ -56,7 +56,9 @@ def _isal_functions():
 
 	init.argtypes, init.restype = [ctypes.c_void_p], None
 	inflate.argtypes, inflate.restype = [ctypes.c_void_p], ctypes.c_int
-	functions = init, inflate, layout
+	# The two functions go to the kernel as one tuple, kept here: numba
+	# types two ctypes functions given apart in tens of us a call.
+	functions = (init, inflate), layout
 	return functions if _inflates_a_known_block(functions) else None
 
 
@@ -96,11 +98,11 @@ class _IsalDecoder:
 		if self.functions is None:
 			return None
 
-		init, inflate, (size, block_state, crc_flag) = self.functions
+		pair, (size, block_state, crc_flag) = self.functions
 		memory = numpy.empty(size + 64, dtype=numpy.uint8)
 		state = memory[-memory.ctypes.data % 64:][:size]
-		return self.kernel(init, inflate, state, block_state, crc_flag, data,
-			starts, sizes, buffer, blocks)
+		return self.kernel(pair, state, block_state, crc_flag, data, starts,
+			sizes, buffer, blocks)
 
 	@staticmethod
 	def decompress(raw):
