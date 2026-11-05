@@ -14,6 +14,8 @@ Reading
 
 	- ``oob=`` on ``BigWigReader.read`` and ``read_bigwig`` sets the value of bases past the end of a chromosome, as in pybigtools' ``values()``. The default stays NaN. Thanks @casblaauw!
 
+	- A bigWig read with ISA-L gives its inflate kernel ISA-L's two functions in one tuple, where it gave them apart and numba typed each on every call under the GIL: a call of the kernel on an empty batch takes 2.9 µs, where it took 58.3 µs. On the benchmarks' server, 1,000 windows of 2,048 bp from the K562 ATAC-seq fold-change bigWig read in 9.4 ms on 8 threads, where they took 10.8 ms, and 20,000 windows in 103 ms on 32 threads, where they took 117 ms; 20,000 windows on 8 threads read in 106 ms, where they took 112, faster in only three of six pairs. The values are the same.
+
 figwig files
 ------------
 
@@ -57,6 +59,12 @@ figwig files
 
 	- A sparse read lists its entries' rows, channels and offsets as int32 while a window is narrower than 2**31 bases, and widens them to int64 as it gathers them, where it listed them as int64: chromosome 1's cis matrix of the 10 kb Hi-C map, read with ``sparse=True`` on one thread, adds 1.92 GB to its process at its peak, where it added 2.41 GB, and takes 0.52 s, where it took 0.58 s. The entries are the same, in the same order.
 
+	- A ``write`` of windows on threads checks its values for infinity and against declared integer types in parts on the writer's threads, the latter in one compiled pass where it went through numpy a track at a time, and copies each group's block once, every group's of a call in one pass on the pool, where it copied a group's channels twice on the calling thread. The copies go in waves of at most 4 MB per thread, the next copied once the tiles of all but the last are encoded, so that a call holds two waves of copies at most, and the calling thread takes a part itself while the writer's threads are busy, they taking the next as they come free. On the benchmarks' server, 256 tracks over 20 Mb of chr1 write in 1.98 s on 32 threads, where they took 6.6 s, in 3.2 s on 8, where they took 6.3 s, and in 16.9 s on one, where they took 18.9 s; 1,024 tracks write in 10.4 s on 32 threads, where they took 21.1 s. The files are the same to the byte. On 32 threads the waves hold up to about 150 MB more than the calling thread's copies did: 2.01 GB at the 256 tracks' peak, where it was 1.86 GB.
+
+	- A write's chunks are compressed by libdeflate and checksummed in one compiled call that holds no GIL, where the calling thread's numpy calls let it go and took it back three times a batch, and ``write_sparse`` plans and encodes each task of entries in two such calls, where it made some fifty numpy calls a task. ``write_sparse`` takes entries already in the writer's order without sorting them, and tests each piece of a call against the order rules before calling the check that raises. A writer with threads writes its chunks and blocks to the file in order on a thread of its own, with at most 64 MB queued for it, where the calling thread wrote them between batches. On 32 threads of the benchmarks' server, the 4DN K562 Hi-C map at 10 kb writes in 5.2 s, where it took 5.9 s, the Nagano cells at 10 kb in 5.8 s, where they took 6.6 s, and the 10,246 PBMC cells in 3.05 s, where they took 3.41 s, and in track order in 4.7 s, where they took 5.6 s, in 3.2 s on 8 threads, where they took 5.4 s, and in 7.7 s on one, where they took 9.3 s. The files are the same to the byte.
+
+	- A writer of many tracks looks each distinct dtype up once and sets its groups up in arrays, where it went through them in Python: a writer of the 90,543 Fiber-seq reads opens in 0.060 s, where it took 0.151 s, and in track order in 0.139 s, where it took 0.362 s. With the changes above, the reads write in track order in 1.21 s on 8 threads, where they took 1.61 s, and in 1.45 s on one, where they took 1.74 s.
+
 Converters and commands
 -----------------------
 
@@ -73,6 +81,8 @@ Converters and commands
 	- ``figwig bam2fw -c`` of a BAM the region reader does not take, as one below 128 MiB is, writes its runs on the writer's threads (above): the collection's 50 MB K562 ATAC-seq BAM takes 1.2 s at ``-p 8``, where it took 3.5 s.
 
 	- ``figwig fw2bw`` reads the next piece of a group while the bigWig writers take the last, where reading and writing alternated, and the bigWig writer lays out a window's items without a branch per base: twelve bigWigs (ATAC-seq and DNase-seq cut counts, and PRO-cap, PRO-seq, csRNA-seq, TT-seq and NET-seq per strand) convert from their figwig file in 44 s on one thread, where they took 67 s, and in 10.3 s at ``-p 8``, where they took 17.8 s. ``figwig bw2fw`` checks the values for infinity in one compiled pass, and bigWig reads keep one thread pool between reads, where each read started its own: the same twelve bigWigs convert in 52 s on one thread, where they took 59 s, and in 10.5 s at ``-p 16``, where they took 13.4 s. The files are the same to the byte.
+
+	- ``figwig fw2bw`` writes each track's bigWig on a thread of its own, with at most two pieces of a group in flight, where every piece waited for each of its tracks' bigWigs before the next was written: the twelve bigWigs above convert in 8.95 s at ``-p 8``, where they took 9.99 s, and in 9.1 s at ``-p 32``, where they took 10.1 s. With the writer's changes above, ``figwig bw2fw`` converts them in 9.3 s at ``-p 8``, where it took 10.4 s, and in 10.7 s at ``-p 32``, where it took 14.0 s. The files are the same to the byte.
 
 	- ``figwig reorder`` into track order hands the writer each chromosome's entries as already sorted, and the track-order writer sums its blocks' tiles in one pass: the read depth of the HCT116 ATAC-seq BAM reorders in 39 s on one thread, where it took 57 s, at a peak of 7.9 GB, where it took 14.0 GB. The file is the same to the byte.
 

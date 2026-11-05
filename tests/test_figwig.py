@@ -2089,6 +2089,72 @@ def test_write_sparse_sorts_by_either_sort_alike(tmp_path, monkeypatch, n_jobs):
 			assert took_radix == (name != 'runs'), name
 
 
+def test_write_sparse_tasks_of_many_goes_write_one_goes_file(tmp_path, monkeypatch):
+	"""write_sparse tasks whose chunks take many of the encoder's goes, each
+	go's compressed into a stream of its own and the streams joined, write
+	the file of a go per task, and the file of the numpy path."""
+
+	rng = numpy.random.default_rng(11)
+	tracks = ['t{}'.format(i) for i in range(40)]
+	sizes = {'chr1': 64 * 400, 'chr2': 64 * 90}
+	calls = []
+	for chrom, n in sizes.items():
+		positions = numpy.sort(rng.choice(n, n // 3, replace=False))
+		calls.append((chrom, positions, rng.integers(0, 40, len(positions)),
+			rng.integers(1, 50, len(positions)).astype(float)))
+
+	def write(name, go_bytes=None, kernels=True):
+		with monkeypatch.context() as patch:
+			if go_bytes is not None:
+				patch.setattr(figwig.figwig, '_ENTRIES_GO_BYTES', go_bytes)
+			if not kernels:
+				patch.setattr(figwig.figwig, '_deflate_functions', lambda: None)
+			path = str(tmp_path / name)
+			with FigWigWriter(path, sizes, tracks, tile=64, n_jobs=1) as writer:
+				for chrom, positions, ids, values in calls:
+					writer.write_sparse(chrom, positions, ids, values)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	one_go = write('a.fw')
+	assert write('b.fw', go_bytes=256) == one_go
+	assert write('c.fw', go_bytes=256, kernels=False) == one_go
+
+
+def test_write_sparse_entries_in_order_write_and_raise_as_sorted_ones(tmp_path,
+		monkeypatch):
+	"""Entries given in the writer's order, which are not sorted, their
+	integer values widened in parts on the pool, write the file the same
+	entries out of order write, and two of them on one base are named by
+	their own indices."""
+
+	monkeypatch.setattr(figwig.figwig, '_RADIX_PARALLEL', 1)
+	rng = numpy.random.default_rng(17)
+	sizes = {'chr1': 64 * 300}
+	positions = numpy.sort(rng.choice(64 * 300, 5000, replace=False))
+	values = rng.integers(1, 100, len(positions)).astype(numpy.int32)
+	ids = numpy.zeros(len(positions), dtype=numpy.int64)
+	mix = rng.permutation(len(positions))
+
+	def write(name, p, v):
+		path = str(tmp_path / name)
+		with FigWigWriter(path, sizes, ['t'], tile=64, n_jobs=3) as writer:
+			writer.write_sparse('chr1', p, ids, v)
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	assert write('in.fw', positions, values) == write('mixed.fw', positions[mix],
+		values[mix])
+
+	twice = positions.copy()
+	twice[3001] = twice[3000]
+	with FigWigWriter(str(tmp_path / 'twice.fw'), sizes, ['t'], tile=64,
+			n_jobs=3) as writer:
+		with pytest.raises(ValueError, match="entries 3000 and 3001 both name "
+				"base {} ".format(twice[3000])):
+			writer.write_sparse('chr1', twice, ids, values)
+
+
 @pytest.mark.parametrize('n_jobs', [1, 3])
 def test_write_sparse_sorts_tracks_interleaved_in_tiles_by_radix(tmp_path,
 	monkeypatch, n_jobs):
@@ -2973,6 +3039,183 @@ def test_write_sparse_checks_in_parts_raise_as_one_pass(tmp_path, monkeypatch):
 		with open(path, 'rb') as handle:
 			written.append(handle.read())
 	assert written[0] == written[1]
+
+
+@pytest.mark.parametrize('wave', [1, 1 << 23])
+def test_write_checks_and_copies_in_parts_as_one_thread(tmp_path, monkeypatch,
+		wave):
+	"""A write's checks and its copy of each group's channels, cut into
+	parts on the pool, and copied in waves of a block each or of every
+	block, raise what one thread raises with the checks in numpy, with the
+	same message, for a bad value in any part, and write the file it
+	writes: for channels given out of the groups' order, a block that is
+	not contiguous, windows running past their chromosome's end with NaN
+	there, intervals, and values the compiled passes do not take (float16,
+	big-endian)."""
+
+	for name, value in (('_RADIX_PARALLEL', 1), ('_COPY_ON_POOL', 1),
+			('_COPY_PART_BYTES', 1), ('_GATHER_BASES', 5), ('_COPY_WAVE_BYTES',
+			wave), ('_CHECK_PART_BYTES', 1)):
+		monkeypatch.setattr(figwig.figwig, name, value)
+	tracks = [{'name': 'a', 'dtype': 'uint8'}, {'name': 'b', 'dtype': 'int16'},
+		{'name': 'c'}, {'name': 'd', 'dtype': 'float32'}, {'name': 'e',
+		'dtype': 'uint8'}, {'name': 'f'}]
+	groups = [['a', 'c'], ['b', 'd', 'e'], ['f']]
+	order = ['f', 'e', 'a', 'd', 'c', 'b']
+	sizes = {'chr1': 3000, 'chr2': 700, 'chr3': 300, 'chr4': 300, 'chr5': 500}
+
+	def block(**at):
+		values = numpy.zeros((3, 6, 200)) + numpy.arange(3, 9)[None, :, None]
+		values[:, :, ::7] = 0
+		for name, (j, c, p) in at.items():
+			values[j, order.index(c), p] = {'nan': numpy.nan, 'fraction': 0.5,
+				'wide': 300, 'negative': -2, 'inf': numpy.inf}[name.rstrip('2')]
+		return values
+
+	cases = [block(nan=(2, 'a', 190)), block(nan=(0, 'e', 3), fraction=(2, 'b', 150)),
+		block(fraction=(1, 'b', 199)), block(wide=(2, 'e', 0)),
+		block(negative=(0, 'a', 120), nan2=(2, 'e', 7)), block(inf=(2, 'c', 199)),
+		block(inf=(0, 'f', 1), nan=(1, 'a', 2)), block(negative=(2, 'e', 50)),
+		block(inf=(2, 'b', 199))]
+	big = block().astype(numpy.int64)
+	big[2, 3, 100] = 2 ** 53 + 1
+	cases.append(big)
+
+	# One thread checks as numpy does, without the compiled passes.
+	compiled = figwig.figwig._kernel_values
+
+	def message(n_jobs, values, ends=None):
+		monkeypatch.setattr(figwig.figwig, '_kernel_values', compiled if n_jobs >
+			1 else lambda dtype: False)
+		with FigWigWriter(str(tmp_path / 'p.fw'), sizes, tracks, tile=64,
+				groups=groups, n_jobs=n_jobs) as writer:
+			with pytest.raises((ValueError, TypeError)) as error:
+				writer.write('chr1', [0, 900, 2000], values, ends=ends, tracks=order)
+		return str(error.value)
+
+	for k, values in enumerate(cases):
+		assert message(1, values) == message(4, values), k
+
+	# Intervals, a value each, which stay in numpy.
+	for k, at in enumerate(({'nan': (2, 'a')}, {'negative': (1, 'e')}, {'fraction':
+			(0, 'b')}, {'wide': (2, 'e')}, {'negative': (0, 'a'), 'nan2': (2, 'e')})):
+		values = block(**{name: (j, c, 0) for name, (j, c) in at.items()})[:, :, 0]
+		ends = [100, 1000, 2100]
+		assert message(1, values, ends) == message(4, values, ends), k
+
+	strided = numpy.full((3, 6, 400), 2.0, dtype=numpy.float32)[:, :, ::2]
+	past = block()
+	past[2, :, 101:] = numpy.nan
+	past[2, order.index('e'), 101:] = 0
+	written = []
+	for n_jobs in (1, 4):
+		monkeypatch.setattr(figwig.figwig, '_kernel_values', compiled if n_jobs >
+			1 else lambda dtype: False)
+		path = str(tmp_path / 'ok{}.fw'.format(n_jobs))
+		with FigWigWriter(path, sizes, tracks, tile=64, groups=groups,
+				n_jobs=n_jobs) as writer:
+			writer.write('chr1', [0, 900, 2000], block(), tracks=order)
+			writer.write('chr1', [2200, 2500, 2800], strided, tracks=order)
+			writer.write('chr2', [0, 250, 599], past, tracks=order)
+			for chrom, dtype in (('chr3', 'float16'), ('chr4', '>f4')):
+				writer.write(chrom, [0], block()[:1].astype(dtype), tracks=order)
+			writer.write('chr5', [0, 10], numpy.full((2, 6), 4, dtype=numpy.int32),
+				ends=[5, 400], tracks=order)
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_writes_on_their_own_thread_write_the_file_one_thread_writes(tmp_path,
+		monkeypatch, order):
+	"""Chunks and blocks written on the writes' thread, with every write
+	waiting for the one before it, give the file one thread writes, as do
+	an append to it and a file that writes entries and then adds it by
+	`add_file`; a write that fails raises at close, and the path keeps what
+	it held."""
+
+	monkeypatch.setattr(figwig.figwig, '_SPOOL_BYTES', 1)
+	rng = numpy.random.default_rng(3)
+	sizes = {'chr1': 5000, 'chr2': 3000}
+	tracks = ['t{}'.format(i) for i in range(6)]
+	positions = numpy.sort(rng.choice(5000, 900, replace=False))
+	ids = rng.integers(0, 6, 900)
+
+	def write(path, n_jobs, append=False):
+		with FigWigWriter(path, sizes, tracks if not append else None, tile=64,
+				order=order if not append else None, n_jobs=n_jobs,
+				append=append) as writer:
+			if append:
+				writer.write_sparse('chr2', positions[:400] % 3000, ids[:400], numpy.full(
+					400, 2.0))
+			else:
+				writer.write_sparse('chr1', positions, ids, rng.integers(1, 9, 900))
+		with open(path, 'rb') as handle:
+			return handle.read()
+
+	one = write(str(tmp_path / 'one.fw'), 1)
+	rng = numpy.random.default_rng(3)
+	positions = numpy.sort(rng.choice(5000, 900, replace=False))
+	ids = rng.integers(0, 6, 900)
+	many = write(str(tmp_path / 'many.fw'), 4)
+	assert one == many
+	assert write(str(tmp_path / 'one.fw'), 1, True) == write(str(tmp_path /
+		'many.fw'), 4, True)
+
+	class Slow:
+		"""A file whose writes each take 20 ms, so that the last write is
+		still queued when `add_file` copies its chunks."""
+
+		def __init__(self, handle):
+			self.handle = handle
+
+		def write(self, data):
+			time.sleep(0.02)
+			return self.handle.write(data)
+
+		def __getattr__(self, name):
+			return getattr(self.handle, name)
+
+	copies = []
+	for n_jobs in (1, 4):
+		path = str(tmp_path / 'copy{}.fw'.format(n_jobs))
+		with FigWigWriter(path, sizes, ['u0', 'u1'], tile=64, order=order,
+				n_jobs=n_jobs) as writer:
+			writer._file = Slow(writer._file)
+			writer.write_sparse('chr1', positions[:300], ids[:300] % 2, numpy.full(
+				300, 3.0))
+			writer.add_file(str(tmp_path / 'one.fw'))
+		with open(path, 'rb') as handle:
+			copies.append(handle.read())
+	assert copies[0] == copies[1]
+
+	class Failing:
+		"""A file whose third write fails, as a full disk would."""
+
+		def __init__(self, handle):
+			self.handle, self.writes = handle, 0
+
+		def write(self, data):
+			self.writes += 1
+			if self.writes == 3:
+				raise OSError(28, 'No space left on device')
+			return self.handle.write(data)
+
+		def __getattr__(self, name):
+			return getattr(self.handle, name)
+
+	path = str(tmp_path / 'full.fw')
+	writer = FigWigWriter(path, sizes, tracks, tile=64, order=order, n_jobs=4)
+	writer._file = Failing(writer._file)
+	for lo, hi in ((0, 1600), (1600, 3200), (3200, 5000)):
+		keep = (positions >= lo) & (positions < hi)
+		writer.write_sparse('chr1', positions[keep], ids[keep], numpy.full(int(
+			keep.sum()), 1.0))
+	with pytest.raises(OSError, match='No space'):
+		writer.close()
+	assert not os.path.exists(path)
+	assert os.listdir(str(tmp_path)).count('full.fw') == 0
 
 
 ###

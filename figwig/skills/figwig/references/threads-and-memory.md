@@ -49,8 +49,10 @@ stable, and the last section measures the numbers where they matter.
   tiles there too, but a tile a call continues or leaves open; the writer
   holds about 0.5 GB plus two to three times one call's values, so aim for
   calls of a few hundred MB. `write_sparse` sorts and checks a call's
-  entries on the pool. `bw2fw` stops gaining near `-p 8`; the
-  track-order writer does not gain.
+  entries on the pool, and `write` checks and copies its values there, in
+  waves of 4 MB per thread; with threads a writer writes the file on a
+  thread of its own (64 MB queued at most). The track-order writer and
+  `bw2fw` stop gaining near 8 threads.
 - `figwig bam2bw`: gains end near `-p 8`; peak memory is a few GB for a
   10 GB BAM, nearly double with `-u -f`. `-c` on a sorted, indexed BAM of
   128 MiB and 5 M mapped reads or more (`bam2fw -c`: 128 MiB and 50,000
