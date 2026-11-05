@@ -238,6 +238,9 @@ _SUMMARY_BYTES = 1 << 28
 # spills them to a temporary file beyond it.
 _SUMMARY_SPILL_BYTES = 1 << 30
 _SpilledSums = collections.namedtuple('_SpilledSums', 'offset n tracks')
+# A reader keeps the tile sums it has inflated, the least recently read
+# dropped first, up to this many bytes.
+_SUMMARY_CACHE_BYTES = 1 << 28
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
@@ -1343,7 +1346,7 @@ class FigWigWriter:
 				runs.append([[int(r['first']), int(r['last']), int(at[k]), int(r[
 					'bytes'])] for k, r in enumerate(found)])
 				blocks.append([])
-			summary = source._tile_sums_of(g)
+			summary = source._tile_sums_of(g, cache=False)
 			sums.append([] if summary is None else [summary])
 
 		def splice(own, new):
@@ -4107,6 +4110,10 @@ class FigWigReader:
 		self._summary_at = [None] * n_groups
 		self._zoom_levels = [None] * n_groups
 		self._zoom_factors = None
+		self._first_summary = None
+		self._sums_cache = collections.OrderedDict()
+		self._sums_cached = 0
+		self._sums_lock = threading.Lock()
 		self._regional = None
 		self._runs = [None] * n_groups
 		self._index_lock = threading.Lock()
@@ -4146,6 +4153,9 @@ class FigWigReader:
 	def __getstate__(self):
 		state = self.__dict__.copy()
 		del state['_index_lock']
+		del state['_sums_lock']
+		state['_sums_cache'] = collections.OrderedDict()
+		state['_sums_cached'] = 0
 		state['_index'] = [None] * len(self._index)
 		state['_summary_at'] = [None] * len(self._index)
 		state['_zoom_levels'] = [None] * len(self._index)
@@ -4158,6 +4168,7 @@ class FigWigReader:
 	def __setstate__(self, state):
 		self.__dict__.update(state)
 		self._index_lock = threading.Lock()
+		self._sums_lock = threading.Lock()
 
 	def _check_file(self):
 		"""Raise if the file at the path is no longer the one that was
@@ -4426,10 +4437,17 @@ class FigWigReader:
 			raise ValueError(error + ": the file ends inside it.")
 		return at + 12, n_sum, n_bytes, crc
 
-	def _tile_sums_of(self, g):
+	def _tile_sums_of(self, g, cache=True):
 		"""Group g's summary, as (file tiles, sums of shape (tiles, tracks)
-		float32), or None when the file keeps none for it."""
+		float32), or None when the file keeps none for it. With `cache` the
+		inflated arrays, read-only, are kept for the next call and shared
+		with it, up to _SUMMARY_CACHE_BYTES over every group."""
 
+		with self._sums_lock:
+			kept = self._sums_cache.get(g)
+			if kept is not None:
+				self._sums_cache.move_to_end(g)
+				return kept
 		self._group_index(g)
 		at, n_sum, n_bytes, crc = self._summary_at[g]
 		if n_bytes == 0:
@@ -4452,18 +4470,69 @@ class FigWigReader:
 				:-1]).any()):
 			raise ValueError(error + ": its summary is out of order.")
 		sums = numpy.frombuffer(raw[4 * n_sum:], dtype='<f4').reshape(n_sum,
-			n_tracks)
-		return tiles, sums.astype(numpy.float32)
+			n_tracks).astype(numpy.float32)
+		size = tiles.nbytes + sums.nbytes
+		if cache and size <= _SUMMARY_CACHE_BYTES:
+			tiles.flags.writeable = False
+			sums.flags.writeable = False
+			with self._sums_lock:
+				if g not in self._sums_cache:
+					self._sums_cache[g] = (tiles, sums)
+					self._sums_cached += size
+					while self._sums_cached > _SUMMARY_CACHE_BYTES:
+						_, (old_tiles, old_sums) = self._sums_cache.popitem(last=False)
+						self._sums_cached -= old_tiles.nbytes + old_sums.nbytes
+		return tiles, sums
 
 	@property
 	def zooms(self) -> tuple:
 		"""The zoom levels the file keeps, as the tiles per bin of each:
-		(4, 16, 64) for three levels, () for none."""
+		(4, 16, 64) for three levels, () for none. They are those of the
+		first group that keeps a summary; a group that keeps none has none."""
 
 		if self._zoom_factors is None:
-			levels = self._zoom_levels_of(0) if len(self._groups) else []
+			g = self._first_summary_group()
+			levels = [] if g is None else self._zoom_levels_of(g)
 			self._zoom_factors = tuple(factor for factor, _, _ in levels)
 		return self._zoom_factors
+
+	def _first_summary_group(self):
+		"""The first group, in file order, that keeps a summary, or None,
+		found from the sizes in the groups' records without reading their
+		live tiles."""
+
+		if self._first_summary is None:
+			self._first_summary = next((g for g in range(len(self._groups)) if
+				self._has_summary(g)), -1)
+		return None if self._first_summary < 0 else self._first_summary
+
+	def _has_summary(self, g):
+		"""Whether group g's record holds a summary stream, from its summary's
+		header alone; the record itself is checked when the group is read."""
+
+		if self._summary_at[g] is not None:
+			return self._summary_at[g][2] > 0
+		error = "The index of {} cannot be read".format(self.path)
+		offset = int(self._directory[g])
+		fd = _open_read(self.path)
+		try:
+			raw = _pread(fd, 4, offset)
+			if len(raw) != 4:
+				raise ValueError(error + ": the file ends inside it.")
+			if self.order == 'tracks':
+				at = offset + 8 + struct.unpack('<I', raw)[0] * _BLOCK.itemsize
+			else:
+				at = offset + 8 + struct.unpack('<I', raw)[0] * _RUN.itemsize
+				raw = _pread(fd, 4, at + 4)
+				if len(raw) != 4:
+					raise ValueError(error + ": the file ends inside it.")
+				at += 8 + struct.unpack('<I', raw)[0]
+			raw = _pread(fd, 12, at)
+		finally:
+			os.close(fd)
+		if len(raw) != 12:
+			raise ValueError(error + ": the file ends inside it.")
+		return struct.unpack('<III', raw)[1] > 0
 
 	def _zoom_levels_of(self, g):
 		"""Group g's zoom levels, as a list of (factor, bins, sums of shape

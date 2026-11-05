@@ -61,9 +61,13 @@ def _merge(paths, output, genome=None, verbose=False, summary_index=None):
 		genome = genomes.pop() if genomes else None
 	if summary_index is None:
 		summary_index = bool(first._optional & _summary_index.OPTIONAL_BIT)
+	# The zoom levels are those of the first file that keeps a summary, since
+	# a file that keeps none has no zoom levels to say how many it would.
+	zooms = next((len(reader.zooms) for reader in map(FigWigReader, paths) if
+		reader._first_summary_group() is not None), 0)
 	with FigWigWriter(output, first.chrom_sizes, None, genome=genome,
 			attributes=first.attributes, tile=first.tile, level=first._level,
-			order=first.order, zooms=len(first.zooms),
+			order=first.order, zooms=zooms,
 			summary_index=summary_index) as writer:
 		for path in paths:
 			writer.add_file(path)

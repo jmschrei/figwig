@@ -4164,6 +4164,75 @@ def test_add_file_and_append_keep_each_groups_summary(tmp_path, monkeypatch):
 		1, 2]])
 
 
+def test_tile_sums_inflate_each_summary_once(tmp_path, monkeypatch):
+	"""A group's tile sums are read from the file once and then kept, the
+	least recently read dropped past the cache's bytes; what a call returns
+	is its own array, and a pickled reader starts with none kept."""
+
+	values = numpy.random.default_rng(2).integers(0, 5, (3, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['a'], ['b'], ['c']], values)
+	expected = values.reshape(3, 100, 64).sum(axis=2)
+	reads = []
+	pread = figwig.figwig._pread
+
+	def counted(fd, n, offset):
+		reads.append(n)
+		return pread(fd, n, offset)
+
+	monkeypatch.setattr(figwig.figwig, '_pread', counted)
+	reader = FigWigReader(path)
+	first = reader.tile_sums(tracks=['a', 'b'])
+	n = len(reads)
+	assert n > 0
+	first[:] = -1
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['b', 'a']),
+		expected[[1, 0]])
+	# Only the check that the file is the one opened reads it again.
+	header = figwig.figwig._HEADER.itemsize
+	assert set(reads[n:]) == {header}
+
+	again = pickle.loads(pickle.dumps(reader))
+	numpy.testing.assert_array_equal(again.tile_sums(tracks='a'), expected[0])
+	assert len(again._sums_cache) == 1
+
+	one = sum(t.nbytes + v.nbytes for t, v in reader._sums_cache.values()) // 2
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_CACHE_BYTES', one)
+	small = FigWigReader(path)
+	for track in ('a', 'b', 'a'):
+		before = len(reads)
+		numpy.testing.assert_array_equal(small.tile_sums(tracks=track), expected[
+			ord(track) - ord('a')])
+		assert set(reads[before:]) - {header}
+	assert list(small._sums_cache) == [0]
+
+
+def test_zooms_come_from_the_first_group_with_a_summary(tmp_path, monkeypatch):
+	"""A file whose first group keeps no summary still reports, and merges
+	with, the zoom levels its other groups keep."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	values = numpy.random.default_rng(3).integers(0, 5, (4, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['x', 'y', 'z'], ['a']],
+		values)
+	reader = FigWigReader(path)
+	assert reader._first_summary_group() == 1 and reader.zooms == (4, 16)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks='a', level=1),
+		values[3].reshape(25, 256).sum(axis=1))
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 0)
+	bare = _grouped_file(str(tmp_path / 'bare.fw'), [['e']], values[:1])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	assert FigWigReader(bare).zooms == ()
+	merged = str(tmp_path / 'merged.fw')
+	from figwig.merge import _merge
+	_merge([bare, path], merged)
+	both = FigWigReader(merged)
+	assert both.zooms == (4, 16)
+	numpy.testing.assert_array_equal(both.tile_sums(tracks='a', level=2),
+		numpy.add.reduceat(values[3].reshape(100, 64).sum(axis=1), numpy.arange(
+		0, 100, 16)))
+
+
 def test_verify_checks_every_chunk(tmp_path):
 	"""A flipped byte in an uncompressed chunk passes an ordinary read and
 	fails one with verify=True; a compressed chunk fails either way."""

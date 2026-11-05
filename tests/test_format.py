@@ -312,3 +312,16 @@ def _zoom_stream_at(file, g):
 	at = _summary_stream_at(file, g)
 	n_sum, n_bytes = struct.unpack_from('<II', file.bytes, at - 12)
 	return at + n_bytes + 4 + 16
+
+
+def test_summary_presence_is_read_from_the_record_sizes(files):
+	"""Whether a group keeps a summary, read from its record's sizes alone,
+	is what reading its record says, in every fixture."""
+
+	for name, path in files.items():
+		reader = FigWigReader(path)
+		cheap = [reader._has_summary(g) for g in range(len(reader._groups))]
+		assert cheap == [reader._tile_sums_of(g, cache=False) is not None for g in
+			range(len(reader._groups))], name
+		assert cheap == [reader._has_summary(g) for g in range(len(
+			reader._groups))], name
