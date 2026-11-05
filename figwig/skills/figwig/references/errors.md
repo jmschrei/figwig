@@ -78,7 +78,7 @@ writes nothing; writers stay usable.
 | `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | |
 | `ends must hold one end per start`, `an interval's end is before its start`, `paired=True needs one track per interval` | `sums` arguments |
 | `has no attribute 'read'`, `has no track with channel=...`, `are both channel=... of read=...` | `channels=`/`items=`: a track without the attribute, a missing item × channel, or two tracks for one |
-| `keeps no summary of the group of`, `keeps no zoom level k of the group of` | summaries passed 256 MB; the file was written without `zooms=k` (`reader.zooms`) |
+| `keeps no summary of the group of`, `keeps no zoom level k of the group of` | the group's tile sums passed 256 MB (in a file from figwig 0.2.0 or earlier, the whole file's); the file was written without `zooms=k` (`reader.zooms`) |
 | `has been replaced or rewritten since this reader opened it`, `has been truncated` | a conversion or a closed append changed the file → open the reader again |
 | `it is version ... of the format, and this figwig reads version 1`, `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it → upgrade |
 | `... does not match its checksum` (tables, index, header, or a chunk with `verify=True`), `cannot be read as a figwig file`, `a chunk of ... cannot be read`, `is not a regular file` | damaged, truncated, crafted, or not a file; always `ValueError` |

@@ -874,10 +874,11 @@ class FigWigWriter:
 	tracks to the file at `path` itself, in place: its chunks stay where
 	they are, the new ones go after its end, and new tables, index and
 	header are written at `close`, so that a file grows by a track at a
-	time at the cost of the new chunks alone. The file keeps each track's sum over every tile, for
-	`FigWigReader.tile_sums`, as long as those sums take at most 256 MB,
-	and a CRC-32 of every chunk, which `FigWigReader(path, verify=True)`
-	checks.
+	time at the cost of the new chunks alone. Each group keeps its tracks'
+	sums over every tile, for `FigWigReader.tile_sums`, as long as the
+	group's sums take at most 256 MB, the writer holding those past 1 GB in
+	a temporary file beside `path` until `close`; and the file keeps a
+	CRC-32 of every chunk, which `FigWigReader(path, verify=True)` checks.
 
 	Parameters
 	----------
@@ -955,9 +956,10 @@ class FigWigWriter:
 		The number of zoom levels to keep beside the tile sums: level k holds
 		each track's sum over bins of 4**k tiles, in float64, which
 		`FigWigReader.tile_sums(level=k)` returns without decoding a chunk,
-		for coarse genome-wide profiles. Levels are kept while the tile sums
-		are (tracks x tiles x 4 bytes at most 256 MB). None is the file's
-		with `append=True` and 0 otherwise. Default is None.
+		for coarse genome-wide profiles. A group keeps its levels while it
+		keeps its tile sums (its tracks x tiles x 4 bytes at most 256 MB).
+		None is the file's with `append=True` and 0 otherwise. Default is
+		None.
 
 	summary_index: bool, optional
 		Write the optional regional summary index, which lets a reader that
@@ -4663,7 +4665,8 @@ class FigWigReader:
 			summary = None if len(levels) < level else levels[level - 1][1:]
 		if summary is None:
 			raise ValueError("{} keeps no {} of the group of {!r}; it was "
-				"written with more tracks than the summaries hold{}.".format(
+				"written with more tracks, in the group or the file, than the "
+				"summaries hold{}.".format(
 				self.path, "summary" if level == 0 else "zoom level {}".format(
 				level), self.tracks[int(self._groups[g][0])]['name'], "" if level
 				== 0 else ", or with fewer zoom levels"))
@@ -4734,8 +4737,9 @@ class FigWigReader:
 		This is the file's coarse profile, at the resolution of its tiles
 		(16,384 bases unless the file was written with another tile), for a
 		genome-wide plot, a per-chromosome total or a coarser binning by a
-		reshape; it stands in for a bigWig's zoom levels. The file keeps the
-		sums when every track's take at most 256 MB together.
+		reshape; it stands in for a bigWig's zoom levels. A group keeps the
+		sums when its tracks' take at most 256 MB together, and the reader
+		keeps those it inflates, up to 256 MB, for later calls.
 
 		When the file keeps a regional summary index, selected chromosomes
 		use its bounded pages and restart fragments automatically. Broad

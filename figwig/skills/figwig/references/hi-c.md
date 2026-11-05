@@ -153,9 +153,11 @@ pseudobulk = numpy.stack([m + m.T - numpy.diag(numpy.diag(m)) for m in y])
 
 ## Limits that bite at Hi-C sizes
 
-- `tile_sums` needs tracks × tiles × 4 bytes within 2**28 (`references/errors.md`);
-  at 256-bin tiles over hg38 that fails from about 10 kb, and it raises
-  `keeps no summary`. Use `read(bins=)` or `sums`.
+- `tile_sums` needs each group's tracks × tiles × 4 bytes within 2**28
+  (`references/errors.md`): groups of 1,024 bins at 256-bin tiles keep them
+  down to bins of about 200 bp over hg38. A file from figwig 0.2.0 or earlier
+  kept none past about 350 tracks in the file and raises `keeps no summary`;
+  use `read(bins=)` or `sums` there.
 - Opening parses a record per track, so open time and memory grow with bins.
 - hictk's `fetch(range1, range2)` refuses a rectangle that crosses the
   diagonal (`overlaps with the lower-triangle`): split a row there to check
