@@ -140,3 +140,33 @@ def write_all(root):
 	return paths
 
 
+def write_mixed(root):
+	"""Files in which some groups keep a summary and others keep none, as a
+	writer makes them when a group's tile sums pass the cap: `write`'s file
+	with the cap lowered below its groups of cells, and a merge of a file
+	that keeps no summary with it. Returns them by name."""
+
+	import figwig.figwig
+
+	cap = figwig.figwig._SUMMARY_BYTES
+	n_tiles = sum(-(-length // TILE) for length in CHROMS.values())
+	try:
+		figwig.figwig._SUMMARY_BYTES = 2 * n_tiles * 4
+		paths = {'mixed': write(root / 'mixed.fw'),
+			'mixed_stored': write(root / 'mixed_stored.fw', level=0, zooms=1,
+			interleave=False)}
+		figwig.figwig._SUMMARY_BYTES = 0
+		bare = root / 'bare.fw'
+		with FigWigWriter(bare, CHROMS, ['bare'], tile=TILE, level=6,
+				zooms=2) as writer:
+			v = numpy.zeros((1, 1, CHROMS['chr2']))
+			v[0, 0, 3:40] = 2
+			writer.write('chr2', [0], v)
+	finally:
+		figwig.figwig._SUMMARY_BYTES = cap
+	with FigWigWriter(root / 'mixed_merged.fw', CHROMS, [], tile=TILE, level=6,
+			zooms=2) as writer:
+		writer.add_file(bare)
+		writer.add_file(paths['mixed'])
+	paths['mixed_merged'] = root / 'mixed_merged.fw'
+	return paths

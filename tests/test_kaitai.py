@@ -22,6 +22,7 @@ import pytest
 
 from . import format_reference as spec
 from .format_fixtures import write_all
+from .format_fixtures import write_mixed
 from .kaitai_figwig import Figwig
 from .summary_reference import read_index
 
@@ -280,3 +281,15 @@ def check_pages(stream, data, level):
 				zlib.crc32(found.sums.tobytes()))
 			checked += 1
 	return checked
+
+
+def test_kaitai_parser_reads_files_with_some_summaries(tmp_path):
+	"""The parser generated from docs/figwig.ksy reads files in which some
+	groups keep no summary as the specification's reader does."""
+
+	for name, path in write_mixed(tmp_path).items():
+		test_kaitai_parser_agrees_with_the_reference_reader({name: path}, name)
+		with open(path, 'rb') as handle:
+			parsed = Figwig(kaitaistruct.KaitaiStream(handle))
+			lengths = [record.summary.len_stream for record in parsed.index.records]
+		assert any(lengths) and not all(lengths), name
