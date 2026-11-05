@@ -164,7 +164,7 @@ def compare(parsed, file):
 
 		summary = record.summary
 		if group.summary is None:
-			assert summary.len_stream == 0 and summary.stream is None
+			assert summary.len_stream == 0 and not hasattr(summary, 'stream')
 		else:
 			tiles, sums = group.summary
 			assert list(summary.stream.tiles) == tiles.tolist()
