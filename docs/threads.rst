@@ -43,15 +43,20 @@ faster.
 A figwig file is read the same way, in batches of chunks on up to ``n_jobs``
 threads, each batch read with one ``pread`` per run of adjacent chunks and
 inflated by libdeflate, or by zlib where the ``deflate`` package is not
-installed. A read uses one thread per 64 chunks it touches, up to
-``n_jobs``, since a read of a few dozen windows is done in under a
-millisecond and gains nothing from waking threads, and no more than one per
-256 KB of the chunks it decodes and per 2 MB of a dense output it fills, but
-at least 4 where it asks for that many, since a read of a few hundred KB of
-chunks took longer on 16 or 32 threads than on 2 to 8, while a read summed
-per bin over fewer windows than threads keeps them all, to split its
-windows' batches, as does a float sum that they would cut across tasks,
-whose sums in a copy of the output per thread depend on the threads; it
+installed; where libc's ``pread`` and libdeflate both load, as everywhere
+but Windows, a batch is read, checked and inflated in one compiled call that
+holds no GIL. A read of fewer than one in 16 of a group's tracks, as one
+cell's of a file of thousands, checks only those tracks' offsets and passes
+over the chunks in which none of them has a base. A read uses one thread per
+64 chunks it touches, up to ``n_jobs``, since a read of a few dozen windows
+is done in under a millisecond and gains nothing from waking threads, and no
+more than one per 256 KB of the chunks it decodes and per 2 MB of a dense
+output it fills, but at least 4 where it asks for that many, since a read of
+a few hundred KB of chunks took longer on 16 or 32 threads than on 2 to 8,
+while a read summed per bin over fewer windows than threads keeps them all,
+to split its windows' batches, as does a float sum that they would cut
+across tasks, whose sums in a copy of the output per thread depend on the
+threads; it
 keeps its threads between reads, and on a read of several groups each thread
 takes the next batch as it finishes one. Windows packed into a few tiles are
 cut over the threads by window rather than by chunk, and a read of few large
@@ -70,8 +75,19 @@ group's batches at once, since each group's tracks have their own cells,
 unless each group has one batch and together they hold less than 1 MB of
 chunks. In track order sums take a copy of the output per thread, which the
 8 GiB guard counts. In position order ``sums(..., paired=True)`` sums its
-batches of tracks side by side, a thread each, where their sums are exact
-in any order, as integer tracks' are.
+batches of tracks side by side, a thread each, where their sums are exact in
+any order, as integer tracks' are, and over integer tracks and intervals of
+a few tiles each it is one read, each interval with its own track's chunks
+alone. A read with labels over several groups of integer tracks runs in
+bands of windows side by side, where it ran a group at a time. A few long
+windows summed per bin, as a genome browser's views are, are read as parts
+of whole bins, a part per thread, whose float sums differ from one thread's
+only in rounding. The indexes a read needs load on the calling thread
+while each spans fewer than 131,072 tiles, since threads that lay out small
+indexes mostly wait for each other, and from the first that spans more the
+rest load on up to 8 threads, each holding the one it lays out: a process
+running a browser's session over six genome-wide count tracks peaked at
+169 MB on 8 threads, where loading them one at a time peaked at 146 MB.
 
 Writing
 -------
@@ -96,6 +112,12 @@ compresses about four times slower, so it keeps gaining up to 32 threads,
 where it took 0.20 s.
 Zoom levels are built when the writer is closed, with the same threads, and
 add a pass over the data.
+
+``write_sparse`` sorts a call's entries by a radix sort on the pool, from
+above a tile's offsets where the call's positions ascend, and runs its passes
+over the entries, its range and dtype checks and its search for two entries
+on one base, in parts on the pool, so that on many threads the calling thread
+mostly writes the encoded tasks' bytes.
 
 ``write`` converts the values of one call a batch at a time as well, so its
 working memory does not grow with the call: on 8 threads without zoom levels,

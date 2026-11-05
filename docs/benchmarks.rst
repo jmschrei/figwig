@@ -900,13 +900,13 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - scipy CSR (16.3 GB, in memory)
      - one bigWig per cell (1.4 GB)
    * - write
-     - 48 / 10.9 / 9.0
-     - 33 / 19.5 / 24
+     - 44 / 7.7 / 4.9
+     - 22 / 7.6 / 7.6
      - 10.6 / 11.4
      - 116 / 78 / 82
    * - 10 pseudobulks over the windows (``labels=``)
-     - 1.69 / 0.30 / 0.17
-     - 21.7 / 10.0 / refused
+     - 1.61 / 0.23 / 0.078
+     - 15.9 / 8.0 / refused
      - 5.1 / 4.9
      - 136 / 95 / 96
    * - 128 cells dense over the windows
@@ -916,13 +916,13 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - 0.79 / 0.28 / 0.26
    * - every cell's cut sites in 1,024 windows (``sparse=True``)
      - 0.42 / 0.12 / 0.095
-     - 7.1 / 5.4 / 5.0
+     - 4.1 / 1.2 / 1.05
      - 4.3 / 4.7
      - not run
 
-Pseudobulks in the read are 30 times faster than from the sparse matrix
-and 500 times faster than from one bigWig per cell, and the file is a
-sixteenth of the matrix's size; a tile of cut sites whose nonzero values
+Pseudobulks in the read are 21 times faster than from the sparse matrix on
+8 threads and 410 times faster than from one bigWig per cell, and the file
+is a sixteenth of the matrix's size; a tile of cut sites whose nonzero values
 are all 1 stores no values. Track order sums 10,246 tracks one block task
 at a time, and at 16 and 32 threads its per-thread output copies pass the
 8 GiB guard, so it is refused there. The scipy writer only sorts and
@@ -946,29 +946,30 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - figwig, track order
      - scipy CSR
    * - write
-     - 3.3 / 1.6 / 1.8
-     - 4.5 / 7.1 / 8.4
+     - 2.8 / 1.1 / 1.5
+     - 2.1 / 1.8 / 2.6
      - 6.8
    * - sum over all reads, 8,192 windows (``labels=``)
-     - 0.22 / 0.30 / 0.78
-     - 15.7 / 15.8 / 16.0
+     - 0.21 / 0.16 / 0.15
+     - 0.24 / 0.26 / 0.35
      - 3.8 / 4.0
    * - calls of every read in 1,024 windows (``sparse=True``)
      - 0.14 / 0.13 / 0.13
-     - 7.1 / 7.2 / 7.2
+     - 0.22 / 0.22 / 0.25
      - 27 / 3.5
    * - each read over its own span (``sums(paired=True)``)
-     - 3.0 / 1.6 / 2.0
-     - 9.6 / 9.7 / 9.6
+     - 0.80 / 0.25 / 0.24
+     - 2.3 / 0.53 / 0.36
      - 5.8 / 6.8
 
 One group of every read is refused, since a chunk holds at most 2**29
 values, and a group per read made the sum over 8,192 windows take 230 s,
 each read paying a planning step per group; groups of consecutive reads
-are the layout. A sum over every read and the sparse values gain little
-from threads, since each read touches few chunks and the work is the
-planning; the paired sums run their batches of reads side by side on the
-threads.
+are the layout. A sum over every read runs in bands of windows on the
+threads, the paired sums over integer reads are one read, each read's span
+with its own blocks, and the sparse values gain little from threads, since
+each read touches few chunks. Track order, which plans every read's windows
+at once, takes 1.1 to 2.9 times as long as position order on these reads.
 
 To a GPU
 ~~~~~~~~

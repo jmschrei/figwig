@@ -27,6 +27,7 @@ _ZLIB_COMPRESS = []
 # functions, loaded on the first figwig read.
 _LIBDEFLATE = []
 _LIBDEFLATE_INFLATE = []
+_LIBDEFLATE_CRC32 = []
 
 # The names zlib's shared library goes by on Linux, macOS and Windows, tried
 # in this order before ctypes.util.find_library is asked for 'z' and 'zlib'.
@@ -225,6 +226,34 @@ def _load_libdeflate_inflate():
 	free.argtypes = [ctypes.c_size_t]
 	free.restype = None
 	return alloc, decompress, free
+
+
+def _libdeflate_crc32():
+	"""libdeflate's crc32 as a ctypes function, or None if the `deflate`
+	package is not installed or its library does not export it. It gives
+	zlib.crc32's values, many times faster on this CPU."""
+
+	if len(_LIBDEFLATE_CRC32) == 0:
+		_LIBDEFLATE_CRC32.append(_load_libdeflate_crc32())
+
+	return _LIBDEFLATE_CRC32[0]
+
+
+def _load_libdeflate_crc32():
+	try:
+		import ctypes
+		import deflate._deflate
+	except ImportError:
+		return None
+
+	try:
+		crc32 = ctypes.CDLL(deflate._deflate.__file__).libdeflate_crc32
+	except (OSError, AttributeError):
+		return None
+
+	crc32.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_size_t]
+	crc32.restype = ctypes.c_uint32
+	return crc32
 
 
 @numba.njit(nogil=True, cache=True)

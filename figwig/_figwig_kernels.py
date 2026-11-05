@@ -624,6 +624,39 @@ def _sorted_tile_sums(positions, values, tile, tiles, sums):
 
 
 @numba.njit(nogil=True, cache=True)
+def _declared_ranges(tracks, values, declared, lows, highs, lo, hi):
+	"""Each declared track's lowest and highest value among entries lo to
+	hi, into `lows` and `highs`, in one pass; entry k is of track tracks[k],
+	and declared[t] whether track t has a declared integer dtype. Returns the
+	first entry of a declared track whose value is NaN or not an integer, as
+	soon as it is found, or -1."""
+
+	for k in range(lo, hi):
+		t = tracks[k]
+		if not declared[t]:
+			continue
+		v = numpy.float64(values[k])
+		if v != v or v != numpy.floor(v):
+			return k
+		if v < lows[t]:
+			lows[t] = v
+		if v > highs[t]:
+			highs[t] = v
+	return -1
+
+
+@numba.njit(nogil=True, cache=True)
+def _value_range(values, lo, hi):
+	"""The lowest and highest of values lo to hi."""
+
+	low = high = values[lo]
+	for i in range(lo, hi):
+		low = min(low, values[i])
+		high = max(high, values[i])
+	return low, high
+
+
+@numba.njit(nogil=True, cache=True)
 def _any_infinite(values):
 	"""Whether any of `values`, 1-D float32 or float64, is infinite, in one
 	pass without a branch, which vectorizes."""
@@ -752,20 +785,33 @@ def _crcs_of(data, cuts, tables, out):
 
 
 @numba.njit(nogil=True, cache=True)
-def _entry_bounds(positions, tracks, present):
-	"""The lowest and highest of `positions`, marking each track of
-	`tracks` in `present`, in one pass."""
+def _crcs_of_libdeflate(crc32, data, cuts, out):
+	"""`_crcs_of` with libdeflate's crc32."""
 
-	low = positions[0]
-	high = positions[0]
-	for e in range(positions.shape[0]):
+	for k in range(cuts.shape[0] - 1):
+		out[k] = crc32(0, data[cuts[k]:].ctypes, cuts[k + 1] - cuts[k])
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_ranges(positions, tracks, present, lo, hi):
+	"""The lowest and highest of positions lo to hi and of their tracks, in
+	one pass, marking each of those tracks that is at least 0 and below the
+	length of `present` there, unless `present` is empty."""
+
+	marking = present.shape[0] > 0
+	n_tracks = present.shape[0]
+	plow = phigh = positions[lo]
+	tlow = thigh = tracks[lo]
+	for e in range(lo, hi):
 		p = positions[e]
-		if p < low:
-			low = p
-		if p > high:
-			high = p
-		present[tracks[e]] = True
-	return low, high
+		t = tracks[e]
+		plow = min(plow, p)
+		phigh = max(phigh, p)
+		tlow = min(tlow, t)
+		thigh = max(thigh, t)
+		if marking and t >= 0 and t < n_tracks:
+			present[t] = True
+	return plow, phigh, tlow, thigh
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1519,6 +1565,45 @@ def _encode_blocks(positions, values, first, cls, out, bounds, kinds, stats):
 
 
 @numba.njit(nogil=True, cache=True)
+def _encode_tracks_blocks(positions, values, cuts, size, classes, out, bounds,
+	kinds, stats):
+	"""`_encode_blocks` of several tracks' entries one after another, each
+	cut as `_flush_track` cuts it: track j's entries are cuts[j] to
+	cuts[j + 1] - 1, in blocks of `size` and a last of the rest, of class
+	classes[j], with its statistics row in stats[j]. Block k's bytes are
+	out[bounds[k]:bounds[k + 1]]. Returns the number of blocks."""
+
+	most = 0
+	for j in range(cuts.shape[0] - 1):
+		most = max(most, cuts[j + 1] - cuts[j])
+	first = numpy.empty(most // size + 2, dtype=numpy.int64)
+	k = 0
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		n = b - a
+		n_blocks = (n + size - 1) // size
+		for i in range(n_blocks + 1):
+			first[i] = min(i * size, n)
+		_encode_blocks(positions[a:b], values[a:b], first[:n_blocks + 1],
+			classes[j], out, bounds[k:k + n_blocks + 1], kinds[k:k + n_blocks],
+			stats[j:j + 1])
+		k += n_blocks
+	return k
+
+
+@numba.njit(nogil=True, cache=True)
+def _tracks_tile_sums(positions, values, cuts, tile, tiles, sums, counts):
+	"""`_sorted_tile_sums` of several tracks' entries, track j's being
+	cuts[j] to cuts[j + 1] - 1: track j's tiles and sums go to tiles and
+	sums from cuts[j], and their number to counts[j]."""
+
+	for j in range(cuts.shape[0] - 1):
+		a, b = cuts[j], cuts[j + 1]
+		counts[j] = _sorted_tile_sums(positions[a:b], values[a:b], tile,
+			tiles[a:b], sums[a:b])
+
+
+@numba.njit(nogil=True, cache=True)
 def _inflate_chunks(uncompress, data, starts, sizes, stored, buffer, positions,
 	lengths, length):
 	"""Inflate chunks one after another into `buffer`, each starting on an
@@ -1600,6 +1685,85 @@ def _inflate_chunks_libdeflate(decompress, decompressor, data, starts, sizes,
 			position = _pad8(position + lengths[k])
 
 	return position
+
+
+@numba.njit(nogil=True, cache=True)
+def _load_chunks(functions, fd, offsets, sizes, kinds, crcs, check, raw, buffer,
+	starts, positions, lengths):
+	"""A batch's chunks or blocks as `_load_batch` gives them, without the
+	GIL: read into `raw`, which holds all of them and 8 bytes, with one
+	pread per run of adjacent ones, the CRC-32 of every one checked when
+	`check` is 2 and of those stored as they are when it is 1, and, when
+	`buffer` has room, inflated by libdeflate into it. `starts` gets where
+	each chunk lies in `raw`, `positions` and `lengths` where each lies in
+	`buffer` and its bytes. Returns the bytes of `buffer` used, or -1
+	where a run reads short, a CRC differs, a chunk does not inflate into
+	the buffer or no decompressor is had, for `_load_batch` to read the
+	batch again its own way. `functions` are libc's pread and libdeflate's
+	alloc_decompressor, zlib_decompress, free_decompressor and crc32, in
+	one tuple: numba types two ctypes functions given apart in tens of us
+	a call, under the GIL, one tuple of them in a few."""
+
+	pread, alloc, decompress, free, crc32 = functions
+	n = offsets.shape[0]
+	order = numpy.argsort(offsets, kind='mergesort')
+	total = 0
+	for j in range(n):
+		starts[order[j]] = total
+		total += sizes[order[j]]
+
+	# One pread per run of chunks adjacent in the file.
+	j = 0
+	while j < n:
+		a = j
+		while j + 1 < n and offsets[order[j + 1]] == offsets[order[j]] + sizes[
+				order[j]]:
+			j += 1
+		lo = starts[order[a]]
+		want = starts[order[j]] + sizes[order[j]] - lo
+		done = 0
+		while done < want:
+			got = pread(fd, raw[lo + done:].ctypes, want - done, offsets[order[a]] +
+				done)
+			if got <= 0:
+				break
+			done += got
+		if done != want:
+			return -1
+		j += 1
+
+	for k in range(n if check > 0 else 0):
+		if (check == 2 or (kinds[k] & _STORED) > 0) and numpy.int64(crc32(0, raw[
+				starts[k]:].ctypes, sizes[k])) != crcs[k]:
+			return -1
+	if buffer.shape[0] == 0:
+		return 0
+
+	decompressor = alloc()
+	if decompressor == 0:
+		return -1
+	length = numpy.zeros(1, dtype=numpy.uintp)
+	position = 0
+	status = 0
+	for k in range(n):
+		size = sizes[k]
+		if (kinds[k] & _STORED) > 0:
+			if position + size > buffer.shape[0]:
+				status = 1
+				break
+			for i in range(size):
+				buffer[position + i] = raw[starts[k] + i]
+			lengths[k] = size
+		elif decompress(decompressor, raw[starts[k]:].ctypes, size, buffer[
+				position:].ctypes, buffer.shape[0] - position, length.ctypes) != 0:
+			status = 1
+			break
+		else:
+			lengths[k] = numpy.int64(length[0])
+		positions[k] = position
+		position = _pad8(position + lengths[k])
+	free(decompressor)
+	return -1 if status != 0 else position
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1693,6 +1857,73 @@ def _matrix_header(data, position):
 	offsets_at = position + 8 + 8 * n_present
 	values_at = offsets_at + _pad4(2 * total)
 	return n_present, tracks, ptr, offsets_at, values_at, total
+
+
+@numba.njit(nogil=True, cache=True)
+def _varints_fit(data, at, end, tile):
+	"""Whether data[at:end] holds whole varints, of up to three bytes each,
+	whose running sum stays below `tile`: one track's offsets in a sparse or
+	runs chunk."""
+
+	p = 0
+	while at < end:
+		if at + 3 > end and data[at] >= 128 and (at + 1 >= end or (data[at + 1] >=
+				128 and (at + 2 >= end or data[at + 2] >= 128))):
+			return False
+		delta, at = _get_varint(data, at)
+		p += delta
+		if p >= tile:
+			return False
+	return at == end
+
+
+@numba.njit(nogil=True, cache=True)
+def _none_read(data, position, kind, n_tracks, slots, selected):
+	"""Whether none of the tracks read, `selected`, has a base in a sparse,
+	runs or matrix chunk."""
+
+	if kind == _SPARSE or kind == _RUNS:
+		counts = data[position + 4:position + 4 + 4 * n_tracks].view(numpy.uint32)
+		for j in range(selected.shape[0]):
+			if counts[selected[j]] > 0:
+				return False
+		return True
+	n_present = numpy.int64(data[position:position + 4].view(numpy.uint32)[0])
+	present = data[position + 4:position + 4 + 4 * n_present].view(numpy.uint32)
+	if selected.shape[0] >= n_present:
+		for k in range(n_present):
+			if slots[present[k]] >= 0:
+				return False
+		return True
+	for j in range(selected.shape[0]):
+		g = selected[j]
+		lo, hi = 0, n_present
+		while lo < hi:
+			mid = (lo + hi) // 2
+			if numpy.int64(present[mid]) < g:
+				lo = mid + 1
+			else:
+				hi = mid
+		if lo < n_present and numpy.int64(present[lo]) == g:
+			return False
+	return True
+
+
+@numba.njit(nogil=True, cache=True)
+def _drop_unread(data, positions, kinds, n_tracks, slots, selected,
+	pair_chunks, kept):
+	"""`pair_chunks` into `kept`, with -1 for each pair whose chunk has no
+	base in any track read, `selected`; the chunks have passed their
+	checks."""
+
+	unread = numpy.zeros(positions.shape[0], dtype=numpy.bool_)
+	for c in range(positions.shape[0]):
+		if _kind_of(kinds[c]) != _DENSE:
+			unread[c] = _none_read(data, positions[c], _kind_of(kinds[c]), n_tracks,
+				slots, selected)
+	for q in range(pair_chunks.shape[0]):
+		c = pair_chunks[q]
+		kept[q] = -1 if c >= 0 and unread[c] else c
 
 
 @numba.njit(nogil=True, cache=True)
@@ -1803,6 +2034,100 @@ def _check_chunks(tile, data, positions, lengths, kinds, n_tracks, slots,
 
 	return n_failed
 
+
+@numba.njit(nogil=True, cache=True)
+def _check_chunks_few(tile, data, positions, lengths, kinds, n_tracks, slots,
+	failed, pair_chunks, kept):
+	"""`_check_chunks` for a read of few of the group's tracks: the same
+	checks, but each sparse or runs chunk's tracks read are found by moving
+	past the tracks before them, rather than by passing every track. When
+	every chunk passes, `kept` is `pair_chunks` with -1, a tile of zeros,
+	for each pair whose chunk has no base in any track read, which is most
+	chunks of such a read; `kept` may be empty, for none."""
+
+	selected = numpy.flatnonzero(slots >= 0)
+	n_failed = 0
+	for k in range(positions.shape[0]):
+		kind = _kind_of(kinds[k])
+		code = _code_in(kinds[k])
+		position = positions[k]
+		length = lengths[k]
+		bad = False
+
+		if position < 0 or code > _F64 or kind == _ZERO or kind > _RUNS:
+			bad = True
+		elif kind == _DENSE:
+			bad = code == _ONE or length < n_tracks * tile * _WIDTHS[code]
+		elif kind == _SPARSE or kind == _RUNS:
+			if length < 4 + 4 * n_tracks or (kind == _RUNS and code == _ONE):
+				bad = True
+			else:
+				track_bytes, total, deltas_at, delta_bytes, values_at = \
+					_sparse_header(data, position, n_tracks)
+				if length < values_at - position + total * _WIDTHS[code] or \
+						_count_varints(data, deltas_at, deltas_at + delta_bytes) != \
+						total:
+					bad = True
+				else:
+					at = deltas_at
+					after = 0
+					for j in range(selected.shape[0]):
+						g = selected[j]
+						for t in range(after, g):
+							at += numpy.int64(track_bytes[t])
+						after = g + 1
+						end = at + numpy.int64(track_bytes[g])
+						if not _varints_fit(data, at, end, tile):
+							bad = True
+							break
+						at = end
+		else:
+			if length < 4:
+				bad = True
+			else:
+				n_present = numpy.int64(data[position:position + 4].view(
+					numpy.uint32)[0])
+				if n_present > n_tracks or length < 8 + 8 * n_present:
+					bad = True
+				else:
+					_, tracks, ptr, offsets_at, values_at, total = _matrix_header(
+						data, position)
+					if length < values_at - position + total * _WIDTHS[code]:
+						bad = True
+					else:
+						# Every pointer is checked before any offset is read by
+						# it: the loop over a track's offsets runs to ptr[j + 1],
+						# which must lie within the chunk's offsets.
+						if ptr[0] != 0 or numpy.int64(ptr[n_present]) != total:
+							bad = True
+						for j in range(n_present):
+							if bad or tracks[j] >= n_tracks or (j > 0 and tracks[j] <=
+									tracks[j - 1]) or ptr[j + 1] < ptr[j] or numpy.int64(
+									ptr[j + 1]) > total:
+								bad = True
+								break
+						offsets = data[offsets_at:offsets_at + 2 * total].view(
+							numpy.uint16)
+						for j in range(n_present):
+							if bad:
+								break
+							if slots[tracks[j]] < 0:
+								continue
+							for i in range(numpy.int64(ptr[j]), numpy.int64(ptr[j +
+									1])):
+								if offsets[i] >= tile or (i > numpy.int64(ptr[j]) and
+										offsets[i] <= offsets[i - 1]):
+									bad = True
+									break
+
+		if bad:
+			failed[k] = 1
+			n_failed += 1
+
+	if n_failed == 0 and kept.shape[0] > 0:
+		_drop_unread(data, positions, kinds, n_tracks, slots, selected, pair_chunks,
+			kept)
+	return n_failed
 
 @numba.njit(nogil=True, cache=True)
 def _check_blocks(data, positions, lengths, kinds, n_entries, firsts, lasts,
@@ -2356,7 +2681,7 @@ def _bin_into(dst, src, src0, s0, s1, bins, nan_mode):
 @numba.njit(nogil=True, cache=True)
 def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	pair_bases, pair_starts, pair_rows, out, accumulate, scratch, bins,
-	pair_stops, nan_mode):
+	pair_stops, nan_mode, pair_tracks=None):
 	"""Copy the parts of windows that fall in a batch of chunks into `out`.
 
 	Pair q is a window and one tile it overlaps: the tile starts at base
@@ -2386,6 +2711,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	per chunk, or one without a scratch tile, bins each pair's bases
 	straight into its row. `nan_mode` is what a NaN base adds to a binned
 	sum, as `_pick` takes it.
+
+	With `pair_tracks`, pair q reads track pair_tracks[q] of the chunk alone
+	into channel 0 of its row, as `sums(..., paired=True)` does.
 	"""
 
 	width = out.shape[2] * bins
@@ -2394,6 +2722,9 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	selected = numpy.flatnonzero(slots >= 0)
 	targets = numpy.unique(slots[selected])
 	n_pairs = pair_chunks.shape[0]
+	paired = pair_tracks is not None
+	alone = numpy.full(n_tracks if paired else 0, -1, dtype=numpy.int64)
+	only = numpy.zeros(1, dtype=numpy.int64)
 	decoded = -1
 	q = 0
 	while q < n_pairs:
@@ -2424,8 +2755,8 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		# tile, from which each window is copied or binned; otherwise each
 		# pair is decoded on its own, binned straight into its row when
 		# summing, which needs no scratch however many tracks there are.
-		via_scratch = scratch.shape[0] > 0 and q1 - q >= _SCRATCH_PAIRS and (
-			bins > 1 or kind != _DENSE)
+		via_scratch = not paired and scratch.shape[0] > 0 and q1 - q >= \
+			_SCRATCH_PAIRS and (bins > 1 or kind != _DENSE)
 		if via_scratch and chunk != decoded:
 			base = pair_bases[q]
 			if accumulate:
@@ -2446,6 +2777,16 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 			b = min(stop, base + tile)
 			if b <= a:
 				continue
+			if paired:
+				t = pair_tracks[r]
+				alone[t] = 0
+				only[0] = t
+				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
+					alone, only, base, start, a, b, out[row], accumulate or bins > 1,
+					bool(False), row, int(0), empty, empty, empty, empty_values, bins,
+					nan_mode)
+				alone[t] = -1
+				continue
 			if not via_scratch:
 				_window_of_chunk(tile, data, positions[chunk], kind, code, n_tracks,
 					slots, selected, base, start, a, b, out[row], accumulate or bins
@@ -2463,6 +2804,30 @@ def _read_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 		q = q1
 
 	return 0
+
+
+@numba.njit(nogil=True, cache=True)
+def _read_groups(tile, data, positions, lengths, kinds, chunk_at, n_tracks_of,
+	slots, slots_at, pair_chunks, pair_bases, pair_starts, pair_rows, out,
+	scratch, bins, failed):
+	"""`_check_chunks`, then `_read_tiles` adding into `out`, for each of
+	several groups in turn over one batch of their chunks: group j's chunks
+	are chunk_at[j] to chunk_at[j + 1] of the batch, its tracks' slots
+	slots_at[j] to slots_at[j + 1] of `slots`, and its pairs' chunks row j
+	of `pair_chunks`, the pairs being the same for every group. Returns the
+	first group a chunk of which fails its check, or -1."""
+
+	empty = numpy.zeros(0, dtype=numpy.int64)
+	for j in range(n_tracks_of.shape[0]):
+		c0, c1 = chunk_at[j], chunk_at[j + 1]
+		mine = slots[slots_at[j]:slots_at[j + 1]]
+		if c1 > c0 and _check_chunks(tile, data, positions[c0:c1], lengths[
+				c0:c1], kinds[c0:c1], n_tracks_of[j], mine, failed[c0:c1]) > 0:
+			return j
+		_read_tiles(tile, data, positions[c0:c1], kinds[c0:c1], n_tracks_of[j],
+			mine, pair_chunks[j], pair_bases, pair_starts, pair_rows, out,
+			bool(True), scratch, bins, empty, int(0))
+	return -1
 
 
 @numba.njit(nogil=True, cache=True)
@@ -2631,13 +2996,15 @@ def _entry_keys(positions, track_ids, tids, multi, group_of, slot_of, n_groups,
 	"""The sort keys of entries lo to hi of a write_sparse call: from high
 	bits to low, the chromosome and group, the tile, the track's slot in its
 	group and the offset in the tile, each in its own bits. Returns how many
-	keys are below the one before, and how many are below the one `reach`
-	before."""
+	keys are below the one before, how many are below the one `reach`
+	before, and how many positions are below the one before."""
 
 	mask = (numpy.int64(1) << shift) - 1
 	descents = 0
 	far = 0
+	back = 0
 	last = numpy.int64(-1)
+	before = numpy.int64(-1)
 	for i in range(lo, hi):
 		p = positions[i]
 		t = track_ids[i]
@@ -2649,14 +3016,20 @@ def _entry_keys(positions, track_ids, tids, multi, group_of, slot_of, n_groups,
 			descents += 1
 		if i - lo >= reach and key < keys[i - reach]:
 			far += 1
+		if p < before:
+			back += 1
 		last = key
-	return descents, far
+		before = p
+	return descents, far, back
 
 
 @numba.njit(nogil=True, cache=True)
 def _radix_counts(keys, lo, hi, shift, mask, counts):
-	"""How many of keys lo to hi hold each value of the digit at `shift`."""
+	"""How many of keys lo to hi hold each value of the digit at `shift`,
+	into `counts`, which is cleared first."""
 
+	for d in range(counts.shape[0]):
+		counts[d] = 0
 	for i in range(lo, hi):
 		counts[(keys[i] >> shift) & mask] += 1
 
@@ -2682,11 +3055,13 @@ def _entry_gather(keys, order, values, multi, shift, slot_bits, tile_bits,
 	tids_out):
 	"""Entries lo to hi in sorted order: the position, slot, group and
 	chromosome from each sorted key, and the value (as float64) from the
-	entry it came from."""
+	entry it came from. Returns the first of them whose key is the one
+	before's, two entries on one base of one track, or -1."""
 
 	mask = (numpy.int64(1) << shift) - 1
 	slot_mask = (numpy.int64(1) << slot_bits) - 1
 	tile_mask = (numpy.int64(1) << tile_bits) - 1
+	repeat = -1
 	for i in range(lo, hi):
 		k = keys[i]
 		positions_out[i] = (((k >> (shift + slot_bits)) & tile_mask) << shift) | (
@@ -2697,6 +3072,137 @@ def _entry_gather(keys, order, values, multi, shift, slot_bits, tile_bits,
 		if multi:
 			tids_out[i] = high // n_groups
 		values_out[i] = values[order[i]]
+		if repeat < 0 and i > 0 and keys[i - 1] == k:
+			repeat = i
+	return repeat
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_scatter_values(keys, values, lo, hi, shift, mask, starts, keys_out,
+	values_out):
+	"""Moves keys lo to hi, with their values as float64, to the slots
+	`starts` gives each digit, in order, so that equal digits keep the order
+	they came in."""
+
+	for i in range(lo, hi):
+		d = (keys[i] >> shift) & mask
+		j = starts[d]
+		starts[d] = j + 1
+		keys_out[j] = keys[i]
+		values_out[j] = values[i]
+
+
+@numba.njit(nogil=True, cache=True)
+def _entry_decode(keys, multi, shift, slot_bits, tile_bits, n_groups, lo, hi,
+	positions_out, slots_out, groups_out, tids_out):
+	"""Entries lo to hi in sorted order: the position, slot, group and
+	chromosome from each sorted key. Returns the first of them whose key is
+	the one before's, two entries on one base of one track, or -1."""
+
+	mask = (numpy.int64(1) << shift) - 1
+	slot_mask = (numpy.int64(1) << slot_bits) - 1
+	tile_mask = (numpy.int64(1) << tile_bits) - 1
+	repeat = -1
+	for i in range(lo, hi):
+		k = keys[i]
+		positions_out[i] = (((k >> (shift + slot_bits)) & tile_mask) << shift) | (
+			k & mask)
+		slots_out[i] = (k >> shift) & slot_mask
+		high = k >> (shift + slot_bits + tile_bits)
+		groups_out[i] = high % n_groups
+		if multi:
+			tids_out[i] = high // n_groups
+		if repeat < 0 and i > 0 and keys[i - 1] == k:
+			repeat = i
+	return repeat
+
+
+@numba.njit(nogil=True, cache=True)
+def _run_end(keys, a, b, shift):
+	"""The end of the run of sorted keys from a that agree with keys[a]
+	above bit `shift`, within keys[a:b], by binary search."""
+
+	top = keys[a] >> shift
+	if keys[b - 1] >> shift == top:
+		return b
+	target = (top + 1) << shift
+	lo, hi = a + 1, b - 1
+	while lo < hi:
+		mid = (lo + hi) // 2
+		if keys[mid] < target:
+			lo = mid + 1
+		else:
+			hi = mid
+	return lo
+
+
+@numba.njit(nogil=True, cache=True)
+def _key_segments(keys, positions, high_shift, tile_shift):
+	"""The runs of sorted keys that agree above `high_shift`, a chromosome
+	and group each: their starts and the end, and each run's lowest and
+	highest position, which lie in its first and last tiles, the runs of
+	keys that agree above `tile_shift`."""
+
+	n = keys.shape[0]
+	count = 0
+	a = 0
+	while a < n:
+		a = _run_end(keys, a, n, high_shift)
+		count += 1
+	bounds = numpy.empty(count + 1, dtype=numpy.int64)
+	lows = numpy.empty(count, dtype=numpy.int64)
+	highs = numpy.empty(count, dtype=numpy.int64)
+	a = 0
+	for k in range(count):
+		b = _run_end(keys, a, n, high_shift)
+		bounds[k] = a
+		low = positions[a]
+		for i in range(a + 1, _run_end(keys, a, b, tile_shift)):
+			low = min(low, positions[i])
+		# The last tile's run starts after every earlier tile's.
+		last = keys[b - 1] >> tile_shift
+		lo, hi = a, b - 1
+		while lo < hi:
+			mid = (lo + hi) // 2
+			if keys[mid] >> tile_shift < last:
+				lo = mid + 1
+			else:
+				hi = mid
+		c = lo
+		high = positions[c]
+		for i in range(c + 1, b):
+			high = max(high, positions[i])
+		lows[k] = low
+		highs[k] = high
+		a = b
+	bounds[count] = n
+	return bounds, lows, highs
+
+
+@numba.njit(nogil=True, cache=True)
+def _radix_starts(counts, n, starts):
+	"""Where each chunk's keys of each digit go, into `starts`: after every
+	smaller digit's keys, and after the earlier chunks' keys of their own
+	digit, from each chunk's counts per digit, a row each. Returns whether
+	one digit holds all n keys, when the pass moves nothing."""
+
+	n_chunks, n_digits = counts.shape
+	totals = numpy.zeros(n_digits, dtype=numpy.int64)
+	for c in range(n_chunks):
+		for d in range(n_digits):
+			totals[d] += counts[c, d]
+	at = 0
+	for d in range(n_digits):
+		if totals[d] == n:
+			return True
+		t = totals[d]
+		totals[d] = at
+		at += t
+	for c in range(n_chunks):
+		for d in range(n_digits):
+			starts[c, d] = totals[d]
+			totals[d] += counts[c, d]
+	return False
 
 
 @numba.njit(nogil=True, cache=True)

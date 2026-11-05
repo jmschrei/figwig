@@ -1593,12 +1593,11 @@ def test_paired_sums(tmp_path, order, monkeypatch):
 		reader.sums('chr1', starts, ends, tracks=[3] * 40, paired=True)
 
 
-
 def test_paired_float_batches_take_every_thread(tmp_path, monkeypatch):
-	"""Paired sums run batches of integer tracks, whose sums are exact in
-	any order, side by side on a thread each, and read each batch of float
-	tracks on every thread asked for, as one after another they were, since
-	a batch's float sums depend on the threads it is read on."""
+	"""Paired sums of integer tracks, whose sums are exact in any order, are
+	read at once, and each batch of float tracks is read on every thread
+	asked for, as one after another they were, since a batch's float sums
+	depend on the threads it is read on."""
 
 	rng = numpy.random.default_rng(9)
 	monkeypatch.setattr(figwig.figwig, '_PAIRED_TRACKS', 1)
@@ -1617,9 +1616,92 @@ def test_paired_float_batches_take_every_thread(tmp_path, monkeypatch):
 		monkeypatch.setattr(FigWigReader, 'sums', lambda self, *args, **kwargs: (
 			inner.append(kwargs.get('n_jobs')) or whole(self, *args, **kwargs)))
 		reader.sums('chr1', starts, ends, tracks=which, paired=True, n_jobs=8)
-		assert len(inner) > 2 and set(inner[1:]) == ({1} if dtype == 'uint8'
-			else {8}), (dtype, inner)
+		assert inner == [8] if dtype == 'uint8' else len(inner) > 2 and set(
+			inner[1:]) == {8}, (dtype, inner)
 		monkeypatch.setattr(FigWigReader, 'sums', whole)
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('n_jobs', [1, 4])
+def test_paired_sums_read_at_once(tmp_path, order, n_jobs):
+	"""Paired sums of integer tracks read every interval at once, each with
+	its own track's chunks or blocks alone: intervals over several tiles and
+	chromosomes, past a chromosome's end, empty, on a track with nothing on
+	their chromosome, and several on one track, over dense, sparse and runs
+	chunks, give each interval's sum of its own
+	track, under every nan mode and dtype. A float track goes the batched
+	way, and so does a read that raises."""
+
+	rng = numpy.random.default_rng(7)
+	sizes = {'chr1': 3000, 'chr2': 1700}
+	names = ['t{}'.format(i) for i in range(12)]
+	values = {}
+	for chrom, length in sizes.items():
+		v = numpy.zeros((len(names), length), dtype=numpy.int64)
+		for i in range(len(names)):
+			if i % 3 == 0:
+				v[i] = rng.integers(0, 10, length)
+			elif i % 3 == 1:
+				v[i] = rng.integers(1, 300, length) * (rng.random(length) < 0.05)
+			else:
+				v[i] = numpy.repeat(rng.integers(0, 5, -(-length // 50)), 50)[:length]
+		values[chrom] = v
+	values['chr2'][4] = 0
+	path = str(tmp_path / 'p.fw')
+	with FigWigWriter(path, sizes, [{'name': name, 'dtype': 'uint16'} for name
+			in names], tile=64, order=order, groups=[names[:5], names[5:9],
+			names[9:]] if order == 'positions' else 1) as writer:
+		for chrom in sizes:
+			writer.write(chrom, [0], values[chrom][None].astype(numpy.uint16))
+	reader = FigWigReader(path)
+
+	n = 300
+	chroms = rng.choice(list(sizes), n)
+	lengths = numpy.array([sizes[c] for c in chroms])
+	starts = rng.integers(0, lengths)
+	ends = starts + rng.integers(0, 400, n)
+	ends[:10] = starts[:10]
+	which = rng.integers(0, len(names), n)
+	which[10:40] = 3
+	chroms[40:60], which[40:60] = 'chr2', 4
+	lengths = numpy.array([sizes[c] for c in chroms])
+	starts, ends = numpy.minimum(starts, lengths - 1), numpy.minimum(ends,
+		lengths + 300)
+	want = numpy.array([values[c][t, s:min(e, sizes[c])].sum() for c, t, s, e in
+		zip(chroms, which, starts, ends)])
+	covered = numpy.maximum(numpy.minimum(ends, lengths) - starts, 0)
+	for nan, expected in (('propagate', want), ('skip', want), ('count',
+			covered)):
+		got = reader.sums(chroms, starts, ends, tracks=which, paired=True,
+			n_jobs=n_jobs, nan=nan)
+		assert got.dtype == numpy.float64
+		numpy.testing.assert_array_equal(got, expected)
+	for dtype in ('int64', 'float32'):
+		got = reader.sums(chroms, starts, ends, tracks=which, paired=True,
+			n_jobs=n_jobs, dtype=dtype)
+		assert got.dtype == dtype
+		numpy.testing.assert_array_equal(got, want.astype(dtype))
+	every = reader.sums(chroms, starts, ends, tracks=list(range(len(names))),
+		n_jobs=n_jobs)
+	numpy.testing.assert_array_equal(every[numpy.arange(n), which], want)
+	with pytest.raises(ValueError, match="int8"):
+		reader.sums(chroms, starts, ends, tracks=which, paired=True,
+			n_jobs=n_jobs, dtype='int8')
+	with pytest.raises(ValueError, match="chr9"):
+		reader.sums(['chr1', 'chr9'], [0, 0], [10, 10], tracks=[0, 1],
+			paired=True, n_jobs=n_jobs)
+
+	floats = str(tmp_path / 'f.fw')
+	fractions = rng.random((1, 2, 3000)).astype(numpy.float32)
+	write_figwig(floats, {'chr1': 3000}, ['a', 'b'], 'chr1', [0], fractions,
+		tile=64, order=order)
+	got = FigWigReader(floats).sums('chr1', starts[:40] % 2900, starts[:40] %
+		2900 + 90, tracks=which[:40] % 2, paired=True, n_jobs=n_jobs,
+		dtype='float64')
+	numpy.testing.assert_allclose(got, [fractions[0, t, s:s + 90].astype(
+		numpy.float64).sum() for t, s in zip(which[:40] % 2, starts[:40] % 2900)],
+		rtol=1e-12)
+
 
 def test_crafted_matrix_chunk_fails_without_a_crash():
 	"""A matrix chunk whose middle row pointer is far past its values once
