@@ -231,9 +231,13 @@ _GATHER_ROW_BYTES = 1
 _SPARSE_KEYS = 1 << 63
 _ENTRIES_PAIRS = 1 << 20
 
-# A file keeps each track's sum over every tile, for summaries without a
-# read of the chunks, when those sums take at most this many bytes.
+# A group keeps each of its tracks' sum over every tile, for summaries
+# without a read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
+# The writer holds the groups' tile sums in memory up to this many bytes and
+# spills them to a temporary file beyond it.
+_SUMMARY_SPILL_BYTES = 1 << 30
+_SpilledSums = collections.namedtuple('_SpilledSums', 'offset n tracks')
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
@@ -978,6 +982,7 @@ class FigWigWriter:
 		self._index_builder = None
 		self._pool = None
 		self._spool = None
+		self._sums_file = None
 		self._partial = None
 		self._length = None
 		self._times = None
@@ -1087,6 +1092,8 @@ class FigWigWriter:
 		self._runs = [[] for _ in range(n_groups)]
 		self._blocks = [[] for _ in range(n_groups)]
 		self._sums = [[] for _ in range(n_groups)]
+		self._sums_held = 0
+		self._sums_lock = threading.Lock()
 		self._pending = [None] * n_groups
 		self._buffers = [None] * n_groups
 		self._item_types = [None] * n_groups
@@ -1196,6 +1203,9 @@ class FigWigWriter:
 			except OSError:
 				pass
 			self._partial = None
+		if self._sums_file is not None:
+			self._sums_file.close()
+			self._sums_file = None
 
 	def _select(self, tracks):
 		"""The tracks a call names, as (track ids in channel order, whether a
@@ -1357,6 +1367,10 @@ class FigWigWriter:
 		self._blocks = splice(self._blocks, blocks)
 		self._sums = splice(self._sums, sums)
 		self._keeps = splice(self._keeps, [bool(sums[k]) for k in range(n_groups)])
+		with self._sums_lock:
+			self._sums_held += sum(tiles.nbytes + values.nbytes for pieces in sums for
+				tiles, values in pieces)
+			self._spill_sums()
 		for name in ('_pending', '_buffers', '_open', '_sealed', '_last',
 				'_item_types'):
 			setattr(self, name, splice(getattr(self, name), [None] * n_groups))
@@ -2865,7 +2879,57 @@ class FigWigWriter:
 		self._check_overflow(self._groups[g])
 		summary = self._summary_of(g, tid, tiles[:expected], tile_sums[:expected])
 		if summary is not None:
+			self._keep_sum(g, summary)
+
+	def _keep_sum(self, g, summary):
+		"""Add a piece of group g's summary, (file tiles, sums of shape (tiles,
+		tracks) float32), to those its record will hold."""
+
+		with self._sums_lock:
 			self._sums[g].append(summary)
+			self._sums_held += summary[0].nbytes + summary[1].nbytes
+			self._spill_sums()
+
+	def _spill_sums(self):
+		"""Write every piece of summary held in memory to the temporary file,
+		in place of which each group's list keeps its offset, once the pieces
+		pass _SUMMARY_SPILL_BYTES. The caller holds _sums_lock."""
+
+		if self._sums_held <= _SUMMARY_SPILL_BYTES:
+			return
+		if self._sums_file is None:
+			self._sums_file = tempfile.TemporaryFile(dir=os.path.dirname(
+				os.path.abspath(self.path)))
+		at = self._sums_file.seek(0, os.SEEK_END)
+		for pieces in self._sums:
+			for i, piece in enumerate(pieces):
+				if isinstance(piece, _SpilledSums):
+					continue
+				tiles, sums = piece
+				raw = tiles.astype('<u4').tobytes() + numpy.ascontiguousarray(sums,
+					dtype='<f4').tobytes()
+				self._sums_file.write(raw)
+				pieces[i] = _SpilledSums(at, len(tiles), sums.shape[1])
+				at += len(raw)
+		self._sums_file.flush()
+		self._sums_held = 0
+
+	def _sums_of(self, g):
+		"""Group g's pieces of summary in the order they were kept, those
+		spilled read back from the temporary file."""
+
+		pieces = []
+		for piece in self._sums[g]:
+			if isinstance(piece, _SpilledSums):
+				size = 4 * piece.n * (1 + piece.tracks)
+				raw = _pread(self._sums_file.fileno(), size, piece.offset)
+				if len(raw) != size:
+					raise OSError("the temporary file of tile sums was cut short.")
+				piece = (numpy.frombuffer(raw[:4 * piece.n], dtype='<u4').astype(
+					numpy.int64), numpy.frombuffer(raw[4 * piece.n:], dtype='<f4')
+					.reshape(piece.n, piece.tracks))
+			pieces.append(piece)
+		return pieces
 
 	def _keeps_any(self, pieces):
 		"""Whether any piece's group, its first field, keeps a summary."""
@@ -2889,9 +2953,10 @@ class FigWigWriter:
 		if not self._keeps[g]:
 			return struct.pack('<III', 0, 0, 0) + struct.pack('<I', 0)
 		n_tracks = len(self._groups[g])
-		tiles = numpy.concatenate([t for t, _ in self._sums[g]] + [numpy.zeros(0,
+		pieces = self._sums_of(g)
+		tiles = numpy.concatenate([t for t, _ in pieces] + [numpy.zeros(0,
 			dtype=numpy.int64)])
-		sums = numpy.concatenate([v for _, v in self._sums[g]] + [numpy.zeros((0,
+		sums = numpy.concatenate([v for _, v in pieces] + [numpy.zeros((0,
 			n_tracks), dtype=numpy.float32)]).astype(numpy.float64)
 		if len(tiles) == 0:
 			stream = self._summary_stream(g, 0, tiles, sums)
@@ -3243,7 +3308,7 @@ class FigWigWriter:
 						"range; declare the track float64 to keep it.".format(
 						self.tracks[int(flagged)]['name']))
 				if summary is not None:
-					self._sums[batch.g].append(summary)
+					self._keep_sum(batch.g, summary)
 				sizes.append(size)
 				live.append(folded)
 			if batch.entries:
@@ -3341,7 +3406,7 @@ class FigWigWriter:
 				self.tracks[int(flagged)]['name']))
 		for g, live, total, summary in zip(groups, lives, totals, summaries):
 			if summary is not None:
-				self._sums[g].append(summary)
+				self._keep_sum(g, summary)
 			if len(live) == 0:
 				continue
 			self._live[g].append(live)
@@ -3372,7 +3437,7 @@ class FigWigWriter:
 		at = 0
 		for t, n, summary in zip(tracks, blocks.tolist(), summaries):
 			if summary is not None:
-				self._sums[t].append(summary)
+				self._keep_sum(t, summary)
 			if n:
 				self._blocks[t].append(records[at:at + n])
 				at += n
@@ -3394,7 +3459,7 @@ class FigWigWriter:
 					"range; declare the track float64 to keep it.".format(
 					self.tracks[int(flagged)]['name']))
 			if summary is not None:
-				self._sums[g].append(summary)
+				self._keep_sum(g, summary)
 
 		compressed, sizes, raw, kinds, where, crcs = result[:6]
 		if len(where) == 0:

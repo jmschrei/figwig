@@ -27,6 +27,7 @@ from .summary_files import signal_values
 from .summary_files import write_signal
 from .summary_reference import KEY
 from .summary_reference import read_index
+from .format_fixtures import write_all
 
 
 ##
@@ -256,3 +257,31 @@ def test_an_append_clears_the_bit_and_keeps_the_locator(summary_pair,
 	assert len(reader.tracks) == len(before.tracks) + 1
 	assert numpy.array_equal(reader.read('chrB', [0], 603, tracks=['signal']),
 		before.read('chrB', [0], 603, tracks=['signal']))
+
+
+def test_spilled_tile_sums_change_no_byte(tmp_path, monkeypatch):
+	"""Tile sums spilled to the temporary file come back in the order they
+	were kept: every fixture, and an indexed file, are the files written
+	with every sum held in memory."""
+
+	(tmp_path / 'held').mkdir()
+	held = write_all(tmp_path / 'held')
+	held['indexed'] = write_signal(tmp_path / 'held' / 'indexed.fw')
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_SPILL_BYTES', 0)
+	made = []
+	temporary = figwig.figwig.tempfile.TemporaryFile
+
+	def counted(*args, **kwargs):
+		made.append(1)
+		return temporary(*args, **kwargs)
+
+	monkeypatch.setattr(figwig.figwig.tempfile, 'TemporaryFile', counted)
+	(tmp_path / 'spilled').mkdir()
+	spilled = write_all(tmp_path / 'spilled')
+	spilled['indexed'] = write_signal(tmp_path / 'spilled' / 'indexed.fw')
+	assert len(made) >= len(held)
+	assert sorted(held) == sorted(spilled)
+	for name in held:
+		assert held[name].read_bytes() == spilled[name].read_bytes(), name
+	assert sorted(p.name for p in (tmp_path / 'spilled').iterdir()) == sorted(
+		p.name for p in (tmp_path / 'held').iterdir())
