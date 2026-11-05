@@ -4099,6 +4099,71 @@ def test_files_past_the_summary_cap_keep_none(tmp_path, monkeypatch):
 		reader.tile_sums()
 
 
+def _grouped_file(path, groups, values, zooms=2):
+	"""chr1 of values.shape[1] bases at tile 64, its tracks named by `groups`
+	in order and stored in those groups."""
+
+	names = [name for group in groups for name in group]
+	with FigWigWriter(path, {'chr1': values.shape[1]}, names, tile=64,
+			groups=groups, zooms=zooms) as writer:
+		writer.write('chr1', [0], values[None])
+	return path
+
+
+def test_groups_keep_their_summaries_past_the_file_cap(tmp_path, monkeypatch):
+	"""Each group keeps its summary and zoom levels while its own tile sums
+	fit the cap, however many tracks the file holds; a group past it keeps
+	none."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	values = numpy.random.default_rng(0).integers(0, 5, (6, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['a'], ['b', 'c'], ['d', 'e',
+		'f']], values)
+	reader = FigWigReader(path)
+	expected = values.reshape(6, 100, 64).sum(axis=2)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['a', 'b', 'c']),
+		expected[:3])
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['c', 'a'], level=1),
+		expected[[2, 0]].reshape(2, 25, 4).sum(axis=2))
+	assert reader.zooms == (4, 16)
+	with pytest.raises(ValueError, match="keeps no summary"):
+		reader.tile_sums(tracks='d')
+	with pytest.raises(ValueError, match="keeps no zoom level 1"):
+		reader.tile_sums(tracks='f', level=1)
+
+
+def test_add_file_and_append_keep_each_groups_summary(tmp_path, monkeypatch):
+	"""Merging and appending past the cap keep every summary the files had,
+	and a file without summaries loses none of the others'."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	rng = numpy.random.default_rng(1)
+	values = rng.integers(0, 5, (5, 6400)).astype(float)
+	expected = values.reshape(5, 100, 64).sum(axis=2)
+	one = _grouped_file(str(tmp_path / 'one.fw'), [['a'], ['b']], values[:2])
+	two = _grouped_file(str(tmp_path / 'two.fw'), [['c'], ['d']], values[2:4])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 0)
+	bare = _grouped_file(str(tmp_path / 'bare.fw'), [['e']], values[4:])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+
+	merged = str(tmp_path / 'merged.fw')
+	with FigWigWriter(merged, {'chr1': 6400}, [], tile=64, zooms=2) as writer:
+		for path in (one, two, bare):
+			writer.add_file(path)
+	reader = FigWigReader(merged)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['a', 'b', 'c',
+		'd']), expected[:4])
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['d', 'a'], level=2),
+		numpy.add.reduceat(expected[[3, 0]], numpy.arange(0, 100, 16), axis=1))
+	with pytest.raises(ValueError, match="keeps no summary"):
+		reader.tile_sums(tracks='e')
+
+	with FigWigWriter(one, None, ['late'], append=True) as writer:
+		writer.write('chr1', [0], values[None, 2:3])
+	numpy.testing.assert_array_equal(FigWigReader(one).tile_sums(), expected[[0,
+		1, 2]])
+
+
 def test_verify_checks_every_chunk(tmp_path):
 	"""A flipped byte in an uncompressed chunk passes an ordinary read and
 	fails one with verify=True; a compressed chunk fails either way."""
