@@ -2609,8 +2609,7 @@ class FigWigWriter:
 	def _entries_task(self, pieces, lengths, slots, positions, values,
 		functions):
 		"""`_entries_tasks` through `_entries_plan` and `_entries_task`, the
-		encoder's buffer between them from numpy, since numpy's large arrays
-		get huge pages where numba's do not, and a go may take 32 MB."""
+		encoder's buffer made between them."""
 
 		at = numpy.zeros(len(pieces) + 1, dtype=numpy.int64)
 		numpy.cumsum(lengths, out=at[1:])

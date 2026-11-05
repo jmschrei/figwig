@@ -133,9 +133,13 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 		by_group.setdefault(int(reader._group_of[i]), []).append(i)
 
 	# A group's tracks are read together and their bigWigs written at once,
-	# each track's on a thread of its own, its pieces in order, so that a
-	# bigWig that takes longer does not hold up the others at every piece,
-	# each writer compressing on its share of the threads.
+	# each writer compressing on its share of the threads. A group of at
+	# most n_jobs tracks writes each track's on a thread of its own, its
+	# pieces in order, up to _AHEAD pieces at once, so that a bigWig that
+	# takes longer does not hold up the others at every piece; a larger
+	# group writes n_jobs at a time, each piece whole before the next is
+	# read, so that a second piece is held only where the group has no more
+	# tracks than threads.
 	# Each bigWig is written beside its name and moved there once complete,
 	# so that a conversion that fails or is killed leaves no half-written
 	# bigWig under a final name.
@@ -143,25 +147,33 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 	reading = ThreadPoolExecutor(1)
 	for g, members in by_group.items():
 		writers, lanes, ahead = {}, {}, collections.deque()
+		pool, threads = None, []
 		try:
+			if n_jobs > 1 and len(members) > n_jobs:
+				pool = ThreadPoolExecutor(n_jobs)
+				threads.append(pool)
 			for i in members:
 				paths[i] = os.path.join(directory, names[i])
 				partials[i] = _temporary_path(paths[i])
 				writers[i] = BigWigWriter(partials[i], chrom_sizes, zooms=zooms,
 					level=level, n_jobs=max(1, n_jobs // len(members)))
-				if n_jobs > 1:
+				if n_jobs > 1 and pool is None:
 					lanes[i] = ThreadPoolExecutor(1)
+					threads.append(lanes[i])
 
 			def write(chrom, starts, values):
-				if not lanes:
+				if pool is not None:
+					list(pool.map(lambda k: writers[members[k]].write(chrom, starts,
+						values[:, k], missing=missing), range(len(members))))
+				elif not lanes:
 					for k, i in enumerate(members):
 						writers[i].write(chrom, starts, values[:, k], missing=missing)
-					return
-				while len(ahead) >= _AHEAD:
-					for written in ahead.popleft():
-						written.result()
-				ahead.append([lanes[i].submit(writers[i].write, chrom, starts, values[:,
-					k], missing=missing) for k, i in enumerate(members)])
+				else:
+					while len(ahead) >= _AHEAD:
+						for written in ahead.popleft():
+							written.result()
+					ahead.append([lanes[i].submit(writers[i].write, chrom, starts,
+						values[:, k], missing=missing) for k, i in enumerate(members)])
 
 			def read(piece):
 				return reader.read(piece[0], piece[1], piece[2], tracks=members,
@@ -195,7 +207,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 				os.replace(partials[i], paths[i])
 		except BaseException as error:
 			reading.shutdown()
-			for lane in lanes.values():
+			for lane in threads:
 				lane.shutdown(cancel_futures=True)
 			for writer in writers.values():
 				writer.__exit__(type(error), error, error.__traceback__)
@@ -206,7 +218,7 @@ def _convert(path, directory, ids, zooms=0, level=6, n_jobs=1, verbose=False,
 					pass
 			raise
 		finally:
-			for lane in lanes.values():
+			for lane in threads:
 				lane.shutdown()
 	reading.shutdown()
 
