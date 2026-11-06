@@ -2967,12 +2967,15 @@ class FigWigWriter:
 			stream = self._summary_stream(g, 0, tiles, sums)
 			return struct.pack('<III', 0, len(stream), zlib.crc32(stream)) + \
 				stream + self._zoom_section(tiles, sums, g)
-		order = numpy.argsort(tiles, kind='stable')
-		tiles, sums = tiles[order], sums[order]
-		first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
-		starts = numpy.flatnonzero(first)
-		sums = numpy.add.reduceat(sums, starts, axis=0)
-		tiles = tiles[starts]
+		# Pieces kept in tile order with no tile twice, as most writes keep
+		# them, are already the sorted and summed rows.
+		if not (tiles[1:] > tiles[:-1]).all():
+			order = numpy.argsort(tiles, kind='stable')
+			tiles, sums = tiles[order], sums[order]
+			first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
+			starts = numpy.flatnonzero(first)
+			sums = numpy.add.reduceat(sums, starts, axis=0)
+			tiles = tiles[starts]
 		stream = self._summary_stream(g, 0, tiles, sums)
 		return struct.pack('<III', len(tiles), len(stream), zlib.crc32(stream)) \
 			+ stream + self._zoom_section(tiles, sums, g)
