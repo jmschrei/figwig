@@ -664,7 +664,7 @@ is the reading of the file's units, the writer's own thread and
 start-up, about 3 s in all, so the whole gains 6.6 times on 8 threads
 and 11 times on 32. The peak is three to four times the 8 bytes per
 fragment end the keys take. Every barcode of the file, 573,156 tracks
-in 18 groups of 32,768, costs five times as long, since each unit of
+in 18 groups of 32,767, costs five times as long, since each unit of
 the file then scans a copy of the barcode table and the barcodes it
 finds are numbered afterwards, for a file 13% larger. On the
 1,001,098-fragment ``large`` file of the called cells, the figwig
