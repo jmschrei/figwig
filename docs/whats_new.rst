@@ -69,6 +69,8 @@ figwig files
 
 	- A writer of many tracks looks each distinct dtype up once and sets its groups up in arrays, where it went through them in Python: a writer of the 90,543 Fiber-seq reads opens in 0.060 s, where it took 0.151 s, and in track order in 0.139 s, where it took 0.362 s. With the changes above, the reads write in track order in 1.21 s on 8 threads, where they took 1.61 s, and in 1.45 s on one, where they took 1.74 s.
 
+	- ``FigWigWriter`` refuses a group of 2**29 values per chunk, tracks times tile, such as 8,192 tracks at a tile of 65,536 or 32,768 at the default tile, and takes one track fewer, where it took it and wrote a file no reader could open once the group's tracks were dense with float64 values: such a chunk takes 2**32 bytes, one more than its u4 size holds. ``figwig bam2fw --barcode-column`` puts at most 32,767 cells in a group at the default tile, where it put 32,768.
+
 Converters and commands
 -----------------------
 

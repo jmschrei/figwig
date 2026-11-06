@@ -83,8 +83,8 @@ extra; Linux and macOS.
 
 `--barcode-column 4` (the column, from 1; 4 in a Cell Ranger fragments
 file) writes a fragments file as one track per cell, named by its barcode,
-every cell of a file in one group, or the fewest groups a chunk's 2**29
-values allow (32,768 cells at the default tile; `--groups N` for smaller
+every cell of a file in one group, or the fewest groups that keep a chunk
+under 2**29 values (32,767 cells at the default tile; `--groups N` for smaller
 ones), no strand. `--cells cells.tsv` (tab-separated or `.csv`, a header, barcodes in
 the first column) keeps only those cells, in that order, with a `name`
 column as track name, `dtype` as dtype and every other column (a cell type)

@@ -605,6 +605,24 @@ def test_groups_as_a_count(tmp_path):
 	numpy.testing.assert_array_equal(reader.read('chr1', [0], 100), 1)
 
 
+def test_a_group_holds_fewer_than_2_29_values_per_chunk(tmp_path):
+	"""A dense chunk of float64 values takes 8 bytes per value, so a chunk's
+	u4 size holds fewer than 2**29 of them: a group of 2**29 / tile tracks,
+	whose dense float64 chunks wrote a file no reader could open, is
+	refused, and one track fewer is taken."""
+
+	path = str(tmp_path / 'g.fw')
+	names = ['t{}'.format(i) for i in range(32768)]
+	with pytest.raises(ValueError, match=r"8192 tracks at a tile of 65536 "
+			r"bases holds 2\*\*29 or more values"):
+		FigWigWriter(path, {'chr1': 10}, names[:8192], tile=65536, groups=8192)
+	with pytest.raises(ValueError, match=r"32768 tracks at a tile of 16384"):
+		FigWigWriter(path, {'chr1': 10}, names, groups=32768)
+	FigWigWriter(path, {'chr1': 10}, names[:8191], tile=65536,
+		groups=8191).close()
+	assert {track['group'] for track in FigWigReader(path).tracks} == {0}
+
+
 def test_write_whole_groups_only(tmp_path):
 	path = str(tmp_path / 'g.fw')
 	writer = FigWigWriter(path, {'chr1': 100}, ['a', 'b', 'c'], groups=[['a',
@@ -840,7 +858,7 @@ def test_writer_arguments(tmp_path):
 		FigWigWriter(path, {'chr1': 10}, ['a'], groups=[['a'], ['a']])
 	with pytest.raises(ValueError, match="every track must be in a group"):
 		FigWigWriter(path, {'chr1': 10}, ['a', 'b'], groups=[['a']])
-	with pytest.raises(ValueError, match="more than 2\\*\\*29 values"):
+	with pytest.raises(ValueError, match="2\\*\\*29 or more values"):
 		FigWigWriter(path, {'chr1': 10}, [str(i) for i in range(8193)],
 			groups=8193, tile=65536)
 	with pytest.raises(ValueError, match="engine must be one of"):

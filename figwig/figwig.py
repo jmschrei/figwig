@@ -143,13 +143,14 @@ _ORDERS = {'positions': 'positions', 'csc': 'positions', 'tracks': 'tracks',
 	'csr': 'tracks'}
 
 # Tiles are a power of two of bases from 16 to 65536, so that a sparse
-# chunk's offsets fit uint16; a group's chunk must fit a uint32 size; and
-# a genome's tiles are capped so that an index stays a few hundred
-# megabytes at most.
+# chunk's offsets fit uint16; a group's chunk must fit a uint32 size, so a
+# group holds fewer than 2**29 values per chunk, whose float64 values take
+# fewer than 2**32 bytes; and a genome's tiles are capped so that an index
+# stays a few hundred megabytes at most.
 _MIN_TILE, _MAX_TILE = 16, 65536
 _DEFAULT_TILE = 16384
 _DEFAULT_GROUPS = 8
-_MAX_GROUP_BASES = 1 << 29
+_MAX_GROUP_BASES = (1 << 29) - 1
 _MAX_TILES = 1 << 26
 _MAX_NAME_BYTES = 65535
 _MAX_CHROM_LENGTH = 2 ** 32 - 1
@@ -1053,7 +1054,7 @@ class FigWigWriter:
 		wide = numpy.flatnonzero(sizes * self.tile > _MAX_GROUP_BASES)
 		if len(wide) > 0:
 			raise ValueError("a group of {} tracks at a tile of {} bases "
-				"holds more than 2**29 values per chunk; use smaller groups "
+				"holds 2**29 or more values per chunk; use smaller groups "
 				"or tiles.".format(int(sizes[wide[0]]), self.tile))
 
 		self._track_ids = {track['name']: i for i, track in enumerate(self.tracks)}
@@ -2012,7 +2013,7 @@ class FigWigWriter:
 			return numpy.lexsort((positions, slots, positions >> shift, group_ids,
 				tids))
 
-		# A group holds at most 2**25 tracks (_MAX_GROUP_BASES at the
+		# A group holds fewer than 2**25 tracks (_MAX_GROUP_BASES at the
 		# smallest tile), so the slot takes 25 bits between the tile and the
 		# offset in it, which together take the chromosome's bits.
 		low = ((positions >> shift) << (shift + 25)) | (slots << shift) | (

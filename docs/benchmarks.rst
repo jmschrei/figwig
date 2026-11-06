@@ -962,7 +962,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - 2.3 / 0.53 / 0.36
      - 5.8 / 6.8
 
-One group of every read is refused, since a chunk holds at most 2**29
+One group of every read is refused, since a chunk holds fewer than 2**29
 values, and a group per read made the sum over 8,192 windows take 230 s,
 each read paying a planning step per group; groups of consecutive reads
 are the layout. A sum over every read runs in bands of windows on the
