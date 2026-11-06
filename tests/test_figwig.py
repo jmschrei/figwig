@@ -4190,6 +4190,8 @@ def test_tile_sums_inflate_each_summary_once(tmp_path, monkeypatch):
 	# Only the check that the file is the one opened reads it again.
 	header = figwig.figwig._HEADER.itemsize
 	assert set(reads[n:]) == {header}
+	assert {t.dtype for t, _ in reader._sums_cache.values()} == {numpy.dtype(
+		numpy.uint32)}
 
 	again = pickle.loads(pickle.dumps(reader))
 	numpy.testing.assert_array_equal(again.tile_sums(tracks='a'), expected[0])

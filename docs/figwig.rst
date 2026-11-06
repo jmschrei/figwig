@@ -324,7 +324,7 @@ bases NaN keeps the statistics of its covered ones. Each group keeps its
 sums while its tracks' take at most 256 MB together, about 350 tracks on
 hg38 at the default tile, however many tracks the file holds; a group of
 thousands of cells keeps none, and ``tile_sums`` says so. A reader keeps
-the sums it has inflated, up to 256 MB, for its next call.
+the sums it has inflated, up to 1 GB, for its next call.
 
 A file written with ``zooms=k`` also keeps ``k`` zoom levels, level ``j``
 the sum of each track over bins of ``4**j`` tiles, in float64, which

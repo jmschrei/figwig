@@ -240,7 +240,7 @@ _SUMMARY_SPILL_BYTES = 1 << 30
 _SpilledSums = collections.namedtuple('_SpilledSums', 'offset n tracks')
 # A reader keeps the tile sums it has inflated, the least recently read
 # dropped first, up to this many bytes.
-_SUMMARY_CACHE_BYTES = 1 << 28
+_SUMMARY_CACHE_BYTES = 1 << 30
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
@@ -4443,10 +4443,10 @@ class FigWigReader:
 		return at + 12, n_sum, n_bytes, crc
 
 	def _tile_sums_of(self, g, cache=True):
-		"""Group g's summary, as (file tiles, sums of shape (tiles, tracks)
-		float32), or None when the file keeps none for it. With `cache` the
-		inflated arrays, read-only, are kept for the next call and shared
-		with it, up to _SUMMARY_CACHE_BYTES over every group."""
+		"""Group g's summary, as (file tiles uint32, sums of shape (tiles,
+		tracks) float32), or None when the file keeps none for it. With
+		`cache` the inflated arrays, read-only, are kept for the next call
+		and shared with it, up to _SUMMARY_CACHE_BYTES over every group."""
 
 		with self._sums_lock:
 			kept = self._sums_cache.get(g)
@@ -4470,7 +4470,7 @@ class FigWigReader:
 			raise ValueError(error + ": its summary does not match its checksum; "
 				"the file is corrupt.")
 		raw = _inflate_stream(stream, n_sum * (4 + 4 * n_tracks), error)
-		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.int64)
+		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.uint32)
 		if n_sum > 0 and (tiles.max() >= self._n_tiles or (tiles[1:] <= tiles[
 				:-1]).any()):
 			raise ValueError(error + ": its summary is out of order.")
@@ -4742,7 +4742,7 @@ class FigWigReader:
 		genome-wide plot, a per-chromosome total or a coarser binning by a
 		reshape; it stands in for a bigWig's zoom levels. A group keeps the
 		sums when its tracks' take at most 256 MB together, and the reader
-		keeps those it inflates, up to 256 MB, for later calls.
+		keeps those it inflates, up to 1 GB, for later calls.
 
 		When the file keeps a regional summary index, selected chromosomes
 		use its bounded pages and restart fragments automatically. Broad
