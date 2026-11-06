@@ -70,14 +70,14 @@ whole group, so a count track beside a float track is stored as floats.
 | Tracks | Layout | Why |
 |---|---|---|
 | count tracks (the default case) | tile 16,384, groups of 8, or one group of all | a sparse chunk's other tracks are stepped over cheaply, so one group of 48 reads 8 of them faster than 48 groups of 1 |
-| dense float signal read in short windows (conservation, fold change, p-value) | the defaults; `tile=1024, groups=1` (`bw2fw -t 1024 --groups 1`) only for one-thread reads | at the defaults three chr22 conservation tracks read 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads; the small tile reads a third faster on one thread for a file a quarter larger and is slower from 8 threads on |
+| dense float signal read in short windows (conservation, fold change, p-value) | the defaults, or `tile=1024, groups=1` (`bw2fw -t 1024 --groups 1`) for the fastest short windows | at the defaults three chr22 conservation tracks read 1.6 to 3.3x faster than their bigWigs on 1 to 32 threads; the small tile reads short windows 1.4 to 1.7x faster on 1 to 32 threads, for a file 29% larger and a whole chromosome read more slowly on 1 and 8 threads |
 | cells | one group of all cells, `level=0` for the fastest reads or compressed for half the size | tiles with few cells present are matrix chunks either way; cut sites whose values are all 1 store no values |
-| reads (Fiber-seq), one track per read and channel | position order, groups of about 1,000 consecutive reads sorted by start, per channel | a chunk holds fewer than 2**29 values (tracks × tile), so one group of every read is refused, and a group per read is hundreds of times slower. Position order beats track order for a sum over every read by about 2x on 8 threads and 3x on 32, and is no faster on one |
+| reads (Fiber-seq), one track per read and channel | position order, groups of about 1,000 consecutive reads sorted by start, per channel | a chunk holds fewer than 2**29 values (tracks × tile), so one group of every read is refused, and a group per read is about a thousand times slower. Position order beats track order for a sum over every read by about 1.6x on 8 threads and 2.3x on 32, and by little on one |
 | a few tracks read over whole chromosomes (`read_entries`) | `order='tracks'` (`'csr'`), raw unless `level` is given | each track's nonzero bases in blocks per chromosome; a window read over thousands of such tracks decodes a block per track and is slow |
 
 A read may also be its own "chromosome" of its length with one track per
 channel, the genome coordinates in the attributes. Thousands of single-track
-groups cost a group's index each (17 bytes per tile of the genome in
+groups cost a group's index each (21 bytes per tile of the genome in
 memory): use one group, or track order. `figwig reorder` rewrites a file in
 the other order, or at another tile or groups. `level=0` stores every chunk
 raw, the fastest to read, at 4 bytes per base of a dense float track;
@@ -108,7 +108,7 @@ with FigWigWriter("pbmc.fw", chrom_sizes, tracks, groups=len(tracks), level=0) a
   of one track: fragment files give two cut sites per fragment and cells
   repeat positions, so sum duplicates (`numpy.unique` on the key, then
   `bincount`) before writing.
-- A call takes about 90 bytes of memory per entry, so write a chromosome
+- A call takes about 60 bytes of memory per entry, so write a chromosome
   at a time. Entries come after the group's earlier items on that
   chromosome, and in position order seal the tile they end in: the windows
   and entries of one tile must come in one call.

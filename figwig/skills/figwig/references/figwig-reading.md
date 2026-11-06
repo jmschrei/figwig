@@ -103,8 +103,8 @@ unless the file was written so.
 
 Never read thousands of cells densely (64 windows × 2,114 bp × 10,000
 cells is 1.4 GB of zeros): ask for `labels=` or `sparse=True`. A sparse
-read costs about 40 bytes of memory per entry, so it is for tracks that are
-mostly zero. `sums(..., paired=True)` takes one track per interval and sums
+read costs about 40 bytes of memory per entry besides the 25 of the returned
+arrays, so it is for tracks that are mostly zero. `sums(..., paired=True)` takes one track per interval and sums
 interval `i` over `tracks[i]` alone, for reads whose spans are their own
 tracks; a sum of every read over every interval is quadratic. For per-cell
 slices over the genome (`read_entries`), the file wants track order

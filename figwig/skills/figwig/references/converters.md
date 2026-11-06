@@ -91,7 +91,7 @@ column as track name, `dtype` as dtype and every other column (a cell type)
 as an attribute; a raw 10x file holds hundreds of thousands of non-cell
 barcodes, so pass the called cells. Fragments of unlisted barcodes are left
 out (`-v` counts them). Use `-f` to count both ends, as for any fragments
-file. Memory is 8 bytes per fragment end during the scan and about three
+file. Memory is 8 bytes per fragment end during the scan and four to six
 times that at the peak. Several files give `<name>.<barcode>` tracks, a
 group per file.
 
@@ -101,7 +101,7 @@ group per file.
   `tracks`/`csr` or `positions`/`csc`. `-t` and `--groups` default to the
   input's (16,384 and 8 from track order); `-l` to the input's from
   position order to position order, else 6 in position order and 0 in
-  track order, so a reordering to track order is raw and 3 to 4x larger
+  track order, so a reordering to track order is raw and 1.6 to 4.7x larger
   unless `-l` is given. The output
   may be the input itself.
 - `merge` copies chunks, no decoding, from files written with the same

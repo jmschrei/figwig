@@ -161,8 +161,8 @@ Speed
 
 On a 2.4 GB ATAC-seq BAM, ``figwig bam2bw`` took 4.65 s at ``-p 2``, against
 bam2bw 0.5.1's 58.48 s, and held 910 MB at its peak, against 3,039 MB.
-``-p`` is 1 unless given; on that BAM the time fell to 1.74 s at ``-p 8``, and
-no further at ``-p 16`` or ``-p 32``. On a collection of 591 public test
+``-p`` is 1 unless given; on that BAM the time fell to 1.74 s at ``-p 8`` and
+1.54 s at ``-p 16``, and was 1.82 s at ``-p 32``. On a collection of 591 public test
 files, in the runs where bam2bw took a second or more, ``figwig bam2bw`` was a
 median 3.2 times faster, and it gave the same exit code, messages and decoded
 entries in all 3,781 runs that bam2bw completed. :doc:`benchmarks` has the

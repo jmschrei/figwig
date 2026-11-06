@@ -111,7 +111,7 @@ the pinned buffer as ``out`` is the shorter path.
 
 A ``FigWigReader`` reads the file's tables and metadata when it is opened,
 and each group's index on the first read that touches it, after which the
-index is kept, 17 bytes per tile of the genome per group. A read uses one
+index is kept, 21 bytes per tile of the genome per group. A read uses one
 thread per 64 chunks it touches, up to ``n_jobs``, and no more than its
 bytes keep busy (:doc:`threads`), and keeps its threads between reads, so
 a read of 64 windows runs on the calling thread and a read of 8,192 on 8.
@@ -224,9 +224,9 @@ window and its value, sorted by row, channel and offset; ``shape`` is what
 the dense array would have been, and ``scipy.sparse.coo_array((values,
 (rows * width + offsets, channels)), shape=(n * width, channels))`` or
 ``torch.sparse_coo_tensor`` take the arrays as they are. A sparse read
-takes about 40 bytes of memory per entry while it sorts them, so it is for
-tracks that are mostly zero, not for dense ones, whose dense read is
-smaller. ``labels`` gives one integer per track read, from 0, with -1
+takes about 40 bytes of memory per entry while it sorts them, besides the
+25 of the returned arrays, so it is for tracks that are mostly zero, not for
+dense ones, whose dense read is smaller. ``labels`` gives one integer per track read, from 0, with -1
 leaving a track out, and the sums come back as float64 where a track is
 an integer type, since counts sum past float32's 2**24 in a few windows,
 and as float32 for float32 tracks, unless ``dtype`` says otherwise; a sum asked
@@ -287,11 +287,11 @@ mean over covered bases is one over the other:
 side by side on the threads in position order where the tracks are
 integers, for a reads dimension where each read's span is its own track;
 without it, a sum of every track over every interval is quadratic in the
-reads. It costs about 0.03 ms per interval on one thread on 90,543
-Fiber-seq reads, and 0.02 ms on 32. An analysis of count tracks ported
-from those tools gives other means for regions with uncovered bases unless
-the file was written so. ``sums`` takes any number
-of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
+reads. It costs about 0.009 ms per interval on one thread on 90,543
+Fiber-seq reads in position order, and 0.002 ms on 32. An analysis of count
+tracks ported from those tools gives other means for regions with uncovered
+bases unless the file was written so. ``sums`` takes any number of tracks:
+over 3,000 cells, 58,705 peaks take a quarter of a second on 8 threads, the
 same as a sparse read's sums; a chunk that fewer than four windows fall
 on, or a read of more tracks than a scratch tile holds (256 MiB), is binned
 straight from its entries, and a float32 sum is taken in float64.
@@ -469,11 +469,12 @@ cells read as pseudobulks wants every cell in one group, and a file read a
 few tracks at a time wants track order. The defaults, a tile of 16,384
 and groups of 8, suit count tracks, whose chunks are mostly zero, and
 read dense float tracks in short windows, such as conservation,
-fold-change or p-value signal, 1.6 to 3.2 times faster than their bigWigs
-on 1 to 32 threads; ``tile=1024`` and ``groups=1`` read them a third
-faster on one thread for a file a quarter larger, and slower from 8
-threads on (:doc:`benchmarks`). A ``write`` call covers whole groups.
-``write_figwig`` writes one call's worth to a new file:
+fold-change or p-value signal, 1.6 to 3.3 times faster than their bigWigs
+on 1 to 32 threads; ``tile=1024`` and ``groups=1`` read those windows 1.4
+to 1.7 times faster on 1 to 32 threads, for a file 29% larger and a whole
+chromosome read more slowly on 1 and 8 threads (:doc:`benchmarks`). A
+``write`` call covers whole groups. ``write_figwig`` writes one call's worth
+to a new file:
 
 .. code-block:: python
 
@@ -585,7 +586,7 @@ The groups of the tracks named are written over the tiles the entries fall
 in, with every other base 0, and no two entries may name one base of one
 track. Entries come after a group's earlier items on a chromosome, and in
 position order they seal the tile they end in, so that the windows and
-nonzero bases of one tile come in one call. A call takes about 90 bytes of
+nonzero bases of one tile come in one call. A call takes about 60 bytes of
 memory per entry besides the arrays given, so a genome's entries are best
 written a chromosome at a time, as above.
 
@@ -645,12 +646,12 @@ than 2**29 values (tracks times tile), which rules out one group of every
 read, and a group per read costs a planning step per group on every read.
 On the m6A calls of 90,543 Fiber-seq reads in groups of 1,024 (position
 order, tile 16,384, 62 MB), summing every read over 8,192 windows of
-2,048 bases took 0.22 s on one thread and listing the calls in 1,024
+2,048 bases took 0.21 s on one thread and listing the calls in 1,024
 windows 0.14 s, against 3.8 s and 3.5 s at best from a scipy CSR matrix
-per chromosome held in memory, and 15.7 s and 7.1 s from the same file in
+per chromosome held in memory, and 0.24 s and 0.22 s from the same file in
 track order;
 ``sums(..., paired=True)`` gives each read's total over its own span,
-2.7 s for the 90,543 reads against 5.8 s from the matrix
+0.80 s for the 90,543 reads against 5.8 s from the matrix
 (:doc:`benchmarks`). A read may also be its own "chromosome", of its
 length, with one track per channel, which gives (reads, channels, length)
 in one call, with the genome coordinates kept in the file's attributes.
@@ -696,7 +697,7 @@ track's unaligned bases, loses that distinction through ``bw2fw`` unless
 track as float32. The tile sums, and the zoom levels a file is written
 with, stand in for a bigWig's zoom levels down to the tile's resolution:
 a summary at 1 Mb bins is a reshape of them, and a summary finer than a
-tile decodes the chunks under it, through ``bins``, which took 0.09 s for
+tile decodes the chunks under it, through ``bins``, which took 0.05 s for
 100 bp bins over chr22 where pyBigWig's ``stats`` took 9.8 s
 (:doc:`benchmarks`); a genome browser needs the tracks written back with
 ``fw2bw -z``. Every value is at
@@ -725,7 +726,7 @@ an offset, so a file appended to in place keeps its old tables and index
 as unused bytes between its chunks.
 
 The position-order index on disk holds the tiles with values, so a group
-with little data costs a few bytes; in memory a group's index is 17 bytes
-per tile of the genome, 3.2 MB for hg38 at the default tile, kept from a
+with little data costs a few bytes; in memory a group's index is 21 bytes
+per tile of the genome, 4.0 MB for hg38 at the default tile, kept from a
 group's first read on, so a file of thousands of groups read all at once
 holds thousands of those, and wants larger groups or track order.

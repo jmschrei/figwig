@@ -19,7 +19,7 @@ stable, and the last section measures the numbers where they matter.
   two; on a read of several groups each thread takes the next batch as it
   ends one. Gains end near 8 threads for sparse
   reads and continue to 32 for dense float tracks, which read at the
-  defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. `sums`
+  defaults 1.6 to 3.3x faster than their bigWigs on 1 to 32 threads. `sums`
   run every group at once; `paired=True` over integer tracks and short
   intervals is one read, and otherwise sums its batches of integer tracks
   side by side in position order; `labels=` over several groups of integer
@@ -64,8 +64,9 @@ stable, and the last section measures the numbers where they matter.
 
 - A dense output is `n × channels × width × itemsize`: 8,192 windows × 48
   tracks × 2,048 bases is 3.2 GB as float32. `out=` reuses one array.
-- A sparse figwig read costs about 40 bytes per entry while sorting; a
-  `write_sparse` call about 90 bytes per entry (write a chromosome at a time).
+- A sparse figwig read costs about 40 bytes per entry while sorting, besides
+  the 25 of the returned arrays; a `write_sparse` call about 60 bytes per
+  entry (write a chromosome at a time).
 - A bigWig write's working memory does not grow with the size of a call.
 - Threads multiply across processes: 8 workers at `n_jobs=8` is 64
   threads. Keep processes × `n_jobs` within the free cores, and set

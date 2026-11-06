@@ -54,9 +54,9 @@ groups after its tracks; its chromosomes, tile and level are kept, and
 that the file does not have is left out with a warning. The defaults
 suit count tracks, which read fastest in one group of many; for dense
 float tracks read in short windows, such as conservation or fold-change
-signal, ``-t 1024 --groups 1`` reads a third faster on one thread for a
-file a quarter larger, and the default is faster from 8 threads on
-(:doc:`benchmarks`).
+signal, ``-t 1024 --groups 1`` reads short windows 1.4 to 1.7 times faster
+on 1 to 32 threads, for a file 29% larger and a whole chromosome read more
+slowly on 1 and 8 threads (:doc:`benchmarks`).
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -176,7 +176,7 @@ so ``--cells`` with the called cells is the usual call. The file is read
 in BGZF units on the ``-p`` threads, as ``figwig bam2bw`` reads it, and
 each cell's fragment ends (``-f``, the usual choice; ``-ps`` and ``-ns``
 shift them) go in as entries, holding 8 bytes per end while the file is
-scanned and about three times that at the peak. With several files each file's cells are its own group, named
+scanned and four to six times that at the peak. With several files each file's cells are its own group, named
 ``<name>.<barcode>``, with the file's attributes from ``-m`` and the
 cell's from ``--cells``. :doc:`benchmarks` times the conversion against
 the other ways of making a per-cell file.
@@ -210,7 +210,7 @@ input's when it is in position order and to 16,384 and 8 otherwise; ``-l``
 sets the compression level, which defaults to the input's when the output
 is in the input's order, and otherwise to 6 in position order and 0 in
 track order, so a file reordered to track order is uncompressed, and
-three to four times larger, unless ``-l`` says otherwise. The output has a
+1.6 to 4.7 times larger, unless ``-l`` says otherwise. The output has a
 regional summary index when the header of the input announces one, unless
 ``--no-summary-index`` says otherwise, and ``--summary-index`` writes one for
 an input that has none. The output may

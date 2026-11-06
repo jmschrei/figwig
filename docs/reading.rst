@@ -232,8 +232,8 @@ list of readers and call ``read_bigwig`` with it.
 
 When every window fits in memory, reading all of them once is faster still,
 and ``torch.from_numpy`` wraps the result without a copy: 88,971 windows of
-1,000 bp from both bigWigs above (712 MB) took 0.27 s on 8 threads, where an
-epoch read by 4 workers, one batch of 64 at a time, took about 1.7 s.
+1,000 bp from both bigWigs above (712 MB) took 0.20 s on 8 threads, where an
+epoch read by 4 workers, one batch of 64 at a time, took about 1.2 s.
 
 What it reads, and what it refuses
 ----------------------------------
@@ -290,7 +290,7 @@ is installed (``pip install figwig[isal]``, which needs python-isal 1.8 or
 later; the ``bam2bw`` extra installs ``isal`` too, from version 1.0), and by
 zlib otherwise. ``engine='zlib'`` or ``engine='isal'`` on ``read`` and
 ``read_bigwig`` chooses one. Both give the same values, and ISA-L reads 1.3 to
-1.5 times faster on 1 to 8 threads (:doc:`benchmarks`).
+1.6 times faster on 1 to 8 threads (:doc:`benchmarks`).
 
 figwig calls ISA-L through two functions that python-isal's extension module
 exports, from numba and without the GIL, so no compiler is needed. The

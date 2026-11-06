@@ -1735,7 +1735,7 @@ class FigWigWriter:
 		after each track's last base. No two entries may name one base of one
 		track. A call that raises writes nothing.
 
-		One call takes about 90 bytes of memory per entry besides the arrays
+		One call takes about 60 bytes of memory per entry besides the arrays
 		given, so a genome's entries are best written a chromosome at a
 		time.
 
