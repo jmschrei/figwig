@@ -51,7 +51,8 @@ def _parser(prog):
 		"compression level of the bigWigs. Default is 6.")
 	parser.add_argument('--missing', default=None, type=float, help="The value "
 		"left out of the bigWigs: 0, or nan for a figwig file written with "
-		"bw2fw --missing nan, whose zeros are then written. Default is 0.")
+		"bw2fw --missing nan, whose zeros are then written. Default is the "
+		"file's missing attribute, which bw2fw records, and otherwise 0.")
 	parser.add_argument('-f', '--force', action='store_true', help="Write "
 		"over bigWigs that exist in the output directory; without it an "
 		"existing one is refused.")

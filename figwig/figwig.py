@@ -878,7 +878,7 @@ class FigWigWriter:
 	header are written at `close`, so that a file grows by a track at a
 	time at the cost of the new chunks alone. Each group keeps its tracks'
 	sums over every tile, for `FigWigReader.tile_sums`, as long as the
-	group's sums take at most 256 MB, the writer holding those past 1 GB in
+	group's sums take at most 256 MiB, the writer holding those past 1 GiB in
 	a temporary file beside `path` until `close`; and the file keeps a
 	CRC-32 of every chunk, which `FigWigReader(path, verify=True)` checks.
 
@@ -957,11 +957,12 @@ class FigWigWriter:
 		Default is False.
 
 	zooms: int or None, optional
-		The number of zoom levels to keep beside the tile sums: level k holds
+		The number of zoom levels to keep beside the tile sums, from 0 to
+		12: level k holds
 		each track's sum over bins of 4**k tiles, in float64, which
 		`FigWigReader.tile_sums(level=k)` returns without decoding a chunk,
 		for coarse genome-wide profiles. A group keeps its levels while it
-		keeps its tile sums (its tracks x tiles x 4 bytes at most 256 MB).
+		keeps its tile sums (its tracks x tiles x 4 bytes at most 256 MiB).
 		None is the file's with `append=True` and 0 otherwise. Default is
 		None.
 
@@ -1261,8 +1262,8 @@ class FigWigWriter:
 		The file must have been written with this writer's chromosomes,
 		tile, compression level and order, and its track names must not be
 		this writer's. Its tracks come after those written so far, in their
-		own groups, with their attributes, dtypes and statistics, and cannot
-		be written to here. Only its chunks are copied, so a file grown by
+		own groups, with their attributes, dtypes, statistics and tile sums,
+		and cannot be written to here. Only its chunks are copied, so a file grown by
 		`append=True` loses the tables and indexes it left behind.
 
 		Parameters
@@ -4777,8 +4778,8 @@ class FigWigReader:
 			summary = None if len(levels) < level else levels[level - 1][1:]
 		if summary is None:
 			raise ValueError("{} keeps no {} of the group of {!r}; it was "
-				"written with more tracks, in the group or the file, than the "
-				"summaries hold{}.".format(
+				"written with more tracks in the group than the summaries "
+				"hold{}.".format(
 				self.path, "summary" if level == 0 else "zoom level {}".format(
 				level), self.tracks[int(self._groups[g][0])]['name'], "" if level
 				== 0 else ", or with fewer zoom levels"))
@@ -4850,8 +4851,9 @@ class FigWigReader:
 		(16,384 bases unless the file was written with another tile), for a
 		genome-wide plot, a per-chromosome total or a coarser binning by a
 		reshape; it stands in for a bigWig's zoom levels. A group keeps the
-		sums when its tracks' take at most 256 MB together, and the reader
-		keeps those it inflates, up to 1 GB, for later calls.
+		sums when its tracks' take at most 256 MiB together, and the reader
+		keeps those it inflates, up to 1 GiB, for later calls. A track whose
+		group keeps no sums, or no zoom level `level`, raises a ValueError.
 
 		When the file keeps a regional summary index, selected chromosomes
 		use its bounded pages and restart fragments automatically. Broad
@@ -5018,8 +5020,9 @@ class FigWigReader:
 			The type of the output. None is the tracks' own dtype when they
 			share one, and otherwise the narrowest type that holds every one
 			of them exactly, which is float64 for a float32 track read with
-			an int32 or uint32 one; sums per label or bin are float32, or
-			float64 where that would round a track. An integer type that
+			an int32 or uint32 one; sums per label or bin are float64 when
+			any track read is an integer track, and otherwise float32, or
+			float64 for a float64 track. An integer type that
 			cannot hold a track's values, or a sum, raises. Default is None.
 
 		n_jobs: int, optional
@@ -5160,8 +5163,9 @@ class FigWigReader:
 			The tracks, as `read` takes them. Default is None, every track.
 
 		dtype: optional
-			The type of the sums, as `read` takes it with `bins`: the tracks'
-			own type, or one that holds their sums. Default is None.
+			The type of the sums, as `read` takes it with `bins`: float64 when
+			any track is an integer track, and otherwise float32, or float64
+			for a float64 track. Default is None.
 
 		n_jobs: int, optional
 			The threads, as `read` takes it. Default is 8.
@@ -7389,6 +7393,10 @@ def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,
 
 	order: str, optional
 		'positions' or 'tracks'; see `FigWigWriter`. Default is 'positions'.
+
+	zooms: int, optional
+		The number of zoom levels to keep beside the tile sums; see
+		`FigWigWriter`. Default is 0.
 
 	summary_index: bool, optional
 		Write the regional summary index; see `FigWigWriter`.

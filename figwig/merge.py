@@ -31,7 +31,8 @@ def _parser(prog):
 	parser.add_argument('-o', '--output', required=True, help="The figwig file "
 		"to write, which may be one of the inputs.")
 	parser.add_argument('-g', '--genome', default=None, help="The reference "
-		"genome to record. Default is the first file's.")
+		"genome to record. Default is the genome the files name; files that "
+		"name different genomes are refused.")
 	parser.add_argument('-f', '--force', action='store_true', help="Write "
 		"over a figwig file at the output other than one of the inputs, which "
 		"is refused without it.")

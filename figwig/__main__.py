@@ -44,8 +44,8 @@ def _parser():
 	commands.add_parser('merge', help="Write the tracks of several figwig "
 		"files into one, copying their chunks; see figwig merge -h.")
 	commands.add_parser('info', help="Print what a figwig file holds: its "
-		"genome, order, tile, chromosomes, size and a table of its tracks; see "
-		"figwig info -h.")
+		"genome, order, tile, level, chromosomes, size and a table of its "
+		"tracks; see figwig info -h.")
 
 	install = commands.add_parser('install-skill', help="Install figwig's "
 		"Claude Code skill into a skills directory.", description="Copy "
