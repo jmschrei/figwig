@@ -26,9 +26,9 @@ machine allows (`references/threads-and-memory.md`).
 
 1. `chrom_sizes = BigWigReader(input).chrom_sizes` (name order) or a dict
    in the order you will write.
-2. `write_bigwig` makes one file per call, so open one `BigWigWriter` per
-   output channel once (`zooms=10` only if a browser will draw them) and
-   loop over `writer.chrom_sizes`, tiling each chromosome with
+2. `write_bigwig` takes every window in one call, so for a genome in
+   batches open one `BigWigWriter` per output channel once (`zooms=10`
+   only if a browser will draw them) and loop over `writer.chrom_sizes`, tiling each chromosome with
    non-overlapping windows; average overlapping predictions first, and set
    the values past a chromosome's end to NaN.
 3. `writer.write(chrom, starts, y_hat[:, i])` per channel, batches of

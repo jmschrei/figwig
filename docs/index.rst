@@ -31,6 +31,10 @@ convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs           4.65 s and 910 M
 These were measured on a 2x AMD EPYC 9575F; :doc:`benchmarks` has the
 setup, every comparison, and how the times fall with threads.
 
+The reading example uses two public ENCODE bigWigs, ENCFF830RWF (238 MB) and
+ENCFF989SAK (645 MB), which download from
+``https://www.encodeproject.org/files/<accession>/@@download/<accession>.bigWig``.
+
 .. code-block:: python
 
     import numpy

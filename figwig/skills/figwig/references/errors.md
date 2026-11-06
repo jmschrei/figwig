@@ -69,6 +69,7 @@ writes nothing; writers stay usable.
 | `came from another file, whose tracks cannot be written to` | `write` to a track `append` or `add_file` copied in |
 | `falls in tile N of 'chr1', which the group of 'x' holds from the file it came from` | `write_sparse` to a tile a copied-in group already holds → put those entries in a new file, or write the file again with them |
 | `is being appended to by another writer` | two `append=True` writers → wait for the first to close |
+| `FigWigWriter(...) was never closed, and its values were not written.` (a `ResourceWarning`; the path is left as it was) | a `write` without `close` or a `with` block → use `with` |
 | `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
 | `none of the chromosomes of x.bw is in the sizes file: it has chr1, chr2, ... and the sizes have 1, 2, ...` | `bw2fw -s` with another assembly's sizes, or names without `chr` → a sizes file naming the bigWig's chromosomes |
 | `figwig bam2fw: file does not contain alignment data`, `no BGZF EOF marker; file may be truncated` (pysam's words, passed on), `x.bam is not a file.` | the input is not a BAM, is cut short, or the path is wrong |
@@ -80,7 +81,7 @@ writes nothing; writers stay usable.
 | `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | |
 | `ends must hold one end per start`, `an interval's end is before its start`, `paired=True needs one track per interval` | `sums` arguments |
 | `has no attribute 'read'`, `has no track with channel=...`, `are both channel=... of read=...` | `channels=`/`items=`: a track without the attribute, a missing item × channel, or two tracks for one |
-| `keeps no summary of the group of`, `keeps no zoom level k of the group of` | the group's tile sums passed 256 MB (in a file from figwig 0.2.0 or earlier, the whole file's); the file was written without `zooms=k` (`reader.zooms`) |
+| `keeps no summary of the group of`, `keeps no zoom level k of the group of` | the group's tile sums passed 256 MiB (in a file from figwig 0.2.0 or earlier, the whole file's); the file was written without `zooms=k` (`reader.zooms`) |
 | `has been replaced or rewritten since this reader opened it`, `has been truncated` | a conversion or a closed append changed the file → open the reader again |
 | `it is version ... of the format, and this figwig reads version 1`, `needs a feature this figwig does not know (bits ...)`, `its flags hold a bit this figwig does not know` | a newer figwig wrote it → upgrade |
 | `... does not match its checksum` (tables, index, header, or a chunk with `verify=True`), `cannot be read as a figwig file`, `a chunk of ... cannot be read`, `is not a regular file` | damaged, truncated, crafted, or not a file; always `ValueError` |

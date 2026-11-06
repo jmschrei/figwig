@@ -19,8 +19,8 @@ import numpy
 from figwig import FigWigWriter
 
 chrom_sizes = {"chr1": 248956422, "chr2": 242193529}
-tracks = [{"name": "atac.+", "assay": "ATAC-seq", "strand": "+"},
-	{"name": "atac.-", "assay": "ATAC-seq", "strand": "-"}]
+tracks = [{"name": "atac.+", "assay": "ATAC-seq", "biosample": "K562", "strand": "+"},
+	{"name": "atac.-", "assay": "ATAC-seq", "biosample": "K562", "strand": "-"}]
 chroms = numpy.array(["chr1", "chr1", "chr2"])
 starts = numpy.array([1000, 5000, 2000])
 y_hat = numpy.random.rand(3, 2, 2114).astype("float32")  # (n, tracks, width)

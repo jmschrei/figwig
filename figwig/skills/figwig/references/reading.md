@@ -32,7 +32,7 @@ print(y.shape)
   is float64 and raises `TypeError`, so `.astype("int64")` it.
 - A window starting before 0 raises: clip summit-centred windows with
   `numpy.maximum(summits - width // 2, 0)`. Past the end of a chromosome is
-  allowed; those bases are NaN.
+  allowed; those bases are `oob`, NaN unless given.
 - One `width` per call. Regions of several lengths: read at the longest and
   mask, or one call per width. One call per region throws away the speed.
 
@@ -138,7 +138,7 @@ def read(path, chroms, starts, width):
 			start in zip(chroms, starts)], dtype=numpy.float32)
 ```
 
-pybigtools sums overlapping intervals and panics on a bigBed with an
-exception that is not an `Exception`, so check the magic first where a path
+pybigtools sums overlapping intervals, and on a bigBed panics with an
+exception that is not an `Exception` or returns zeros, so check the magic first where a path
 may be either. A missing file or a URL raises `FileNotFoundError`, which
 this does not catch.

@@ -80,7 +80,7 @@ chromosome is NaN in a float output and 0 in an integer one.
 
 The output's dtype is the tracks' own when they share one, and otherwise
 the narrowest type that holds every one of them exactly: float32 for a
-uint8 or int16 track read with a float32 one, float64 for a uint32 or int32
+uint8, int16 or uint16 track read with a float32 one, float64 for a uint32 or int32
 track read with a float32 one. ``dtype=`` asks for another, and raises for
 an integer type that cannot hold a track's values. ``out=`` fills an array
 rather than allocating one, such as a numpy view of a pinned torch tensor:
@@ -217,7 +217,7 @@ into one channel, which turns cells into pseudobulks in the read itself:
     labels = numpy.array([types.index(track["cell_type"]) for track in fw.tracks])
     y = fw.read(chroms, starts, width=2114, labels=labels)
     print(y.shape, y.dtype)
-    # (64, 7, 2114) float32
+    # (64, 7, 2114) float64
 
 An entry is a window's row, the track's channel, the base's offset in the
 window and its value, sorted by row, channel and offset; ``shape`` is what
@@ -243,7 +243,7 @@ window's total per track, which a count loss takes:
 
     y = fw.read(chroms, starts, width=196_608, bins=128)
     print(y.shape, y.dtype)
-    # (64, 6, 1536) float32
+    # (64, 6, 1536) float64
     counts = fw.read(chroms, starts, width=2114, bins=2114)[:, :, 0]
 
 ``bins`` is a width in bases, where pyBigWig's ``nBins`` is a count, and
@@ -293,7 +293,7 @@ from those tools gives other means for regions with uncovered bases unless
 the file was written so. ``sums`` takes any number
 of tracks: over 3,000 cells, 58,705 peaks take a second on 8 threads, the
 same as a sparse read's sums; a chunk that fewer than four windows fall
-on, or a read of more tracks than a scratch tile holds (256 MB), is binned
+on, or a read of more tracks than a scratch tile holds (256 MiB), is binned
 straight from its entries, and a float32 sum is taken in float64.
 
 ``read_entries(tracks, chroms)`` gives every nonzero base of some tracks
@@ -321,10 +321,10 @@ tile)`` and a chromosome of length ``L`` has ``ceil(L / tile)`` tiles. A
 NaN base is left out of its tile's sum, as it is left out of the track's
 sum and its count of nonzero bases, so a file written with its uncovered
 bases NaN keeps the statistics of its covered ones. Each group keeps its
-sums while its tracks' take at most 256 MB together, about 350 tracks on
+sums while its tracks' take at most 256 MiB together, about 350 tracks on
 hg38 at the default tile, however many tracks the file holds; a group of
 thousands of cells keeps none, and ``tile_sums`` says so. A reader keeps
-the sums it has inflated, up to 1 GB, for its next call.
+the sums it has inflated, up to 1 GiB, for its next call.
 
 A file written with ``zooms=k`` also keeps ``k`` zoom levels, level ``j``
 the sum of each track over bins of ``4**j`` tiles, in float64, which
@@ -499,8 +499,8 @@ sum in the statistics table is a compensated float64, which splits may move
 in its last bits.
 
 The writer writes beside the path it was given, with the mode the umask
-gives a new file, and moves the file there when it closes, so a reader of that path never sees part of a file, a
-writer that raises or is never closed leaves the path as it was, and a
+gives a new file, and moves the file there when it closes, so a reader of
+that path never sees part of a file, a writer that raises or is never closed leaves the path as it was, and a
 converter may write over its own input. A writer that is garbage collected
 with values written and no ``close`` warns. Every chunk's CRC-32 goes into
 the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
@@ -549,10 +549,12 @@ into a new path drops.
 ``add_file`` adds every track of another file written with the same
 chromosomes, tile, level and order, by copying its chunks, with its
 attributes, dtypes, statistics and summaries; ``figwig merge`` does that
-from the command line. ``write`` cannot write to tracks that came from a
-file, and with ``tracks=None`` means every track given to the writer
-itself; ``write_sparse`` adds entries to them only in tiles their group
-does not hold, and in track order only after each track's last base.
+from the command line. The zoom levels of the new file are the writer's own
+``zooms``, 0 by default, where ``figwig merge`` keeps the first file's count.
+``write`` cannot write to tracks that came from a file, and with
+``tracks=None`` means every track given to the writer itself;
+``write_sparse`` adds entries to them only in tiles their group does not
+hold, and in track order only after each track's last base.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------

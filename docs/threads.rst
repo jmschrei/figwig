@@ -2,11 +2,12 @@ Threads, memory and the first call
 ==================================
 
 figwig's speed comes from threads that run in parallel: zlib's
-``uncompress()`` and ``compress2()``, libdeflate and figwig's numba kernels
-all run without Python's GIL. This page says how each part uses its threads,
-how much they gain, and what memory they take. The measurements are from the
-thread sweep on :doc:`benchmarks`, on a 2x AMD EPYC 9575F; the gains on
-another machine will differ, and ``benchmarks/compare_readers.py`` and
+``uncompress()`` and ``compress2()``, libdeflate, ISA-L's inflate and
+figwig's numba kernels all run without Python's GIL. This page says how each
+part uses its threads, how much they gain, and what memory they take. The
+measurements are from the thread sweep on :doc:`benchmarks`, on a 2x AMD EPYC
+9575F; the gains on another machine will differ, and
+``benchmarks/compare_readers.py`` and
 ``benchmarks/compare_writers.py`` in the repository measure them.
 
 Reading

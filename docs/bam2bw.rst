@@ -4,7 +4,9 @@ figwig bam2bw
 ``figwig bam2bw`` turns SAM/BAM files of reads, or BED/tsv files of fragments,
 into bigWigs of per-base counts. It is `bam2bw
 <https://github.com/jmschrei/bam2bw>`_ 0.5.1 with the same arguments, the same
-output files and the same messages, except that ``-p`` is a number of cores.
+output files and the same messages, except that ``-p`` is a number of cores,
+``-c`` is new, and a BAM whose header disagrees with the sizes is reported
+first (below).
 It reads files the way the winner of a speed search over bam2bw's code reads
 them, and writes them with :class:`~figwig.BigWigWriter`. It runs on Linux
 and macOS, since pysam does not support Windows, and needs the ``bam2bw``

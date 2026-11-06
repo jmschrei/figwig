@@ -7,9 +7,9 @@
 A fast, multithreaded reader and writer of bigWig and figwig files, into and out of
 numpy. Also contains a formal specification of the figwig file format, which holds
 any number of per-base tracks over one genome with a JSON record of attributes for
-each, and reads windows from any subset of them in one call, into 
-`(windows, tracks, width)`. `figwig bw2fw` `fw2bw`, and `bam2fw` convert bigWigs
-and reads to and from a figwig file. 
+each, and reads windows from any subset of them in one call, into
+`(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and `bam2fw` convert bigWigs
+and reads to and from a figwig file.
 
 Built on work from Nezar Abdennur and Jack Huey.
 
@@ -25,8 +25,8 @@ GIL, so its threads run in parallel. It depends only on numpy and numba.
 
 Its command, `figwig bam2bw`, turns SAM/BAM files of reads, or BED/tsv files
 of fragments, into bigWigs of per-base counts. It is
-[bam2bw](https://github.com/jmschrei/bam2bw) with the same arguments, outputs
-and messages, with faster readers.
+[bam2bw](https://github.com/jmschrei/bam2bw) with faster readers, the same
+outputs, and `-c` added.
 
 | | figwig | fastest other tool |
 |---|---|---|
@@ -330,15 +330,15 @@ from figwig import FigWigWriter
 
 chrom_sizes = {"chr1": 248_956_422, "chr2": 242_193_529}
 tracks = [
-    {"name": "atac.+", "assay": "ATAC-seq", "strand": "+"},
-    {"name": "atac.-", "assay": "ATAC-seq", "strand": "-"},
+	{"name": "atac.+", "assay": "ATAC-seq", "strand": "+"},
+	{"name": "atac.-", "assay": "ATAC-seq", "strand": "-"},
 ]
 counts = numpy.random.default_rng(0).poisson(0.1, (3, 2, 2114))
 chroms = numpy.array(["chr2", "chr1", "chr1"])
 starts = numpy.array([300_000, 2_500_000, 1_000_000])
 
 with FigWigWriter("example.fw", chrom_sizes, tracks, genome="hg38") as fw:
-    fw.write(chroms, starts, counts)
+	fw.write(chroms, starts, counts)
 
 fw = FigWigReader("example.fw")
 y = fw.read(chroms, starts, width=2114, tracks=fw.select(strand="+"))
@@ -354,9 +354,9 @@ list with `sparse=True`, the tracks summed per label with `labels=`, or
 each window summed per bin with `bins=`; `sums` gives each track's total
 over intervals of any lengths, such as peaks or genes, or over thousands
 of cells at once; `tile_sums` gives each track's sum per tile, or per bin
-of a zoom level, without decoding a chunk; and `device="cuda"` lands any
-of these in GPU memory, where `torch.from_dlpack` takes them without a
-copy. A base no track wrote is 0, as is a bigWig's no-data unless
+of a zoom level, without decoding a chunk; and `device="cuda"` lands the
+output of `read` and `sums` in GPU memory, where `torch.from_dlpack` takes it
+without a copy. A base no track wrote is 0, as is a bigWig's no-data unless
 `bw2fw --missing nan` keeps them apart.
 
 A file is written in position order, tiles across tracks, for reading
@@ -372,8 +372,8 @@ shell. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
 guide covers the format, its layout, the API, the converters and the first
 read's compile time: the first read of each kind in a new environment
 compiles its kernels, 4 to 22 s each with nothing printed meanwhile, and
-numba caches them beside the package, so on a cluster whose install is
-read-only set `NUMBA_CACHE_DIR` to a writable directory.
+numba caches them beside the package, or in the user's cache directory when
+the package directory is read-only, and `NUMBA_CACHE_DIR` chooses another.
 
 The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
 and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides
@@ -392,7 +392,8 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 8  # tes
 ```
 
 `figwig bam2bw` is bam2bw 0.5.1 with the same arguments, output files and
-messages, except that `-p` is a number of cores, 1 unless given. By default
+messages, except that `-p` is a number of cores, 1 unless given, `-c` is new,
+and a BAM whose header disagrees with the sizes is reported on stderr first. By default
 it counts the 5' end of every mapped read at each base, and writes the counts
 of the two strands to two bigWigs; `-u` writes one, `-f` counts both ends of
 each fragment, `-3p` the 3' ends, `-c` every aligned base of each read (the

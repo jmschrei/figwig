@@ -167,9 +167,9 @@ at libdeflate's level 1, into files 3% larger than pyBigWig's.
 at levels 1 to 3, but at levels 1 and 2 its output can differ from one run to the next on the same input, so
 its files are not reproducible byte for byte; their values are.
 
-Blocks are compressed on up to ``n_jobs`` threads, besides the calling
-thread, which lays out the next batch of about a million items meanwhile.
-:doc:`threads` shows how the time falls with threads.
+With ``n_jobs`` above 1, blocks are compressed on ``n_jobs`` threads while
+another thread lays out the next batch of items; with 1, the calling thread
+does all of it. :doc:`threads` shows how the time falls with threads.
 
 Files identical to pyBigWig's
 -----------------------------

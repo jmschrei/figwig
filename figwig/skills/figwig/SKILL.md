@@ -34,7 +34,7 @@ say.
 |---|---|
 | a bigBed or a big-endian bigWig | pybigtools or pyBigWig; figwig raises `ValueError` |
 | a bigWig at a URL | download it first; figwig takes a URL for a path and raises `FileNotFoundError` |
-| a bigWig's zoom-level summaries (`stats()`, a whole-chromosome mean) | pyBigWig or pybigtools; figwig reads every base. A figwig file's `tile_sums` serves this |
+| a bigWig's zoom-level summaries (`stats()`, a whole-chromosome mean) | pyBigWig or pybigtools; figwig reads every base. A figwig file's `tile_sums` serves this, for each group whose tile sums take at most 256 MiB (`references/figwig-reading.md`) |
 | a bigWig whose intervals overlap | pybigtools, which sums them; figwig raises |
 | a genome browser track from a figwig file | `figwig fw2bw -z 10`; browsers do not read `.fw` |
 
@@ -48,8 +48,10 @@ say.
   tracks' own dtype.
 - bigWigs have `missing` (0.0 by default; pyBigWig gives NaN): a base no
   interval covers reads as it, and a write leaves out bases whose value is
-  it or NaN. A figwig file has no `missing`: a base never written is 0.
-- A base past the end of its chromosome is NaN in a float output of a bigWig read unless `oob=` is given.
+  it or NaN. A figwig file has no `missing` argument: a base never written
+  is 0, unless `bw2fw --missing nan` stored it as NaN.
+- A base past the end of its chromosome is NaN in a float output, unless a
+  bigWig read is given `oob=`, and 0 in an integer figwig output.
 - `n_jobs=8` by default on every reader and writer, `-1` for every CPU;
   `-p` on the commands defaults to 1.
 - Anything figwig cannot read exactly raises `ValueError` with the cause.
@@ -79,7 +81,7 @@ say.
 
 | You see… | Read |
 |---|---|
-| any `ValueError`, `TypeError` or `UserWarning` from figwig, or a command's message | `references/errors.md` |
+| any `ValueError`, `TypeError`, `UserWarning` or `ResourceWarning` from figwig, or a command's message | `references/errors.md` |
 | "is not a bigWig file" on a file figwig wrote | `references/errors.md`: it was never closed |
 | 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
 | `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |

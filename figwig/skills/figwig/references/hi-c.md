@@ -61,9 +61,10 @@ def write_contacts(path, names, n_bins, bin1, bin2, count, tile=256, group=1024)
 ## Reading
 
 ```python
+import numpy
 from figwig import FigWigReader
 
-fw = FigWigReader(path)
+fw = FigWigReader(path)                              # path, names, n_bins: as written above
 offsets = numpy.concatenate([[0], numpy.cumsum(n_bins)])
 n = int(offsets[-1])                                 # 'diagonal' is track n
 c, s, k = 0, 10, 20                                  # chromosome, first bin, bins

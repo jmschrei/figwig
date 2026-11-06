@@ -20,15 +20,15 @@ from figwig import FigWigReader
 from figwig import is_figwig
 from figwig import BigWigReader
 
-reader = FigWigReader if is_figwig(path) else BigWigReader
+reader = FigWigReader if is_figwig("k562.fw") else BigWigReader
 ```
 
 ```python
 import numpy
 from figwig import FigWigReader
 
-fw = FigWigReader("k562.fw")
-tracks = fw.select(assay="ATAC-seq", biosample="K562")   # [0 1]: both strands; without biosample= the unstranded track too
+fw = FigWigReader("k562.fw")   # the file of references/figwig-writing.md, or one from bw2fw
+tracks = fw.select(assay="ATAC-seq", biosample="K562")   # [0 1]: both strands
 chroms = numpy.array(["chr1", "chr1", "chr2"])            # one per window, from a peak table
 starts = numpy.array([1_000_000, 2_500_000, 300_000])
 y = fw.read(chroms, starts, width=2114, tracks=tracks, dtype="float32")
@@ -48,7 +48,7 @@ totals = fw.sums(chroms, starts, starts + [900, 2114, 410], tracks=tracks)  # pe
 | `labels=` one int per track read, -1 skips | `(n, labels, width)` sums: pseudobulks in the read |
 | `bins=` a divisor of `width` | `(n, tracks, width // bins)` sums; `bins=width` is each window's total |
 | `sums(chroms, starts, ends)` | `(n, tracks)` totals over intervals of any lengths |
-| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64 |
+| `tile_sums(tracks, chroms, level=0)` | `(tracks, tiles)` float32 sums per tile, no decoding; `level=k` the zoom level `zooms=` wrote, `(tracks, bins of 4**k tiles)` float64. A group keeps its sums while they take at most 256 MiB; the reader keeps those it inflates, up to 1 GiB, for later calls |
 | `read_entries(tracks, chroms)` | every nonzero base of tracks over chromosomes, `SparseEntries` |
 | `channels="channel", items="read"` on `read`, `bins=` and `sums` | `(n, items, channels, width)`, the tracks arranged by two attributes, each item needing every channel once |
 
