@@ -23,6 +23,7 @@ from figwig.figwig import _HEADER
 from . import format_reference as spec
 from .format_fixtures import TILE
 from .format_fixtures import write_all
+from .format_fixtures import write_mixed
 from .summary_reference import read_index
 
 
@@ -312,3 +313,46 @@ def _zoom_stream_at(file, g):
 	at = _summary_stream_at(file, g)
 	n_sum, n_bytes = struct.unpack_from('<II', file.bytes, at - 12)
 	return at + n_bytes + 4 + 16
+
+
+def test_summary_presence_is_read_from_the_record_sizes(files):
+	"""Whether a group keeps a summary, read from its record's sizes alone,
+	is what reading its record says, in every fixture."""
+
+	for name, path in files.items():
+		reader = FigWigReader(path)
+		cheap = [reader._has_summary(g) for g in range(len(reader._groups))]
+		assert cheap == [reader._tile_sums_of(g, cache=False) is not None for g in
+			range(len(reader._groups))], name
+		assert cheap == [reader._has_summary(g) for g in range(len(
+			reader._groups))], name
+
+
+def test_files_with_some_summaries_follow_the_specification(tmp_path):
+	"""In files where some groups keep no summary, the specification's reader
+	finds what FigWigReader finds, a group without a summary has no zoom
+	levels, and every summary is the tile sums of its tracks."""
+
+	paths = write_mixed(tmp_path)
+	for name, path in paths.items():
+		test_reference_reader_agrees_with_figwig({name: path}, name)
+		file = spec.File(path)
+		kept = [group.summary is not None for group in file.groups]
+		assert any(kept) and not all(kept), name
+		dense = list(file.dense().values())
+		tile = file.header.tile
+		for g, group in enumerate(file.groups):
+			if group.summary is None:
+				assert not group.zooms
+				continue
+			members = file.group_tracks[g]
+			expected = numpy.zeros((file.n_tiles, len(members)), dtype=numpy.float32)
+			for tid, length in enumerate(file.chrom_sizes.values()):
+				for local in range(-(-length // tile)):
+					block = dense[tid][members, local * tile:(local + 1) * tile]
+					expected[int(file.tile_offsets[tid]) + local] = numpy.where(
+						numpy.isnan(block), 0.0, block).sum(axis=1)
+			tiles, sums = group.summary
+			listed = numpy.zeros_like(expected)
+			listed[tiles] = sums
+			assert numpy.array_equal(listed, expected), (name, g)

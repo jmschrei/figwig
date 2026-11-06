@@ -231,9 +231,16 @@ _GATHER_ROW_BYTES = 1
 _SPARSE_KEYS = 1 << 63
 _ENTRIES_PAIRS = 1 << 20
 
-# A file keeps each track's sum over every tile, for summaries without a
-# read of the chunks, when those sums take at most this many bytes.
+# A group keeps each of its tracks' sum over every tile, for summaries
+# without a read of the chunks, when those sums take at most this many bytes.
 _SUMMARY_BYTES = 1 << 28
+# The writer holds the groups' tile sums in memory up to this many bytes and
+# spills them to a temporary file beyond it.
+_SUMMARY_SPILL_BYTES = 1 << 30
+_SpilledSums = collections.namedtuple('_SpilledSums', 'offset n tracks')
+# A reader keeps the tile sums it has inflated, the least recently read
+# dropped first, up to this many bytes.
+_SUMMARY_CACHE_BYTES = 1 << 30
 _PAIRED_TRACKS = 16  # distinct tracks per read of paired sums
 _INTERVAL_BYTES = 1 << 21  # an interval encoding task's buffer, at least
 _POOL_BYTES = 1 << 20  # chunk bytes of a read of one task per group for the pool
@@ -867,10 +874,11 @@ class FigWigWriter:
 	tracks to the file at `path` itself, in place: its chunks stay where
 	they are, the new ones go after its end, and new tables, index and
 	header are written at `close`, so that a file grows by a track at a
-	time at the cost of the new chunks alone. The file keeps each track's sum over every tile, for
-	`FigWigReader.tile_sums`, as long as those sums take at most 256 MB,
-	and a CRC-32 of every chunk, which `FigWigReader(path, verify=True)`
-	checks.
+	time at the cost of the new chunks alone. Each group keeps its tracks'
+	sums over every tile, for `FigWigReader.tile_sums`, as long as the
+	group's sums take at most 256 MB, the writer holding those past 1 GB in
+	a temporary file beside `path` until `close`; and the file keeps a
+	CRC-32 of every chunk, which `FigWigReader(path, verify=True)` checks.
 
 	Parameters
 	----------
@@ -948,9 +956,10 @@ class FigWigWriter:
 		The number of zoom levels to keep beside the tile sums: level k holds
 		each track's sum over bins of 4**k tiles, in float64, which
 		`FigWigReader.tile_sums(level=k)` returns without decoding a chunk,
-		for coarse genome-wide profiles. Levels are kept while the tile sums
-		are (tracks x tiles x 4 bytes at most 256 MB). None is the file's
-		with `append=True` and 0 otherwise. Default is None.
+		for coarse genome-wide profiles. A group keeps its levels while it
+		keeps its tile sums (its tracks x tiles x 4 bytes at most 256 MB).
+		None is the file's with `append=True` and 0 otherwise. Default is
+		None.
 
 	summary_index: bool, optional
 		Write the optional regional summary index, which lets a reader that
@@ -978,6 +987,7 @@ class FigWigWriter:
 		self._index_builder = None
 		self._pool = None
 		self._spool = None
+		self._sums_file = None
 		self._partial = None
 		self._length = None
 		self._times = None
@@ -1087,6 +1097,8 @@ class FigWigWriter:
 		self._runs = [[] for _ in range(n_groups)]
 		self._blocks = [[] for _ in range(n_groups)]
 		self._sums = [[] for _ in range(n_groups)]
+		self._sums_held = 0
+		self._sums_lock = threading.Lock()
 		self._pending = [None] * n_groups
 		self._buffers = [None] * n_groups
 		self._item_types = [None] * n_groups
@@ -1104,7 +1116,8 @@ class FigWigWriter:
 		self._block_entries = 0
 		self._copies = True
 		self._sorted_entries = False
-		self._summaries = len(self.tracks) * self._n_tiles * 4 <= _SUMMARY_BYTES
+		self._keeps = [len(group) * self._n_tiles * 4 <= _SUMMARY_BYTES for group
+			in self._groups]
 		self.zooms = _check_zooms(0 if zooms is None else zooms)
 		self._zoom_grids = [_zoom_grid(self._lengths, self.tile, 4 ** (k + 1))
 			for k in range(self.zooms)]
@@ -1195,6 +1208,9 @@ class FigWigWriter:
 			except OSError:
 				pass
 			self._partial = None
+		if self._sums_file is not None:
+			self._sums_file.close()
+			self._sums_file = None
 
 	def _select(self, tracks):
 		"""The tracks a call names, as (track ids in channel order, whether a
@@ -1332,7 +1348,7 @@ class FigWigWriter:
 				runs.append([[int(r['first']), int(r['last']), int(at[k]), int(r[
 					'bytes'])] for k, r in enumerate(found)])
 				blocks.append([])
-			summary = source._tile_sums_of(g)
+			summary = source._tile_sums_of(g, cache=False)
 			sums.append([] if summary is None else [summary])
 
 		def splice(own, new):
@@ -1355,14 +1371,16 @@ class FigWigWriter:
 		self._runs = splice(self._runs, runs)
 		self._blocks = splice(self._blocks, blocks)
 		self._sums = splice(self._sums, sums)
+		self._keeps = splice(self._keeps, [bool(sums[k]) for k in range(n_groups)])
+		with self._sums_lock:
+			self._sums_held += sum(tiles.nbytes + values.nbytes for pieces in sums for
+				tiles, values in pieces)
+			self._spill_sums()
 		for name in ('_pending', '_buffers', '_open', '_sealed', '_last',
 				'_item_types'):
 			setattr(self, name, splice(getattr(self, name), [None] * n_groups))
 		self._done = splice(self._done, [set() for _ in range(n_groups)])
 		self._adopted |= set(range(base_group, base_group + n_groups))
-		if any(not sums[k] for k in range(n_groups)) or len(self.tracks) * \
-				self._n_tiles * 4 > _SUMMARY_BYTES:
-			self._summaries = False
 
 	def _copy_chunks(self, source):
 		"""Copy every chunk of `source` into the file, each stretch of
@@ -2548,10 +2566,11 @@ class FigWigWriter:
 		sums_at = numpy.concatenate([[0], numpy.cumsum(per_piece * piece_tracks)])
 		stats = numpy.zeros((int(class_at[-1]), 6), dtype=numpy.float64)
 		stats[:, 2], stats[:, 3] = numpy.inf, -numpy.inf
-		# Each tile's sums are kept only for a file that keeps summaries: a
+		# Each tile's sums are kept only for groups that keep summaries: a
 		# (tiles, tracks) array per piece of thousands of cells or bins is
 		# otherwise only touched pages.
-		tile_sums = numpy.zeros(int(sums_at[-1]) if self._summaries else 0,
+		keeps = self._keeps_any(pieces)
+		tile_sums = numpy.zeros(int(sums_at[-1]) if keeps else 0,
 			dtype=numpy.float32)
 		tids = numpy.array([piece[1] for piece in pieces], dtype=numpy.int64)
 		file_tiles = self._tile_offsets[numpy.repeat(tids, per_piece)] + tiles
@@ -2601,9 +2620,9 @@ class FigWigWriter:
 			lives.append(records[lo:hi])
 			totals.append(int(byte_at[hi] - byte_at[lo]))
 			a, b = int(piece_tiles[p]), int(piece_tiles[p + 1])
-			summaries.append(self._summary_of(piece[1], tiles[a:b], tile_sums[
-				sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p]))) if
-				self._summaries else None)
+			summaries.append(self._summary_of(piece[0], piece[1], tiles[a:b],
+				tile_sums[sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[
+				p]))) if keeps else None)
 		return compressed[:int(byte_at[-1])], lives, totals, stats, summaries
 
 	def _entries_task(self, pieces, lengths, slots, positions, values,
@@ -2624,7 +2643,8 @@ class FigWigWriter:
 		(stream, used, sizes, raw, kinds, where, crcs, live_at, stats, tile_sums,
 			status) = _entries_task(functions, self.level, self.tile, piece_tracks,
 			first, piece_tiles, tiles, file_tiles, need_after, room, classes, slots,
-			positions, values, self._summaries, self._matrix, _ENTRIES_GO_BYTES, out)
+			positions, values, self._keeps_any(pieces), self._matrix,
+			_ENTRIES_GO_BYTES, out)
 		if status == -2:
 			raise MemoryError("libdeflate could not allocate a compressor.")
 		if status == -3:
@@ -2646,13 +2666,14 @@ class FigWigWriter:
 		totals = [byte_at[live_at[p + 1]] - byte_at[live_at[p]] for p in range(
 			len(pieces))]
 		summaries = [None] * len(pieces)
-		if self._summaries:
+		if self._keeps_any(pieces):
 			sums_at = numpy.concatenate([[0], numpy.cumsum(numpy.diff(piece_tiles) *
 				piece_tracks)])
 			for p, piece in enumerate(pieces):
 				a, b = int(piece_tiles[p]), int(piece_tiles[p + 1])
-				summaries[p] = self._summary_of(piece[1], tiles[a:b], tile_sums[
-					sums_at[p]:sums_at[p + 1]].reshape(b - a, int(piece_tracks[p])))
+				summaries[p] = self._summary_of(piece[0], piece[1], tiles[a:b],
+					tile_sums[sums_at[p]:sums_at[p + 1]].reshape(b - a, int(
+					piece_tracks[p])))
 		return stream[:used], lives, totals, stats, summaries
 
 	def _encode_dense(self, g, tid, values, items, columns, tiles, dtype):
@@ -2709,7 +2730,7 @@ class FigWigWriter:
 			parts.append(self._compress(tid, tiles[t:], done, out, bounds,
 				kinds))
 			t += done
-		return _gather_parts(parts) + (stats, self._summary_of(tid, tiles,
+		return _gather_parts(parts) + (stats, self._summary_of(g, tid, tiles,
 			tile_sums))
 
 	def _encode(self, g, tid, tiles, lo, hi, items, keep_last, continued=True):
@@ -2781,7 +2802,7 @@ class FigWigWriter:
 			parts.append(self._compress(tid, tiles[t:], done, out, bounds, kinds))
 			t += done
 		return _gather_parts(parts) + (stats, exact, folded, self._summary_of(
-			tid, tiles, exact.astype(numpy.float32)), sizes)
+			g, tid, tiles, exact.astype(numpy.float32)), sizes)
 
 	def _encode_here(self, g, tid, tiles, lo, hi, items, keep_last, batch=None):
 		"""Run the encoder on a batch of tiles of one group and chromosome,
@@ -2861,15 +2882,70 @@ class FigWigWriter:
 			return
 		self._stats[self._groups[g]] = stats
 		self._check_overflow(self._groups[g])
-		summary = self._summary_of(tid, tiles[:expected], tile_sums[:expected])
+		summary = self._summary_of(g, tid, tiles[:expected], tile_sums[:expected])
 		if summary is not None:
+			self._keep_sum(g, summary)
+
+	def _keep_sum(self, g, summary):
+		"""Add a piece of group g's summary, (file tiles, sums of shape (tiles,
+		tracks) float32), to those its record will hold."""
+
+		with self._sums_lock:
 			self._sums[g].append(summary)
+			self._sums_held += summary[0].nbytes + summary[1].nbytes
+			self._spill_sums()
 
-	def _summary_of(self, tid, tiles, tile_sums):
-		"""The file tiles of these tiles and their tracks' sums, for the
-		summaries, or None when the file keeps none."""
+	def _spill_sums(self):
+		"""Write every piece of summary held in memory to the temporary file,
+		in place of which each group's list keeps its offset, once the pieces
+		pass _SUMMARY_SPILL_BYTES. The caller holds _sums_lock."""
 
-		if not self._summaries:
+		if self._sums_held <= _SUMMARY_SPILL_BYTES:
+			return
+		if self._sums_file is None:
+			self._sums_file = tempfile.TemporaryFile(dir=os.path.dirname(
+				os.path.abspath(self.path)))
+		at = self._sums_file.seek(0, os.SEEK_END)
+		for pieces in self._sums:
+			for i, piece in enumerate(pieces):
+				if isinstance(piece, _SpilledSums):
+					continue
+				tiles, sums = piece
+				raw = tiles.astype('<u4').tobytes() + numpy.ascontiguousarray(sums,
+					dtype='<f4').tobytes()
+				self._sums_file.write(raw)
+				pieces[i] = _SpilledSums(at, len(tiles), sums.shape[1])
+				at += len(raw)
+		self._sums_file.flush()
+		self._sums_held = 0
+
+	def _sums_of(self, g):
+		"""Group g's pieces of summary in the order they were kept, those
+		spilled read back from the temporary file."""
+
+		pieces = []
+		for piece in self._sums[g]:
+			if isinstance(piece, _SpilledSums):
+				size = 4 * piece.n * (1 + piece.tracks)
+				raw = _pread(self._sums_file.fileno(), size, piece.offset)
+				if len(raw) != size:
+					raise OSError("the temporary file of tile sums was cut short.")
+				piece = (numpy.frombuffer(raw[:4 * piece.n], dtype='<u4').astype(
+					numpy.int64), numpy.frombuffer(raw[4 * piece.n:], dtype='<f4')
+					.reshape(piece.n, piece.tracks))
+			pieces.append(piece)
+		return pieces
+
+	def _keeps_any(self, pieces):
+		"""Whether any piece's group, its first field, keeps a summary."""
+
+		return any(self._keeps[piece[0]] for piece in pieces)
+
+	def _summary_of(self, g, tid, tiles, tile_sums):
+		"""The file tiles of these tiles and their tracks' sums, for group
+		g's summary, or None when the group keeps none."""
+
+		if not self._keeps[g]:
 			return None
 		live = numpy.flatnonzero(tile_sums.any(axis=1))
 		return self._tile_offsets[tid] + tiles[live], tile_sums[live]
@@ -2879,23 +2955,27 @@ class FigWigWriter:
 		sum and each track's sum over them, deflated, with the stream's
 		CRC-32, or an empty record."""
 
-		if not self._summaries:
+		if not self._keeps[g]:
 			return struct.pack('<III', 0, 0, 0) + struct.pack('<I', 0)
 		n_tracks = len(self._groups[g])
-		tiles = numpy.concatenate([t for t, _ in self._sums[g]] + [numpy.zeros(0,
+		pieces = self._sums_of(g)
+		tiles = numpy.concatenate([t for t, _ in pieces] + [numpy.zeros(0,
 			dtype=numpy.int64)])
-		sums = numpy.concatenate([v for _, v in self._sums[g]] + [numpy.zeros((0,
+		sums = numpy.concatenate([v for _, v in pieces] + [numpy.zeros((0,
 			n_tracks), dtype=numpy.float32)]).astype(numpy.float64)
 		if len(tiles) == 0:
 			stream = self._summary_stream(g, 0, tiles, sums)
 			return struct.pack('<III', 0, len(stream), zlib.crc32(stream)) + \
 				stream + self._zoom_section(tiles, sums, g)
-		order = numpy.argsort(tiles, kind='stable')
-		tiles, sums = tiles[order], sums[order]
-		first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
-		starts = numpy.flatnonzero(first)
-		sums = numpy.add.reduceat(sums, starts, axis=0)
-		tiles = tiles[starts]
+		# Pieces kept in tile order with no tile twice, as most writes keep
+		# them, are already the sorted and summed rows.
+		if not (tiles[1:] > tiles[:-1]).all():
+			order = numpy.argsort(tiles, kind='stable')
+			tiles, sums = tiles[order], sums[order]
+			first = numpy.concatenate([[True], tiles[1:] != tiles[:-1]])
+			starts = numpy.flatnonzero(first)
+			sums = numpy.add.reduceat(sums, starts, axis=0)
+			tiles = tiles[starts]
 		stream = self._summary_stream(g, 0, tiles, sums)
 		return struct.pack('<III', len(tiles), len(stream), zlib.crc32(stream)) \
 			+ stream + self._zoom_section(tiles, sums, g)
@@ -3177,7 +3257,7 @@ class FigWigWriter:
 		records['crc'] = _crcs(compressed, numpy.concatenate([[0], ends]))
 
 		summaries = [None] * len(jobs)
-		if self._summaries:
+		if any(self._keeps[job[0]] for job in jobs):
 			# NaN bases are no part of the sums, as in position order.
 			tiles = numpy.empty(len(positions), dtype=numpy.int64)
 			sums = numpy.empty(len(positions), dtype=numpy.float64)
@@ -3186,8 +3266,9 @@ class FigWigWriter:
 				found)
 			for j, job in enumerate(jobs):
 				a = cuts[j]
-				summaries[j] = (self._tile_offsets[job[1]] + tiles[a:a + found[j]],
-					sums[a:a + found[j]].astype(numpy.float32)[:, None])
+				if self._keeps[job[0]]:
+					summaries[j] = (self._tile_offsets[job[1]] + tiles[a:a + found[j]],
+						sums[a:a + found[j]].astype(numpy.float32)[:, None])
 		# A copy, as the compressor's buffer holds about the blocks' raw bytes
 		# until the writing thread takes the task.
 		total = int(ends[-1]) if n else 0
@@ -3225,7 +3306,7 @@ class FigWigWriter:
 			for piece in batch.pieces:
 				if isinstance(piece, tuple):
 					tiles, stats, exact, folded, size = piece
-					summary = self._summary_of(batch.tid, tiles, exact.astype(
+					summary = self._summary_of(batch.g, batch.tid, tiles, exact.astype(
 						numpy.float32))
 				else:
 					stats, exact, folded, summary, size = piece.result()[6:]
@@ -3235,7 +3316,7 @@ class FigWigWriter:
 						"range; declare the track float64 to keep it.".format(
 						self.tracks[int(flagged)]['name']))
 				if summary is not None:
-					self._sums[batch.g].append(summary)
+					self._keep_sum(batch.g, summary)
 				sizes.append(size)
 				live.append(folded)
 			if batch.entries:
@@ -3333,7 +3414,7 @@ class FigWigWriter:
 				self.tracks[int(flagged)]['name']))
 		for g, live, total, summary in zip(groups, lives, totals, summaries):
 			if summary is not None:
-				self._sums[g].append(summary)
+				self._keep_sum(g, summary)
 			if len(live) == 0:
 				continue
 			self._live[g].append(live)
@@ -3364,7 +3445,7 @@ class FigWigWriter:
 		at = 0
 		for t, n, summary in zip(tracks, blocks.tolist(), summaries):
 			if summary is not None:
-				self._sums[t].append(summary)
+				self._keep_sum(t, summary)
 			if n:
 				self._blocks[t].append(records[at:at + n])
 				at += n
@@ -3386,7 +3467,7 @@ class FigWigWriter:
 					"range; declare the track float64 to keep it.".format(
 					self.tracks[int(flagged)]['name']))
 			if summary is not None:
-				self._sums[g].append(summary)
+				self._keep_sum(g, summary)
 
 		compressed, sizes, raw, kinds, where, crcs = result[:6]
 		if len(where) == 0:
@@ -3437,7 +3518,7 @@ class FigWigWriter:
 				if track['dtype'] is None:
 					track['dtype'] = _INFERRED[code]
 
-			if self.summary_index and self._summaries:
+			if self.summary_index and all(self._keeps):
 				self._index_builder = _SummaryIndex([len(g) for g in self._groups],
 					[self._n_tiles] + [grid[1] for grid in self._zoom_grids])
 
@@ -4034,6 +4115,10 @@ class FigWigReader:
 		self._summary_at = [None] * n_groups
 		self._zoom_levels = [None] * n_groups
 		self._zoom_factors = None
+		self._first_summary = None
+		self._sums_cache = collections.OrderedDict()
+		self._sums_cached = 0
+		self._sums_lock = threading.Lock()
 		self._regional = None
 		self._runs = [None] * n_groups
 		self._index_lock = threading.Lock()
@@ -4073,6 +4158,9 @@ class FigWigReader:
 	def __getstate__(self):
 		state = self.__dict__.copy()
 		del state['_index_lock']
+		del state['_sums_lock']
+		state['_sums_cache'] = collections.OrderedDict()
+		state['_sums_cached'] = 0
 		state['_index'] = [None] * len(self._index)
 		state['_summary_at'] = [None] * len(self._index)
 		state['_zoom_levels'] = [None] * len(self._index)
@@ -4085,6 +4173,7 @@ class FigWigReader:
 	def __setstate__(self, state):
 		self.__dict__.update(state)
 		self._index_lock = threading.Lock()
+		self._sums_lock = threading.Lock()
 
 	def _check_file(self):
 		"""Raise if the file at the path is no longer the one that was
@@ -4353,10 +4442,17 @@ class FigWigReader:
 			raise ValueError(error + ": the file ends inside it.")
 		return at + 12, n_sum, n_bytes, crc
 
-	def _tile_sums_of(self, g):
-		"""Group g's summary, as (file tiles, sums of shape (tiles, tracks)
-		float32), or None when the file keeps none for it."""
+	def _tile_sums_of(self, g, cache=True):
+		"""Group g's summary, as (file tiles uint32, sums of shape (tiles,
+		tracks) float32), or None when the file keeps none for it. With
+		`cache` the inflated arrays, read-only, are kept for the next call
+		and shared with it, up to _SUMMARY_CACHE_BYTES over every group."""
 
+		with self._sums_lock:
+			kept = self._sums_cache.get(g)
+			if kept is not None:
+				self._sums_cache.move_to_end(g)
+				return kept
 		self._group_index(g)
 		at, n_sum, n_bytes, crc = self._summary_at[g]
 		if n_bytes == 0:
@@ -4374,23 +4470,74 @@ class FigWigReader:
 			raise ValueError(error + ": its summary does not match its checksum; "
 				"the file is corrupt.")
 		raw = _inflate_stream(stream, n_sum * (4 + 4 * n_tracks), error)
-		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.int64)
+		tiles = numpy.frombuffer(raw[:4 * n_sum], dtype='<u4').astype(numpy.uint32)
 		if n_sum > 0 and (tiles.max() >= self._n_tiles or (tiles[1:] <= tiles[
 				:-1]).any()):
 			raise ValueError(error + ": its summary is out of order.")
 		sums = numpy.frombuffer(raw[4 * n_sum:], dtype='<f4').reshape(n_sum,
-			n_tracks)
-		return tiles, sums.astype(numpy.float32)
+			n_tracks).astype(numpy.float32)
+		size = tiles.nbytes + sums.nbytes
+		if cache and size <= _SUMMARY_CACHE_BYTES:
+			tiles.flags.writeable = False
+			sums.flags.writeable = False
+			with self._sums_lock:
+				if g not in self._sums_cache:
+					self._sums_cache[g] = (tiles, sums)
+					self._sums_cached += size
+					while self._sums_cached > _SUMMARY_CACHE_BYTES:
+						_, (old_tiles, old_sums) = self._sums_cache.popitem(last=False)
+						self._sums_cached -= old_tiles.nbytes + old_sums.nbytes
+		return tiles, sums
 
 	@property
 	def zooms(self) -> tuple:
 		"""The zoom levels the file keeps, as the tiles per bin of each:
-		(4, 16, 64) for three levels, () for none."""
+		(4, 16, 64) for three levels, () for none. They are those of the
+		first group that keeps a summary; a group that keeps none has none."""
 
 		if self._zoom_factors is None:
-			levels = self._zoom_levels_of(0) if len(self._groups) else []
+			g = self._first_summary_group()
+			levels = [] if g is None else self._zoom_levels_of(g)
 			self._zoom_factors = tuple(factor for factor, _, _ in levels)
 		return self._zoom_factors
+
+	def _first_summary_group(self):
+		"""The first group, in file order, that keeps a summary, or None,
+		found from the sizes in the groups' records without reading their
+		live tiles."""
+
+		if self._first_summary is None:
+			self._first_summary = next((g for g in range(len(self._groups)) if
+				self._has_summary(g)), -1)
+		return None if self._first_summary < 0 else self._first_summary
+
+	def _has_summary(self, g):
+		"""Whether group g's record holds a summary stream, from its summary's
+		header alone; the record itself is checked when the group is read."""
+
+		if self._summary_at[g] is not None:
+			return self._summary_at[g][2] > 0
+		error = "The index of {} cannot be read".format(self.path)
+		offset = int(self._directory[g])
+		fd = _open_read(self.path)
+		try:
+			raw = _pread(fd, 4, offset)
+			if len(raw) != 4:
+				raise ValueError(error + ": the file ends inside it.")
+			if self.order == 'tracks':
+				at = offset + 8 + struct.unpack('<I', raw)[0] * _BLOCK.itemsize
+			else:
+				at = offset + 8 + struct.unpack('<I', raw)[0] * _RUN.itemsize
+				raw = _pread(fd, 4, at + 4)
+				if len(raw) != 4:
+					raise ValueError(error + ": the file ends inside it.")
+				at += 8 + struct.unpack('<I', raw)[0]
+			raw = _pread(fd, 12, at)
+		finally:
+			os.close(fd)
+		if len(raw) != 12:
+			raise ValueError(error + ": the file ends inside it.")
+		return struct.unpack('<III', raw)[1] > 0
 
 	def _zoom_levels_of(self, g):
 		"""Group g's zoom levels, as a list of (factor, bins, sums of shape
@@ -4521,7 +4668,8 @@ class FigWigReader:
 			summary = None if len(levels) < level else levels[level - 1][1:]
 		if summary is None:
 			raise ValueError("{} keeps no {} of the group of {!r}; it was "
-				"written with more tracks than the summaries hold{}.".format(
+				"written with more tracks, in the group or the file, than the "
+				"summaries hold{}.".format(
 				self.path, "summary" if level == 0 else "zoom level {}".format(
 				level), self.tracks[int(self._groups[g][0])]['name'], "" if level
 				== 0 else ", or with fewer zoom levels"))
@@ -4592,8 +4740,9 @@ class FigWigReader:
 		This is the file's coarse profile, at the resolution of its tiles
 		(16,384 bases unless the file was written with another tile), for a
 		genome-wide plot, a per-chromosome total or a coarser binning by a
-		reshape; it stands in for a bigWig's zoom levels. The file keeps the
-		sums when every track's take at most 256 MB together.
+		reshape; it stands in for a bigWig's zoom levels. A group keeps the
+		sums when its tracks' take at most 256 MB together, and the reader
+		keeps those it inflates, up to 1 GB, for later calls.
 
 		When the file keeps a regional summary index, selected chromosomes
 		use its bounded pages and restart fragments automatically. Broad

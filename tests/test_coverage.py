@@ -1123,7 +1123,7 @@ def test_add_file_refuses_files_of_another_layout(tmp_path, ref):
 def test_files_past_the_summary_cap_stay_readable_through_add_file(tmp_path, ref,
 	monkeypatch):
 	"""A file with no summaries is still read, `tile_sums` of it says so,
-	and a writer that takes it keeps none for any track."""
+	and so does `tile_sums` of every track of a file merged from it."""
 
 	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 0)
 	bare = str(tmp_path / 'bare.fw')

@@ -4099,6 +4099,142 @@ def test_files_past_the_summary_cap_keep_none(tmp_path, monkeypatch):
 		reader.tile_sums()
 
 
+def _grouped_file(path, groups, values, zooms=2):
+	"""chr1 of values.shape[1] bases at tile 64, its tracks named by `groups`
+	in order and stored in those groups."""
+
+	names = [name for group in groups for name in group]
+	with FigWigWriter(path, {'chr1': values.shape[1]}, names, tile=64,
+			groups=groups, zooms=zooms) as writer:
+		writer.write('chr1', [0], values[None])
+	return path
+
+
+def test_groups_keep_their_summaries_past_the_file_cap(tmp_path, monkeypatch):
+	"""Each group keeps its summary and zoom levels while its own tile sums
+	fit the cap, however many tracks the file holds; a group past it keeps
+	none."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	values = numpy.random.default_rng(0).integers(0, 5, (6, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['a'], ['b', 'c'], ['d', 'e',
+		'f']], values)
+	reader = FigWigReader(path)
+	expected = values.reshape(6, 100, 64).sum(axis=2)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['a', 'b', 'c']),
+		expected[:3])
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['c', 'a'], level=1),
+		expected[[2, 0]].reshape(2, 25, 4).sum(axis=2))
+	assert reader.zooms == (4, 16)
+	with pytest.raises(ValueError, match="keeps no summary"):
+		reader.tile_sums(tracks='d')
+	with pytest.raises(ValueError, match="keeps no zoom level 1"):
+		reader.tile_sums(tracks='f', level=1)
+
+
+def test_add_file_and_append_keep_each_groups_summary(tmp_path, monkeypatch):
+	"""Merging and appending past the cap keep every summary the files had,
+	and a file without summaries loses none of the others'."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	rng = numpy.random.default_rng(1)
+	values = rng.integers(0, 5, (5, 6400)).astype(float)
+	expected = values.reshape(5, 100, 64).sum(axis=2)
+	one = _grouped_file(str(tmp_path / 'one.fw'), [['a'], ['b']], values[:2])
+	two = _grouped_file(str(tmp_path / 'two.fw'), [['c'], ['d']], values[2:4])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 0)
+	bare = _grouped_file(str(tmp_path / 'bare.fw'), [['e']], values[4:])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+
+	merged = str(tmp_path / 'merged.fw')
+	with FigWigWriter(merged, {'chr1': 6400}, [], tile=64, zooms=2) as writer:
+		for path in (one, two, bare):
+			writer.add_file(path)
+	reader = FigWigReader(merged)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['a', 'b', 'c',
+		'd']), expected[:4])
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['d', 'a'], level=2),
+		numpy.add.reduceat(expected[[3, 0]], numpy.arange(0, 100, 16), axis=1))
+	with pytest.raises(ValueError, match="keeps no summary"):
+		reader.tile_sums(tracks='e')
+
+	with FigWigWriter(one, None, ['late'], append=True) as writer:
+		writer.write('chr1', [0], values[None, 2:3])
+	numpy.testing.assert_array_equal(FigWigReader(one).tile_sums(), expected[[0,
+		1, 2]])
+
+
+def test_tile_sums_inflate_each_summary_once(tmp_path, monkeypatch):
+	"""A group's tile sums are read from the file once and then kept, the
+	least recently read dropped past the cache's bytes; what a call returns
+	is its own array, and a pickled reader starts with none kept."""
+
+	values = numpy.random.default_rng(2).integers(0, 5, (3, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['a'], ['b'], ['c']], values)
+	expected = values.reshape(3, 100, 64).sum(axis=2)
+	reads = []
+	pread = figwig.figwig._pread
+
+	def counted(fd, n, offset):
+		reads.append(n)
+		return pread(fd, n, offset)
+
+	monkeypatch.setattr(figwig.figwig, '_pread', counted)
+	reader = FigWigReader(path)
+	first = reader.tile_sums(tracks=['a', 'b'])
+	n = len(reads)
+	assert n > 0
+	first[:] = -1
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks=['b', 'a']),
+		expected[[1, 0]])
+	# Only the check that the file is the one opened reads it again.
+	header = figwig.figwig._HEADER.itemsize
+	assert set(reads[n:]) == {header}
+	assert {t.dtype for t, _ in reader._sums_cache.values()} == {numpy.dtype(
+		numpy.uint32)}
+
+	again = pickle.loads(pickle.dumps(reader))
+	numpy.testing.assert_array_equal(again.tile_sums(tracks='a'), expected[0])
+	assert len(again._sums_cache) == 1
+
+	one = sum(t.nbytes + v.nbytes for t, v in reader._sums_cache.values()) // 2
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_CACHE_BYTES', one)
+	small = FigWigReader(path)
+	for track in ('a', 'b', 'a'):
+		before = len(reads)
+		numpy.testing.assert_array_equal(small.tile_sums(tracks=track), expected[
+			ord(track) - ord('a')])
+		assert set(reads[before:]) - {header}
+	assert list(small._sums_cache) == [0]
+
+
+def test_zooms_come_from_the_first_group_with_a_summary(tmp_path, monkeypatch):
+	"""A file whose first group keeps no summary still reports, and merges
+	with, the zoom levels its other groups keep."""
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	values = numpy.random.default_rng(3).integers(0, 5, (4, 6400)).astype(float)
+	path = _grouped_file(str(tmp_path / 'f.fw'), [['x', 'y', 'z'], ['a']],
+		values)
+	reader = FigWigReader(path)
+	assert reader._first_summary_group() == 1 and reader.zooms == (4, 16)
+	numpy.testing.assert_array_equal(reader.tile_sums(tracks='a', level=1),
+		values[3].reshape(25, 256).sum(axis=1))
+
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 0)
+	bare = _grouped_file(str(tmp_path / 'bare.fw'), [['e']], values[:1])
+	monkeypatch.setattr(figwig.figwig, '_SUMMARY_BYTES', 800)
+	assert FigWigReader(bare).zooms == ()
+	merged = str(tmp_path / 'merged.fw')
+	from figwig.merge import _merge
+	_merge([bare, path], merged)
+	both = FigWigReader(merged)
+	assert both.zooms == (4, 16)
+	numpy.testing.assert_array_equal(both.tile_sums(tracks='a', level=2),
+		numpy.add.reduceat(values[3].reshape(100, 64).sum(axis=1), numpy.arange(
+		0, 100, 16)))
+
+
 def test_verify_checks_every_chunk(tmp_path):
 	"""A flipped byte in an uncompressed chunk passes an ordinary read and
 	fails one with verify=True; a compressed chunk fails either way."""

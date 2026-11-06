@@ -418,10 +418,12 @@ listed tiles are those where at least one track's sum is not 0. The
 writer adds a tile's values in binary64 in base order and rounds once,
 or, for a tile written in several calls, adds the calls' f4 sums in
 binary64 and rounds again; another writer's sums may differ in the last
-bit, and a reader must not expect to reproduce them. The writer keeps
-summaries while ``n_tracks * n_tiles * 4`` is at most 2**28 bytes, and
-otherwise writes ``n_sum`` 0, ``n_sum_bytes`` 0 and ``crc`` 0 for every
-group, which a reader must accept as "no summary". A group with a summary
+bit, and a reader must not expect to reproduce them. The writer keeps a
+group's summary while the group's ``tracks * n_tiles * 4`` is at most 2**28
+bytes, and otherwise writes ``n_sum`` 0, ``n_sum_bytes`` 0 and ``crc`` 0
+for the group, which a reader must accept as "no summary", so that one file
+may hold groups of both kinds; figwig 0.2.0 and earlier applied the bound
+to the file's ``n_tracks``, and kept no summary at all past it. A group with a summary
 and no listed tile has ``n_sum`` 0 and a zlib stream of no bytes (8 bytes
 long, with its CRC-32).
 
@@ -666,8 +668,8 @@ by a value, and whether or not it verifies chunks:
 - each fragment it reads: its two CRC-32 values, its marker, its decoded length,
   and that the bin numbers ascend and lie in the window.
 
-**What a writer chooses.** The index is written only for a file that keeps
-summaries (``n_tracks * n_tiles * 4`` at most 2**28 bytes), and a level is
+**What a writer chooses.** The index is written only for a file in which
+every group keeps its summary (see "The summary"), and a level is
 restarted only if it passes these tests; otherwise it stays ordinary. A
 level with no rows, one with a decoded size at most 64 KiB whose compressed
 size is also at most 64 KiB, and one whose row of ``4 + w * tracks`` bytes
@@ -896,7 +898,7 @@ Limits
    * - zoom levels
      - 12
    * - summary kept
-     - while ``n_tracks * n_tiles * 4 <= 2**28`` bytes
+     - per group, while the group's ``tracks * n_tiles * 4 <= 2**28`` bytes
    * - regional summary index
      - 16 MiB of structures; windows of at most 2,048 bins and 32 KiB decoded; 102 descriptors per page
    * - run bytes

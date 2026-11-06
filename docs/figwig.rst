@@ -320,10 +320,11 @@ Chromosome by chromosome, tile ``k`` holds bases ``[k * tile, (k + 1) *
 tile)`` and a chromosome of length ``L`` has ``ceil(L / tile)`` tiles. A
 NaN base is left out of its tile's sum, as it is left out of the track's
 sum and its count of nonzero bases, so a file written with its uncovered
-bases NaN keeps the statistics of its covered ones. The sums are
-kept while every track's take at most 256 MB together, which is 350 tracks
-on hg38 at the default tile; a file of thousands of cells keeps none, and
-``tile_sums`` says so.
+bases NaN keeps the statistics of its covered ones. Each group keeps its
+sums while its tracks' take at most 256 MB together, about 350 tracks on
+hg38 at the default tile, however many tracks the file holds; a group of
+thousands of cells keeps none, and ``tile_sums`` says so. A reader keeps
+the sums it has inflated, up to 1 GB, for its next call.
 
 A file written with ``zooms=k`` also keeps ``k`` zoom levels, level ``j``
 the sum of each track over bins of ``4**j`` tiles, in float64, which
@@ -383,8 +384,9 @@ of a level or more reads the level whole, with its checksums.
 
 A level gets restart points only when it is large enough to gain from them and
 its pages fit the index's 16 MiB budget; the rules are in the format page. A
-file that keeps no summaries (``n_tracks * n_tiles * 4`` over 2**28) has no
-index, and if no level qualifies, none is written: no root, no key, no bit.
+file with a group that keeps no summary (its ``tracks * n_tiles * 4`` over
+2**28) has no index, and if no level qualifies, none is written: no root, no
+key, no bit.
 ``summary_index=True`` with ``append=True`` raises before the file is opened,
 and an append to an indexed file clears the bit, so the appended file has no
 index until it is written again, with ``figwig reorder --order <its order>
