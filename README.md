@@ -42,124 +42,8 @@ outputs, and `-c` added.
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 [benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html) has
-the full setup.
-
-<details>
-<summary><b>More numbers and plots</b></summary>
-
-#### Reading
-
-167,750 windows of 1,000 bp centred on the fold-0 training peaks and negatives
-of ENCODE ATAC-seq experiment ENCSR123WME, read from the ATAC-seq bigWig
-ENCFF830RWF (238 MB) and the DNase-seq bigWig ENCFF989SAK (645 MB) on tmpfs,
-sorted by position, file opening included; median of three runs. The other
-libraries' 8-thread runs split the windows into 8 chunks on a thread pool.
-Every library returned the same values, once pyBigWig's NaN for bases without
-an interval was set to 0.
-
-| library | ATAC, 1 thread | ATAC, 8 threads | DNase, 1 thread | DNase, 8 threads |
-|---|---|---|---|---|
-| pybigtools 0.2.5, `values()` per window | 1.25 s | 1.42 s | 1.98 s | 2.21 s |
-| pyBigWig 0.3.26, `values()` per window | 3.95 s | 4.08 s | 4.50 s | 4.64 s |
-| pybbi 0.4.2, `stackup` | 9.61 s | 9.48 s | 10.75 s | 10.63 s |
-| figwig, ISA-L (the default engine) | 0.57 s | **0.103 s** | 1.15 s | **0.191 s** |
-
-#### Writing
-
-The plus-strand 5' ends of ENCODE ATAC-seq BAM ENCFF877LRY, as counts at
-15,875,960 single bases, and the fold-change signal ENCFF932UQM, as 21,212,477
-intervals, written from memory onto tmpfs at compression level 6, opening and
-closing included; median of three runs. pybigtools always writes zoom levels.
-
-| writer | counts | counts, zoom levels | signal | signal, zoom levels |
-|---|---|---|---|---|
-| pyBigWig 0.3.26 | 4.20 s | 12.80 s | 7.41 s | 10.48 s |
-| pybigtools 0.2.5 | | 4.45 s | | 5.47 s |
-| figwig, zlib, 1 thread | 4.18 s | 11.92 s | 6.11 s | 7.91 s |
-| figwig, zlib, 8 threads | 0.53 s | 1.63 s | 0.77 s | 1.07 s |
-| figwig, libdeflate, 1 thread | 1.01 s | 4.68 s | 1.68 s | 3.00 s |
-| figwig, libdeflate, 8 threads | **0.14 s** | **0.70 s** | **0.21 s** | **0.45 s** |
-
-figwig's files were the size of pyBigWig's. For the counts, its peak memory
-was above pyBigWig's without zoom levels, 503 MB against 354 MB on one thread,
-and below it with them, 753 MB on 8 threads against 1,089 MB.
-
-#### figwig bam2bw
-
-ENCODE ATAC-seq BAM ENCFF877LRY (2.4 GB) at default flags, and 18.9 million
-scATAC-seq fragments with `-f -u`, from the page cache; figwig's median of
-five runs at `-p 2` and one at `-p 8`, and one run of bam2bw, which reads one
-file in one process whatever `-p` is.
-
-| | BAM | fragments | peak memory, BAM | peak memory, fragments |
-|---|---|---|---|---|
-| bam2bw 0.5.1, `-p 2` | 58.48 s | 28.45 s | 3,039 MB | 2,866 MB |
-| figwig bam2bw, `-p 2` | **4.65 s** | **1.73 s** | 910 MB | 1,061 MB |
-| figwig bam2bw, `-p 8` | **1.55 s** | **1.08 s** | 891 MB | 1,161 MB |
-
-Both also ran on every one of 591 public BAM, SAM, BED and TSV test files that
-bam2bw takes, from 3 records to a 10 GB ATAC-seq BAM, under 5 to 9 sets of
-flags each, timed once, 16 at a time. In all 3,781 runs that bam2bw
-completed, figwig bam2bw gave the same exit code, messages and decoded
-entries. Where bam2bw took a second or more, figwig bam2bw was a median 3.2
-times faster; where bam2bw took under half a second, figwig bam2bw took a
-median 0.12 s longer, mostly importing numba.
-
-![Wall time of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-timings.png)
-
-![Peak and mean memory of figwig bam2bw against bam2bw 0.5.1, log scales](docs/figures/bam2bw-memory.png)
-
-The memory runs were made before figwig bam2bw dropped the keys it had
-counted while still reading a BAM. On the 10 GB BAM at `-p 1` its peak is now
-2.9 GB, against bam2bw's 11.6 GB, and 4.9 GB with `-u -f`, against 20.2 GB.
-
-#### figwig files
-
-8,192 random windows of 2,048 bp over chr1 (2,048 windows at 512 tracks),
-read from N count tracks on tmpfs into float32, seconds at 1 / 8 / 32
-threads; the tracks are the six count tracks of the examples and copies of
-them rolled by a seeded offset. Every reader returned the same bytes. The
-[benchmarks page](https://figwig.readthedocs.io/en/latest/benchmarks.html)
-has writes, sizes, real ENCODE signal tracks, single cells, reads as
-tracks and the time to a CUDA tensor.
-
-The format is specified byte by byte, with a Kaitai Struct definition and a
-reference reader, on [the format page](https://figwig.readthedocs.io/en/latest/format.html).
-
-The format is built for count, pileup, single-cell and other sparse or
-integer tracks read many at a time, where it is a fifth of the bigWigs'
-size and reads faster. Dense float tracks, such as conservation or fold
-change, gain less in size, and a 2 kb window of them decodes a whole tile
-of every track in its group; three phyloP and phastCons tracks over chr22
-still read 1.6 to 3.3 times faster than their bigWigs on 1 to 32 threads,
-and the [converters page](https://figwig.readthedocs.io/en/latest/converters.html)
-says when a smaller tile pays.
-
-
-| format | 6 tracks | 48 tracks | 512 tracks |
-|---|---|---|---|
-| figwig file, position order | **0.063 / 0.013 / 0.012 s** | **0.44 / 0.071 / 0.040 s** | **1.19 / 0.18 / 0.075 s** |
-| figwig file, track order | 0.049 / 0.029 / 0.030 s | 0.40 / 0.16 / 0.18 s | 2.08 / 0.55 / 0.39 s |
-| bigWigs, figwig | 0.15 / 0.028 / 0.019 s | 1.22 / 0.19 / 0.083 s | 8.76 / 1.25 / 0.78 s |
-| bigWigs, pybigtools | 0.77 / 1.41 / 1.74 s | 5.9 / 11.0 / 13.6 s | 21 / 36 / 42 s |
-| bigWigs, pyBigWig | 2.23 / 2.56 / 2.75 s | 17.5 / 20.0 / 21.7 s | not run |
-| zarr, zstd | 1.95 / 2.25 / 2.61 s | 8.1 / 4.0 / 3.7 s | 46 / 15 / 12 s |
-| zarrs, zstd | 1.52 / 2.44 / 2.57 s | 8.2 / 23 / 25 s | 72 / 76 / 76 s |
-| HDF5, gzip 4 | 3.8 / 9.5 / 9.5 s | 31 / 78 / 75 s | 229 / 230 / 230 s |
-
-The 48 tracks are 148 MB as a figwig file, 1.3 GB as bigWigs figwig writes,
-267 MB as zarr and 309 MB as HDF5; genome-wide, the six real tracks are
-971 MB as ENCODE's bigWigs and 227 MB as a figwig file.
-
-#### Threads
-
-The same reads, writes and conversions at 1 to 32 threads, one run at a time,
-median of three. Reading gained up to 16 threads, writing with libdeflate up
-to 16 or 32, and figwig bam2bw up to 8 or 16.
-
-![Wall time against threads for reading, writing and figwig bam2bw, log scales](docs/figures/thread-scaling.png)
-
-</details>
+every setup, the other tables (figwig files against bigWigs, zarr and HDF5 at
+6, 48 and 512 tracks; writers; threads) and the plots.
 
 ## Installation
 
@@ -352,35 +236,32 @@ one call, from any subset of the tracks, into `(windows, tracks, width)` in
 the tracks' own dtype. The same read gives the nonzero bases as a sparse
 list with `sparse=True`, the tracks summed per label with `labels=`, or
 each window summed per bin with `bins=`; `sums` gives each track's total
-over intervals of any lengths, such as peaks or genes, or over thousands
-of cells at once; `tile_sums` gives each track's sum per tile, or per bin
-of a zoom level, without decoding a chunk; and `device="cuda"` lands the
-output of `read` and `sums` in GPU memory, where `torch.from_dlpack` takes it
-without a copy. A base no track wrote is 0, as is a bigWig's no-data unless
-`bw2fw --missing nan` keeps them apart.
+over intervals of any lengths; `tile_sums` gives each track's sum per tile,
+or per bin of a zoom level, without decoding a chunk; and `device="cuda"`
+lands the output of `read` and `sums` in GPU memory, where
+`torch.from_dlpack` takes it without a copy. A base no track wrote is 0, as
+is a bigWig's no-data unless `bw2fw --missing nan` keeps them apart.
 
-A file is written in position order, tiles across tracks, for reading
-windows across many tracks, or in track order for reading a few tracks over
-the genome, and `figwig reorder` rewrites it in the other; `write_sparse`
-takes nonzero bases as entries, such as the cut sites of single cells. Each
-chunk of a group's tiles is stored densely, as nonzero bases, as runs of one
-value or as a matrix of the tracks present, whichever is smallest, in the
-narrowest type that holds it exactly: six genome-wide count tracks that take
-971 MB as bigWigs take 227 MB as one figwig file. `fw.tracks`, `fw.stats`
-and `fw.chrom_sizes` say what a file holds, as `figwig info` does from the
-shell. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
-guide covers the format, its layout, the API, the converters and the first
-read's compile time: the first read of each kind in a new environment
-compiles its kernels, 4 to 22 s each with nothing printed meanwhile, and
-numba caches them beside the package, or in the user's cache directory when
-the package directory is read-only, and `NUMBA_CACHE_DIR` chooses another.
+A file is written in position order, for reading windows across many
+tracks, or in track order, for reading a few tracks over the genome, and
+`figwig reorder` rewrites it in the other; `write_sparse` takes nonzero
+bases as entries, such as the cut sites of single cells. `fw.tracks`,
+`fw.stats` and `fw.chrom_sizes` say what a file holds, as `figwig info`
+does from the shell. The first read of each kind in a new environment
+compiles its kernels, with nothing printed meanwhile; numba caches them
+beside the package, or in the user's cache directory when the package
+directory is read-only, and `NUMBA_CACHE_DIR` chooses another.
 
-The documentation's [reading](https://figwig.readthedocs.io/en/latest/reading.html)
-and [writing](https://figwig.readthedocs.io/en/latest/writing.html) guides
-cover the rest: values and coordinates, chromosomes a file does not have,
-PyTorch data loaders, binned values, the files figwig refuses and falling back
-to another reader, compression, zoom levels, and files identical to
-pyBigWig's.
+The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html) guide
+covers the layout, the API and the converters, and
+[the format page](https://figwig.readthedocs.io/en/latest/format.html)
+specifies the format byte by byte, with a Kaitai Struct definition and a
+reference reader. The
+[reading](https://figwig.readthedocs.io/en/latest/reading.html) and
+[writing](https://figwig.readthedocs.io/en/latest/writing.html) guides cover
+values and coordinates, chromosomes a file does not have, PyTorch data
+loaders, binned values, the files figwig refuses and falling back to another
+reader, compression, zoom levels, and files identical to pyBigWig's.
 
 ## Command line
 
@@ -393,82 +274,17 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n test-run -f -u -p 8  # tes
 
 `figwig bam2bw` is bam2bw 0.5.1 with the same arguments, output files and
 messages, except that `-p` is a number of cores, 1 unless given, `-c` is new,
-and a BAM whose header disagrees with the sizes is reported on stderr first. By default
-it counts the 5' end of every mapped read at each base, and writes the counts
-of the two strands to two bigWigs; `-u` writes one, `-f` counts both ends of
-each fragment, `-3p` the 3' ends, `-c` every aligned base of each read (the
+and a BAM whose header disagrees with the sizes is reported on stderr first.
+By default it counts the 5' end of every mapped read at each base and writes
+the two strands to two bigWigs; `-u` writes one, `-f` counts both ends of each
+fragment, `-3p` the 3' ends, `-c` every aligned base of each read (the
 coverage deepTools' `bamCoverage` gives), `-ps`, `-ns`, `-sf` and `-r` shift
-and scale the counts, and `-z` writes zoom levels. A BAM file is inflated by libdeflate
-and walked by a numba kernel on `-p` threads, and a BED/tsv file is scanned
-by a numba kernel; SAM files, `--mate_pairs`, remote files and malformed
-records go through bam2bw's own pysam or line loop, so that their result, or
-their error, is bam2bw's. The bigWigs hold bam2bw's entries but not its bytes,
-since figwig compresses them with libdeflate at level 1. `figwig bam2bw -h`
-lists the arguments, [bam2bw's README](https://github.com/jmschrei/bam2bw)
-has an example of each, and the
-[documentation](https://figwig.readthedocs.io/en/latest/bam2bw.html) says how
-files are read and shared across cores.
-
-<details>
-<summary><b>All arguments, from <code>figwig bam2bw -h</code></b></summary>
-
-```text
-usage: figwig bam2bw [-h] -s SIZES [-u] [-f | -3p | -c] [-ps POS_SHIFT]
-                     [-ns NEG_SHIFT] [-mp] [--rna5 {read1,read2}]
-                     [--opposite_strand] [-sf SCALE_FACTOR] [-r] [-p PARALLEL]
-                     -n NAME [-z ZOOMS] [-v]
-                     filename [filename ...]
-
-This tool will convert BAM files to bigwig files without an intermediate.
-
-positional arguments:
-  filename              The SAM/BAM or tsv/tsv.gz file to be processed.
-
-options:
-  -h, --help            show this help message and exit
-  -s, --sizes SIZES     A chrom_sizes, .fai, or FASTA file. Only the first two
-                        columns of a chrom_sizes/.fai file are read. A
-                        compressed FASTA must be BGZF, not gzip.
-  -u, --unstranded      Have only one, unstranded, output.
-  -f, --fragments       The data is fragments and so both ends should be
-                        recorded.
-  -3p, --three_prime    Record the 3' end of each read instead of the 5' end.
-  -c, --coverage        Count every aligned base of each read (its CIGAR's
-                        M, = and X runs, so a deletion or a skipped intron
-                        is not covered), or every base of each interval of
-                        a BED/tsv file, instead of one end: the coverage
-                        deepTools' bamCoverage gives at 1 bp bins. The
-                        shifts move the first base (-ps) and the end (-ns);
-                        a shift that empties a read leaves it uncovered.
-                        Not with --mate_pairs.
-  -ps, --pos_shift POS_SHIFT
-                        A shift to apply to positive strand reads.
-  -ns, --neg_shift NEG_SHIFT
-                        A shift to apply to negative strand reads.
-  -mp, --mate_pairs     Treat paired-end reads as a single RNA/fragment tag
-                        instead of counting each mate independently: buffer
-                        reads by name, and once both mates of a pair are seen,
-                        record one jointly-determined position (see --rna5 and
-                        --opposite_strand). BAM/SAM input only.
-  --rna5 {read1,read2}  Which mate carries the 5' end of the RNA/fragment. The
-                        other mate's own 5' end is used as the RNA's 3' end.
-                        Only used with --mate_pairs.
-  --opposite_strand     Report the strand of the mate opposite the one chosen
-                        by --rna5, instead of that mate's own strand. Only
-                        used with --mate_pairs.
-  -sf, --scale_factor SCALE_FACTOR
-                        A scaling factor to multiply each position by.
-  -r, --read_depth      Whether to divide through by total (pre-scaled) read
-                        depth.
-  -p, --parallel PARALLEL
-                        The number of cores to use, or a negative number to
-                        count back from the number of CPUs: -1 is all of them.
-  -n, --name NAME
-  -z, --zooms ZOOMS     The number of zooms to store in the bigwig.
-  -v, --verbose
-```
-
-</details>
+and scale the counts, and `-z` writes zoom levels. SAM files, `--mate_pairs`,
+remote files and malformed records go through bam2bw's own pysam or line
+loop, so that their result, or their error, is bam2bw's. The bigWigs hold
+bam2bw's entries but not its bytes. `figwig bam2bw -h` lists the arguments,
+and the [documentation](https://figwig.readthedocs.io/en/latest/bam2bw.html)
+says how files are read and shared across cores.
 
 #### figwig bw2fw, fw2bw, bam2fw, reorder, merge and info
 
