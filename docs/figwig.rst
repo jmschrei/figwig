@@ -197,7 +197,7 @@ Sparse reads, sums per label and sums per bin
 
 A read of thousands of tracks that are mostly zero, such as cells, should
 not come back dense: a batch of 64 windows of 2,114 bp over 10,000 cells
-is 1.4 GB of mostly zeros. ``sparse=True`` returns the nonzero bases as a
+is 1.4 GB of mostly zeros as uint8. ``sparse=True`` returns the nonzero bases as a
 ``SparseWindows`` of entries, and ``labels`` sums the tracks of each label
 into one channel, which turns cells into pseudobulks in the read itself:
 
@@ -513,8 +513,8 @@ it is, of the tables and directory (in the header) at open and of each
 group's index record when it is read, so ``verify`` is for uncompressed
 files, at the cost of a
 pass over the bytes read, and for the rare damage zlib's Adler-32 misses:
-of 2,715 single-bit flips in one compressed chunk, 2,714 were refused and
-one read as four wrong bases, which ``verify`` caught.
+of 2,715 single-bit flips in one 2,715-byte compressed chunk, 2,714 were
+refused and one read back wrong, which ``verify`` caught.
 
 Adding tracks to a file
 -----------------------
@@ -697,9 +697,9 @@ track's unaligned bases, loses that distinction through ``bw2fw`` unless
 track as float32. The tile sums, and the zoom levels a file is written
 with, stand in for a bigWig's zoom levels down to the tile's resolution:
 a summary at 1 Mb bins is a reshape of them, and a summary finer than a
-tile decodes the chunks under it, through ``bins``, which took 0.05 s for
-100 bp bins over chr22 where pyBigWig's ``stats`` took 9.8 s
-(:doc:`benchmarks`); a genome browser needs the tracks written back with
+tile decodes the chunks under it, through ``bins``, which took 0.05 s on
+8 threads for one track's 100 bp bins over chr22 where pyBigWig's ``stats``
+took 9.8 s on one (:doc:`benchmarks`); a genome browser needs the tracks written back with
 ``fw2bw -z``. Every value is at
 most float64, and there are no string or categorical tracks. A read from a
 remote file would need the group's index, a few tens of KB for a

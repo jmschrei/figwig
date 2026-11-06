@@ -52,7 +52,7 @@ cell's of a file of thousands, checks only those tracks' offsets and passes
 over the chunks in which none of them has a base. A read uses one thread per
 64 chunks it touches, up to ``n_jobs``, since a read of a few dozen windows
 is done in under a millisecond and gains nothing from waking threads, and no
-more than one per 256 KB of the chunks it decodes and per 2 MB of a dense
+more than one per 256 KiB of the chunks it decodes and per 2 MiB of a dense
 output it fills, but at least 4 where it asks for that many, since a read of
 a few hundred KB of chunks took longer on 16 or 32 threads than on 2 to 8,
 while a read summed per bin over fewer windows than threads keeps them all,

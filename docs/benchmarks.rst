@@ -46,9 +46,11 @@ ISA-L decompression
 
 The reader above, with ``engine='auto'`` where python-isal 1.8 is installed
 (the ``isal`` extra), against ``engine='zlib'`` on the same branch and the
-reader before the engines were added, on the same 167,750 windows from
-tmpfs. Every setting ran in its own process, five times, alternating; the
-table gives the median of the second read in each process, and the last
+reader before the engines were added, on 167,750 random windows of 1,000
+bases on the chromosomes longer than 1 Mb, from tmpfs, so these times are
+not the Reading table's. Every setting ran in its own process, five times,
+alternating, reading the windows three times; the table gives the median of
+the reads after the first, and the last
 column the first read, which includes loading the compiled kernels and
 ISA-L's one-block self-check. The "zlib, before" column is from the first
 run, at a load of 58 to 62 of 256 cores; the others were measured again on
@@ -69,8 +71,7 @@ DNase   8        0.311 s       0.303 s            **0.222 s**  1.36x          0.
 ======  =======  ============  =================  ===========  =============  ===============================
 
 ISA-L inflates bigWig blocks 1.3 to 1.6 times faster than zlib, more at
-fewer threads, where decompression is a larger share of the read; the zlib
-engine itself is unchanged. On a first read the gain is 1.2 to 1.6x.
+fewer threads; the zlib engine itself is unchanged. On a first read the gain is 1.2 to 1.6x.
 
 Writing
 -------
@@ -106,10 +107,10 @@ pybigtools' are from the first run. figwig's files were the size of
 pyBigWig's: 35.7 and 107.1 MB without zoom levels, against 35.8 and 108.0 MB,
 and 214.0 and 126.5 MB with them, against 213.9 and 127.4 MB. pybigtools
 chooses its zoom levels differently, and wrote 96.4 and 162.2 MB. Building
-zoom levels took from a quarter to four fifths of figwig's time. Its peak
-memory was above pyBigWig's without zoom levels, 503 MB against 354 MB for
-the counts on one thread, of which the arrays of values held 318 MB, and
-below it with them, 753 MB on 8 threads against 1,089 MB.
+zoom levels took from a quarter to four fifths of figwig's time. For the
+counts, its peak memory was above pyBigWig's without zoom levels, 503 MB
+against 354 MB on one thread, and below it with them, 753 MB on 8 threads
+against 1,089 MB.
 
 The batch pipeline
 ~~~~~~~~~~~~~~~~~~
@@ -194,9 +195,8 @@ command                               threads   time      peak RSS  output
 ``bamCoverage --binSize 1``           8         14.9 s    4.7 GB    249 MB
 ====================================  ========  ========  ========  ========
 
-figwig's rows are medians of three runs with ``/usr/bin/time``'s peak RSS,
-with about a tenth of the server's cores in use by other jobs; deepTools'
-are one run each at a load of 38 to 40, with the peak memory of the process
+figwig's rows are medians of three runs with ``/usr/bin/time``'s peak RSS;
+deepTools' are one run each at a load of 38 to 40, with the peak memory of the process
 tree sampled every 50 ms. On one thread figwig keeps two events per aligned
 block of every read and sorts them, as for ``-f``; from ``-p 8`` it reads
 this sorted, indexed BAM a region at a time on every core (:doc:`bam2bw`),
@@ -211,8 +211,8 @@ time is its own reading of the BAM through pysam, a process per thread.
 
 Ten more experiments of the test-data collection, from 40 MB to 2.4 GB,
 single- and paired-end, two genomes, spliced short and long reads, were
-converted the same way (tmpfs; deepTools one run each at a load of 35 to
-45). In every one the two bigWigs hold the same value at every base of every
+converted the same way (tmpfs; deepTools one run each at a load of 33 to
+38). In every one the two bigWigs hold the same value at every base of every
 chromosome of the BAM's header, 3.1 billion for hg38 and 2.7 billion for
 mm10, and the same total. Seconds and peak RSS at 1 / 8 threads or
 processes:
@@ -266,9 +266,8 @@ processes:
      - 9.5 s, 1.0 GB / 4.3 s, 3.7 GB
 
 figwig's times were measured again once ``-c`` read large indexed BAMs a
-region at a time: medians of three runs with GNU time's peak RSS, with about
-a tenth of the server's cores in use by other jobs; deepTools' are the
-single runs above. On the five BAMs of 0.9 GB or more figwig was 3.6 to 4.4
+region at a time: medians of three runs with GNU time's peak RSS;
+deepTools' are the single runs above. On the five BAMs of 0.9 GB or more figwig was 3.6 to 4.4
 times faster than deepTools on one thread and 7 to 11 times on eight, which
 read these five a region at a time (:doc:`bam2bw`); deepTools' processes
 each hold their own copy of the work and the small files are bound by its
@@ -295,7 +294,7 @@ median 3.2 times faster, and 7 times faster on the 10 GB BAM at ``-p 1``
 (40 s against 282 s), or 27 times at ``-p 4``. In the 3,511 runs that bam2bw
 finished in under half a second, it took a median 0.12 s longer, most of it
 importing numba and loading its compiled kernels. With ``--mate_pairs``
-(hollow points) both read with pysam's loop and take the same time. The
+(hollow points) both read with pysam's loop and take about the same time. The
 points well above the line are TSV files that are not coordinates, such as
 quantification tables and 10x feature lists, whose every line names a
 different sequence that is not in the sizes file: the fast reader returns to
@@ -340,7 +339,7 @@ memmap, and the figwig file in both orders. Every configuration ran in its own p
 files on tmpfs, OMP, MKL and OpenBLAS pinned to one thread, while other
 jobs kept the machine's load at 55 to 70. Reads are the median of up to
 five repeats after a warm-up that compiles the kernels and opens the
-files; writes the best of two. In every configuration each reader's
+files; writes the best of two, or one run from 128 tracks. In every configuration each reader's
 output was checked against the others' (one SHA-256 per read), and they
 agreed. figwig's rows were measured again on 891cd88 on 2026-11-06, with
 93 to 96 percent of the cores idle, and every read gave the first run's
@@ -483,8 +482,8 @@ window. zarrs reads those calls at zarr-python's one-thread speed and
 gains nothing from the Python threads, with 8 or 32 of them calling into
 its pool of as many threads slower than one; reading 256 windows in one
 call through ``oindex``, the pattern it is built for, it matches
-zarr-python. It writes the arrays 1.1 to 3.5 times faster than
-zarr-python. On one thread track order is the faster of the two at 6 and
+zarr-python. It writes the arrays up to 4.1 times faster than
+zarr-python, and more slowly from 512 tracks on 8 and 32 threads. On one thread track order is the faster of the two at 6 and
 48 tracks, where its raw blocks need no inflating; on 8 and 32 threads
 position order is faster at every count. The figwig writer is the fastest
 of the compressed formats on 8 threads and more from 512 tracks (512
@@ -493,8 +492,8 @@ thread zarr writes faster at every count, since one thread's encoding of
 the values is the cost (170 s against zarr's 100 s at 512), and the
 writer gains little from 8 threads to 32, since the file writes and the
 index stay on the calling thread. The track-order writer encodes on the
-calling thread and does not gain at all. pyBigWig and pybigtools were not run at 512 tracks and
-above, nor the memmap, whose file would be 255 GB. The write timings
+calling thread and does not gain at all. pyBigWig was not run at 512 tracks and
+above, nor pybigtools' writes, nor the memmap, whose file would be 255 GB. The write timings
 include producing each piece of input, the same for every format, which
 is about a fifth of a one-thread figwig write of 128 tracks.
 
@@ -502,7 +501,8 @@ Real experiments, 1 to 512 ENCODE tracks, over chr1:0-30 Mb
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 512 hg38 bigWigs sampled from the ChromBPNet collection on this machine,
-mostly float signal with 6 to 8 percent of bases nonzero (three sampled
+mostly float signal with 7 to 9 percent of the bases of chr1:10-11 Mb
+nonzero (three sampled
 files held infinite values, which no figwig writer accepts, and the next
 candidates stood in), over the first 30 Mb of chr1 so that the dense
 forms fit the budget; the figwig file is one group at the defaults, zarr
@@ -603,7 +603,7 @@ genome-wide this time, and the rolled copies past six, written as bigWigs
 by figwig: ``figwig bw2fw`` wrote the figwig file of each set in groups of
 8 tracks at a tile of 16,384 bases and level 6, and ``figwig fw2bw`` wrote
 it back, on tmpfs. The sizes are from the first run, one run each at a load
-of 72 to 81, and 891cd88 writes the same bytes; the times were measured
+of 74 to 82, and 891cd88 writes the same bytes; the times were measured
 again on 891cd88 on 2026-11-06, the median of three runs at a load of 12
 to 16:
 
@@ -661,7 +661,7 @@ SnapATAC2 2.10.0's ``pp.import_fragments`` with the same cells as its
 whitelist, which stores each cell's fragments rather than per-base
 counts. Each ran in its own process on tmpfs with the peak resident
 memory of the process tree sampled every 50 ms, one run each, at a load
-of 31 to 40; figwig's rows were measured again on 891cd88 on 2026-11-06,
+of 31 to 44; figwig's rows were measured again on 891cd88 on 2026-11-06,
 the median of three runs at a load of 12 to 16. Every output holds the
 same 491,845,610 fragment ends of the called cells.
 
@@ -695,7 +695,7 @@ finds are numbered afterwards, for a file 13% larger. On the
 1,001,098-fragment ``large`` file of the called cells, the figwig
 command took 0.64 s on 8 threads and 1.05 s on one (891cd88, medians of
 five), the recipe 1.9 and 6 s, SnapATAC2 1.9 and 2 to 7 s, and the scipy
-matrix 16 s (medians of two), at 0.18 to 0.23 GB for the figwig command,
+matrix 16 s (medians of two, at a load of 89 to 96), at 0.18 to 0.23 GB for the figwig command,
 0.3 GB for SnapATAC2 and 3.3 GB for scipy.
 
 Compression levels and codecs
@@ -751,7 +751,8 @@ fifths of an eight-thread one, would save at most a tenth of a read for
 another dependency. A byte shuffle before deflate grows the chunks, which
 are varints and bytes. The bytes are the values: each of the six count
 tracks takes 1.1 to 1.7 bytes per nonzero base as sparse chunks of uint8
-(the PRO-cap tracks 3.5, on a fifth as many bases), and choosing dense or
+(the PRO-cap tracks 3.5, with 0.8 million nonzero bases against 16 to
+116 million), and choosing dense or
 sparse by the compressed rather than the raw size would have saved nothing
 on 20,000 sampled tiles of each of three of them.
 
@@ -759,7 +760,8 @@ Sums over intervals of any length
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The 172,732 IDR peaks of the set, which differ in length, summed over
-the six tracks, on tmpfs, median of three at load about 60; figwig's rows
+the six tracks, on tmpfs, median of three at load about 60 (pyBigWig's
+row one run); figwig's rows
 were measured again on 891cd88 on 2026-11-06, at a load of 14:
 
 =========================================================  ========  ========
@@ -803,8 +805,7 @@ The same reads of the same 64 integer tracks, written without and with
 chromosomes of 200, 80 and 20 Mb, half of the tiles of 1,024 bases nonzero in
 each track, 8 tracks per group and 6 zoom levels, in position order and in track
 order. One thread, a new reader for each read, the minimum of 15, in
-milliseconds (``claude_comments/2026-11-01-regional-summaries/``,
-``make_indexed.py`` and ``bench_index.py``), on 891cd88 on 2026-11-06, the
+milliseconds, on 891cd88 on 2026-11-06, the
 median of five such processes:
 
 =======================================  ==========  ==========  ==========  ==========
@@ -863,7 +864,7 @@ were measured again on 891cd88 on 2026-11-06, at a load of 30.
      - 1.95 s
      - 0.42 s
      - 0.21 s
-     - 0.4-0.5x
+     - 0.3-0.5x
    * - tile 16,384, groups of 8
      - 181 MB
      - **0.51 s**
@@ -872,10 +873,10 @@ were measured again on 891cd88 on 2026-11-06, at a load of 30.
      - 1.6-3.3x
    * - tile 1,024, groups of 1, before
      - 233 MB
-     - 0.78 s
+     - 0.80 s
      - 0.13 s
      - 0.056 s
-     - 1.0-2.0x
+     - 0.9-1.7x
    * - tile 1,024, groups of 1
      - 233 MB
      - 0.36 s
@@ -884,11 +885,11 @@ were measured again on 891cd88 on 2026-11-06, at a load of 30.
      - 2.2-5.6x
 
 The whole chromosome, 152 million values into float32, read in 0.57, 0.087
-and 0.037 s at the defaults (1.78, 0.38 and 0.18 s before), and 0.90,
+and 0.037 s at the defaults (1.78, 0.38 and 0.17 s before), and 0.90,
 0.12 and 0.038 s at the small tile. The three tracks were written in 4.1,
 0.54 and 0.19 s on 1, 8 and 32 threads at the defaults (4.1, 0.67 and 0.39
 s before) and 3.7, 0.52 and 0.22 s at the small tile; on one thread
-libdeflate's level 6 is 85% of the write, and a dense float chunk
+libdeflate's level 6 is 88% of the write, and a dense float chunk
 compresses by 2.4.
 
 Two things made the difference. The writer stores a tile whose values
@@ -905,9 +906,10 @@ per track, and every track of its group with it, which is what the small
 tile and single groups save; count tracks go the other way,
 since a sparse chunk's other tracks are stepped over by their byte counts,
 and 8 of 48 count tracks read in short windows from one group of 48 in a
-quarter to a half of the time from 48 groups of one. The same tracks read
-in 100 bp bins over the whole of chr22 took 0.05 s from the small-tile
-file against 9.8 s for pyBigWig's ``stats``.
+fifth to three fifths of the time from 48 groups of one, on 8 threads.
+One of the tracks, phyloP100way, read in 100 bp bins over the whole of
+chr22 in 0.05 s on 8 threads from a small-tile file, against 9.8 s for
+pyBigWig's ``stats`` on one.
 
 Single cells
 ~~~~~~~~~~~~
@@ -1077,14 +1079,15 @@ at 1 / 8, where they only get slower):
    :width: 100%
 
 For a DataLoader batch the figwig file reaches the GPU in a millisecond
-for 6 tracks and 4 ms for 48, 15 to 40 times ahead of the bigWig readers,
+for 6 tracks and 4 ms for 48, 18 to 49 times ahead of the bigWig readers,
 and the three figwig paths are the same there since a batch's transfer is
 small. For full reads the transfer is the large part: 3.2 GB of 48 tracks
 reaches the GPU in 0.10 s through the pinned buffer against 0.14 s
 through a pageable numpy array. ``device="cuda"`` matches the pinned path
 where it copies, and wins by 5 times where it scatters: 128 of 10,246
 cells over 8,192 windows arrive in 0.048 s against 0.25 s, since the bus
-carries 0.002 percent of the bases as entries instead of 8.6 GB of zeros.
+carries at most 0.025 percent of the bases as entries instead of 8.6 GB of
+zeros.
 
 Thread scaling
 --------------

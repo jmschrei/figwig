@@ -102,7 +102,7 @@ unless the file was written so.
 ## Sparse track sets: cells and reads
 
 Never read thousands of cells densely (64 windows × 2,114 bp × 10,000
-cells is 1.4 GB of zeros): ask for `labels=` or `sparse=True`. A sparse
+cells is 1.4 GB of zeros as uint8): ask for `labels=` or `sparse=True`. A sparse
 read costs about 40 bytes of memory per entry besides the 25 of the returned
 arrays, so it is for tracks that are mostly zero. `sums(..., paired=True)` takes one track per interval and sums
 interval `i` over `tracks[i]` alone, for reads whose spans are their own

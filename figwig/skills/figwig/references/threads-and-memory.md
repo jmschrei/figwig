@@ -11,7 +11,7 @@ stable, and the last section measures the numbers where they matter.
   reading every window in one call gains up to 8 to 32 threads. A reused
   reader beats a path, which re-reads the index on every call.
 - figwig files: one thread per 64 chunks touched, up to `n_jobs`, but no
-  more than one per 256 KB of chunks decoded and per 2 MB of dense output
+  more than one per 256 KiB of chunks decoded and per 2 MiB of dense output
   (at least 4 where asked for; a read summed per bin over fewer windows
   than threads keeps them all), with the pool kept between reads, and
   batches cut so that each thread gets at least two, however large the
@@ -42,7 +42,7 @@ stable, and the last section measures the numbers where they matter.
   `n_jobs` pool threads encode and compress it, and a summary thread folds
   it in, so the calling thread only takes the next batch; the writer runs
   `n_jobs + 2` threads. With libdeflate gains end near 8 threads; zlib keeps
-  gaining to 32. Zoom levels add a pass over the data, 2 to 4x
+  gaining to 32. Zoom levels add a pass over the data, 1.3 to 5x
   the time of a write without them, and their memory grows with threads.
 - figwig files: whole tiles encode on the pool, in up to one task per
   thread of at least 4 MB of tiles per call, and intervals and partial
