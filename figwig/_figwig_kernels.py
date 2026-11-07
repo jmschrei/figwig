@@ -863,9 +863,11 @@ def _gather_block(values, first, slots, out, t0, t1, width):
 		j, s = r // n_slots, r % n_slots
 		c0 = q * width
 		c1 = min(bases, c0 + width)
-		src = values[first + j, slots[s]]
-		dst = out[j, s]
-		for p in range(c0, c1):
+		# Views from c0, so that the index starts at 0: indexed from c0, the
+		# loop compiled to a copy of one value at a time.
+		src = values[first + j, slots[s], c0:c1]
+		dst = out[j, s, c0:c1]
+		for p in range(c1 - c0):
 			dst[p] = src[p]
 
 
