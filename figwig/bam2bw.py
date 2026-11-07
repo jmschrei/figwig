@@ -287,22 +287,28 @@ def record_positions(args, pos_reads, neg_reads, chrom, five_prime, three_prime,
 # With --coverage, every aligned base of a read counts: the CIGAR's M, = and
 # X runs, as pysam's get_blocks() and deepTools give them, so that a
 # deletion or a skipped intron is not covered. The counts are kept as events
-# on the doubled coordinate line, 2 * start for the base a block enters and
-# 2 * end + 1 for the base after the one it leaves, so that the same keys,
-# sorts and run-length counts serve, and the coverage of each stretch
-# between events is their running sum (see `_coverage_runs`). The shifts
-# move a read's first base and its end; a block they empty is skipped.
+# on the coordinate line times four, 4 * start for the base a read's first
+# block enters, 4 * start + 1 for the base a later block enters, and
+# 4 * end + 2 for the base after the one a block leaves, so that the same
+# keys, sorts and run-length counts serve, the coverage of each stretch
+# between events is their running sum (see `_coverage_runs`), and the reads
+# are the first blocks' events (see `_read_count`). The shifts move a read's
+# first base and its end; a block they empty is skipped.
 
-def _record_span(reads, chrom, start, end):
+def _record_span(reads, chrom, start, end, later=0):
 	if end > start:
-		reads[chrom][2 * start] += 1
-		reads[chrom][2 * end + 1] += 1
+		reads[chrom][4 * start + later] += 1
+		reads[chrom][4 * end + 2] += 1
+		return True
+	return False
 
 def _record_blocks(args, reads, chrom, blocks):
 	last = len(blocks) - 1
+	later = 0
 	for k, (start, end) in enumerate(blocks):
-		_record_span(reads, chrom, start + (args.pos_shift if k == 0 else 0),
-			end + (args.neg_shift if k == last else 0))
+		if _record_span(reads, chrom, start + (args.pos_shift if k == 0 else 0),
+				end + (args.neg_shift if k == last else 0), later):
+			later = 1
 
 def _coverage_runs(positions, counts, size):
 	"""The runs of coverage from the counted events on the doubled line:
@@ -313,8 +319,8 @@ def _coverage_runs(positions, counts, size):
 		empty = numpy.empty(0, dtype='int64')
 		return empty, empty, empty, 0
 
-	places = positions >> 1
-	deltas = numpy.where(positions & 1, -counts, counts)
+	places = positions >> 2
+	deltas = numpy.where(positions & 2, -counts, counts)
 	depth = numpy.cumsum(deltas)
 	last = numpy.empty(len(places), dtype=bool)
 	last[-1] = True
@@ -339,11 +345,12 @@ def _coverage_runs(positions, counts, size):
 	return starts, ends, values, discarded
 
 def _read_count(positions, counts, size):
-	"""The reads behind coverage events: the start events that lie inside
-	the chromosome, which is the depth `-r` divides by with --coverage, as
-	the entries kept are without it."""
+	"""The reads behind coverage events: the events of reads' first blocks
+	that start inside the chromosome, one per read whatever its deletions
+	and skipped introns, which is the depth `-r` divides by with --coverage,
+	as the entries kept are without it."""
 
-	inside = ((positions & 1) == 0) & (positions >= 0) & (positions < 2 * size)
+	inside = ((positions & 3) == 0) & (positions >= 0) & (positions < 4 * size)
 	return int(counts[inside].sum())
 
 def record_mate_pair(args, pos_reads, neg_reads, chrom, anchor, other):
@@ -550,6 +557,7 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 			ref = pos
 			block_start = numpy.int64(-1)
 			k = numpy.int64(0)
+			later = numpy.int64(0)
 			bad = False
 			for j in range(n_cigar):
 				word = u32(cigar + 4 * j)
@@ -564,9 +572,9 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 						a = block_start + (pos_shift if k == 0 else 0)
 						b = ref + (neg_shift if k == n_blocks - 1 else 0)
 						if b > a:
-							if (2 * a + _KEY_BIAS < 0 or 2 * a + _KEY_BIAS >= key_limit
-									or 2 * b + 1 + _KEY_BIAS < 0 or
-									2 * b + 1 + _KEY_BIAS >= key_limit):
+							if (4 * a + _KEY_BIAS < 0 or 4 * a + _KEY_BIAS >= key_limit
+									or 4 * b + 2 + _KEY_BIAS < 0 or
+									4 * b + 2 + _KEY_BIAS >= key_limit):
 								bad = True
 								break
 							if bucket != current:
@@ -580,9 +588,10 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 										run_buckets[n_runs] = bucket
 										n_runs += 1
 								current = bucket
-							keys[numpy.uint64(n_keys)] = out | (2 * a + _KEY_BIAS)
-							keys[numpy.uint64(n_keys + 1)] = out | (2 * b + 1 + _KEY_BIAS)
+							keys[numpy.uint64(n_keys)] = out | (4 * a + later + _KEY_BIAS)
+							keys[numpy.uint64(n_keys + 1)] = out | (4 * b + 2 + _KEY_BIAS)
 							n_keys += 2
+							later = numpy.int64(1)
 						k += 1
 						block_start = -1
 					ref += length
@@ -590,8 +599,8 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 				a = block_start + (pos_shift if k == 0 else 0)
 				b = ref + neg_shift
 				if b > a:
-					if (2 * a + _KEY_BIAS < 0 or 2 * a + _KEY_BIAS >= key_limit or
-							2 * b + 1 + _KEY_BIAS < 0 or 2 * b + 1 + _KEY_BIAS >= key_limit):
+					if (4 * a + _KEY_BIAS < 0 or 4 * a + _KEY_BIAS >= key_limit or
+							4 * b + 2 + _KEY_BIAS < 0 or 4 * b + 2 + _KEY_BIAS >= key_limit):
 						bad = True
 					else:
 						if bucket != current:
@@ -605,8 +614,8 @@ def _parse_bam_records(buf, n, tid_bucket, missing_seen, missing_order,
 									run_buckets[n_runs] = bucket
 									n_runs += 1
 							current = bucket
-						keys[numpy.uint64(n_keys)] = out | (2 * a + _KEY_BIAS)
-						keys[numpy.uint64(n_keys + 1)] = out | (2 * b + 1 + _KEY_BIAS)
+						keys[numpy.uint64(n_keys)] = out | (4 * a + later + _KEY_BIAS)
+						keys[numpy.uint64(n_keys + 1)] = out | (4 * b + 2 + _KEY_BIAS)
 						n_keys += 2
 			if bad:
 				status = 1
@@ -1495,7 +1504,7 @@ def _scan_intervals(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 	at i holds something only the per-line loop handles.
 
 	mode is 0 to record the start, 1 to record end - 1, 2 to record both,
-	and 3 to record the span as the events 2 * start and 2 * end + 1.
+	and 3 to record the span as the events 4 * start and 4 * end + 2.
 	"""
 
 	mask = table_hash.shape[0] - 1
@@ -1663,8 +1672,8 @@ def _scan_intervals(buf, n, i, n_lines, keys, n_keys, table_hash, table_name,
 			end += neg_shift
 
 			if mode == 3:
-				first = 2 * start
-				second = 2 * end + 1
+				first = 4 * start
+				second = 4 * end + 2
 				if (first < -_IV_KEY_OFFSET or first >= _IV_KEY_OFFSET or
 					second < -_IV_KEY_OFFSET or second >= _IV_KEY_OFFSET):
 					return 3, line_start, n_lines, n_keys, 0, 0

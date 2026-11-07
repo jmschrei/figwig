@@ -86,6 +86,8 @@ Converters and commands
 
 	- ``figwig install-skill`` over an installed copy without ``--force`` prints the message saying to use it and exits with status 1, where it printed a traceback.
 
+	- ``figwig bam2bw -c -r`` and ``figwig bam2fw -c -r`` divide by the reads, one for each read whose first aligned block starts inside its chromosome, as ``-r`` without ``-c`` and deepTools' CPM count them, where they divided by the aligned blocks, so that a read cut by a deletion or a skipped intron counted once per block: a K562 polyA RNA-seq BAM of 31.5 million mapped reads was divided by 42.6 million, and the 2.4 GB ATAC-seq BAM by 45.9 million for its 44.8 million. Outputs without ``-r`` are the same to the byte, and so is ``-c -r`` where every read is one block: no deletion or skipped intron, nor, in a SAM file or another file read by pysam's loop, an insertion.
+
 	- ``--summary-index`` on ``figwig bw2fw`` and ``bam2fw`` writes the regional summary index, and ``figwig reorder`` and ``merge`` write one when the header of their input (of the first file, for ``merge``) announces one, unless ``--no-summary-index``, or when ``--summary-index`` is given.
 
 	- ``figwig info -b`` counts a file's regional summary index apart from its unused bytes.

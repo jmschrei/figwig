@@ -43,10 +43,12 @@ move a read's first base (``-ps``) and its end (``-ns``), and a shift that
 empties a read leaves it uncovered. The coverage is written as intervals
 of one value, a bedGraph section per stretch, which is far smaller than a
 value per base; ``-r`` divides by the reads that start inside their
-chromosome, and the bases a read extends past its chromosome's end are
-the entries reported as discarded. ``-c`` is not taken with ``-f``,
-``-3p`` or ``-mp``. On the 2.4 GB ATAC-seq BAM its bigWig held the same
-value at every base as ``bamCoverage --binSize 1`` (:doc:`benchmarks`).
+chromosome, one for each read however many blocks its deletions and
+skipped introns cut it into, and the bases a read extends past its
+chromosome's end are the entries reported as discarded. ``-c`` is not
+taken with ``-f``, ``-3p`` or ``-mp``. On the 2.4 GB ATAC-seq BAM its
+bigWig held the same value at every base as ``bamCoverage --binSize 1``
+(:doc:`benchmarks`).
 
 No zoom levels are written unless ``-z`` is given, so a bigWig meant for a
 genome browser needs ``-z 10``, say. They cost space on sparse count tracks:
