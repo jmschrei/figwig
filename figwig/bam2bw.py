@@ -285,15 +285,17 @@ def record_positions(args, pos_reads, neg_reads, chrom, five_prime, three_prime,
 		reads[chrom][five_prime if args.three_prime else three_prime] += 1
 
 # With --coverage, every aligned base of a read counts: the CIGAR's M, = and
-# X runs, as pysam's get_blocks() and deepTools give them, so that a
-# deletion or a skipped intron is not covered. The counts are kept as events
-# on the coordinate line times four, 4 * start for the base a read's first
-# block enters, 4 * start + 1 for the base a later block enters, and
-# 4 * end + 2 for the base after the one a block leaves, so that the same
-# keys, sorts and run-length counts serve, the coverage of each stretch
-# between events is their running sum (see `_coverage_runs`), and the reads
-# are the first blocks' events (see `_read_count`). The shifts move a read's
-# first base and its end; a block they empty is skipped.
+# X runs, split at D and N, so that a deletion or a skipped intron is not
+# covered, as pysam's get_blocks() and deepTools count them; the BAM record
+# kernel and the pysam loop (`_cigar_blocks`) cut the same blocks. The
+# counts are kept as events on the coordinate line times four, 4 * start
+# for the base a read's first block enters, 4 * start + 1 for the base a
+# later block enters, and 4 * end + 2 for the base after the one a block
+# leaves, so that the same keys, sorts and run-length counts serve, the
+# coverage of each stretch between events is their running sum (see
+# `_coverage_runs`), and the reads are the first blocks' events (see
+# `_read_count`). The shifts move a read's first base and its end; a block
+# they empty is skipped.
 
 def _record_span(reads, chrom, start, end, later=0):
 	if end > start:
@@ -301,6 +303,32 @@ def _record_span(reads, chrom, start, end, later=0):
 		reads[chrom][4 * end + 2] += 1
 		return True
 	return False
+
+def _cigar_blocks(read):
+	"""A read's aligned blocks as the BAM record kernel finds them: runs of
+	M, = and X operations, split only at D and N. pysam's get_blocks() starts
+	a block at every M, = or X operation, so it splits a run at an insertion
+	or where = meets X: more intervals, and shifts that empty a piece of a
+	read rather than the read. A read of one such operation is one block
+	either way, and most reads are, so pysam's blocks are kept for it."""
+
+	blocks = read.get_blocks()
+	if len(blocks) < 2:
+		return blocks
+	blocks, ref, block_start = [], read.reference_start, -1
+	for op, length in read.cigartuples:
+		if op == 0 or op == 7 or op == 8:
+			if block_start < 0:
+				block_start = ref
+			ref += length
+		elif op == 2 or op == 3:
+			if block_start >= 0:
+				blocks.append((block_start, ref))
+				block_start = -1
+			ref += length
+	if block_start >= 0:
+		blocks.append((block_start, ref))
+	return blocks
 
 def _record_blocks(args, reads, chrom, blocks):
 	last = len(blocks) - 1
@@ -2406,7 +2434,7 @@ def extract_reads(args, chrom_sizes, idx, threads=1):
 					reads = neg_reads
 
 				if coverage:
-					_record_blocks(args, reads, chrom, read.get_blocks())
+					_record_blocks(args, reads, chrom, _cigar_blocks(read))
 					continue
 
 				reads[chrom][three_prime if use_three_prime else five_prime] += 1
