@@ -75,6 +75,8 @@ figwig files
 
 	- In track order, ``write`` and ``write_sparse`` refuse a call on a chromosome that comes before one an earlier call wrote, in ``chrom_sizes`` order, where they took it and wrote a file whose index could not be read; figwig 0.2.0 did the same. Position order still takes chromosomes in any order across calls.
 
+	- ``sums`` on a reader with ``verify=True`` reads and checks every chunk under its intervals, where for integer tracks it took the tiles an interval covers whole from the tile sums and so returned a sum over a corrupt chunk without checking it; without ``verify`` it still takes them from the tile sums.
+
 Converters and commands
 -----------------------
 

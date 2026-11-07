@@ -3939,7 +3939,10 @@ class FigWigReader:
 	verify: bool, optional
 		Whether to check every chunk read against the CRC-32 the file keeps
 		for it, which a compressed chunk's zlib checksum covers already and
-		an uncompressed chunk does not. Default is False.
+		an uncompressed chunk does not. With it, `sums` reads every chunk
+		under its intervals; without it, `sums` of integer tracks takes the
+		tiles an interval covers whole from the file's tile sums and does not
+		read their chunks. Default is False.
 
 	Attributes
 	----------
@@ -5175,10 +5178,11 @@ class FigWigReader:
 		2**24, where it is exact; the tracks' largest value times the longest
 		interval stays below 2**53, so every sum is exact and equal to the
 		one `_read` adds up base by base. Returns None where any of this
-		does not hold, or nothing spans a whole tile, for `_read` to sum
-		every interval whole."""
+		does not hold, nothing spans a whole tile, or the reader verifies
+		every chunk it reads, which the tile sums would leave unread, for
+		`_read` to sum every interval whole."""
 
-		if nan not in ('propagate', 'skip') or len(starts) == 0:
+		if self.verify or nan not in ('propagate', 'skip') or len(starts) == 0:
 			return None
 		tile = self.tile
 		first = -(-starts // tile)

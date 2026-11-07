@@ -4278,6 +4278,30 @@ def test_verify_checks_every_chunk(tmp_path):
 	assert copy.verify
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_sums_with_verify_read_the_chunks_of_whole_tiles(tmp_path, order):
+	"""A sum of an integer track over whole tiles comes from the tile sums,
+	which do not read the chunks; with verify=True it reads and checks them,
+	so a flipped byte in an uncompressed chunk under it raises."""
+
+	path = str(tmp_path / 'v.fw')
+	values = (numpy.arange(2000) % 50 + 1).astype(numpy.float64)[None, None]
+	write_figwig(path, {'chr1': 2000}, [{'name': 'a', 'dtype': 'uint16'}],
+		'chr1', [0], values, tile=256, level=0, order=order)
+	total = float(values.sum())
+	assert FigWigReader(path, verify=True).sums('chr1', [0], [2000]).item() == \
+		total
+	with open(path, 'rb') as handle:
+		data = bytearray(handle.read())
+	data[300] ^= 0x40
+	with open(path, 'wb') as handle:
+		handle.write(bytes(data))
+	with pytest.raises(ValueError, match="checksum|corrupt"):
+		FigWigReader(path, verify=True).sums('chr1', [0], [2000])
+	if order == 'positions':
+		assert FigWigReader(path).sums('chr1', [0], [2000]).item() == total
+
+
 def test_append_adds_tracks_to_a_file(tmp_path, ref):
 	"""append=True starts from the file's tracks, whose chunks are copied,
 	and adds the new ones after them; the old tracks cannot be written."""
