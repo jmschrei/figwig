@@ -122,7 +122,7 @@ and pickled, so it can go to DataLoader workers under any start method,
 as :doc:`reading` shows for bigWigs, and a pickled reader carries no
 index, which each worker reads again. ``read_figwig`` reads from a path
 or a reader in one call, as ``read_bigwig`` does. The first read in a new
-environment compiles the kernels for that kind of read, about 27 s for a
+environment compiles the kernels for that kind of read, about 21 s for a
 dense read; numba caches them on disk, and later processes load them in a
 tenth of a second (:doc:`threads` lists every kind of first call).
 

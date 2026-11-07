@@ -5,10 +5,11 @@
 into chunks, inflating chunks, and copying windows out of them.
 
 A constant passed from one kernel to another is written `bool(False)` or
-`int(0)`: numba types a bare constant as a literal and compiles the callee
-once per literal value on top of once per argument type, and those copies
-were a third of what a first call compiled (507 specializations against
-335 for the tests, 25 s of a first read).
+`int(0)`, and so is the first value of a variable that is: numba types a
+bare constant as a literal and compiles the callee once per literal value
+on top of once per argument type, and those copies were a third of what a
+first call compiled (507 specializations against 335 for the tests, 25 s
+of a first read).
 
 A figwig file in position order holds every track's values on a fixed grid
 of tiles of `tile` bases. The tiles of the tracks of one group, at one
@@ -515,7 +516,7 @@ def _write_entries(out, position, kind, code, n_tracks, nnz, offs, vals):
 	entries of each track, offs and vals in track order, and return where
 	it ends."""
 
-	total = 0
+	total = int(0)
 	n_present = 0
 	for g in range(n_tracks):
 		total += nnz[g]
@@ -700,9 +701,9 @@ def _entries_task(functions, level, tile, piece_tracks, first, piece_tiles,
 	where = numpy.empty(n_tiles, dtype=numpy.int64)
 	crcs = numpy.empty(n_tiles, dtype=numpy.int64)
 	kinds_all = numpy.zeros(n_tiles, dtype=numpy.uint8)
-	j = 0
+	j = int(0)
 	status = -1
-	t = 0
+	t = int(0)
 	while t < n_tiles:
 		buffer = out[:min(room[t] + 16, go_bytes + need_after[t])]
 		bounds = numpy.zeros(n_tiles - t + 1, dtype=numpy.int64)
@@ -717,8 +718,8 @@ def _entries_task(functions, level, tile, piece_tracks, first, piece_tiles,
 		stream = numpy.empty(raw_bytes + raw_bytes // 8 + 64 * done + 8,
 			dtype=numpy.uint8)
 		position, j, status = _deflate_into(functions, level, buffer, bounds,
-			kinds, done, 0, file_tiles[t:], stream, 0, sizes, raw, kinds_out, where,
-			crcs, j)
+			kinds, done, int(0), file_tiles[t:], stream, int(0), sizes, raw,
+			kinds_out, where, crcs, j)
 		streams.append(stream)
 		used.append(position)
 		if status != -1:
@@ -1016,7 +1017,8 @@ def _deflate_live(functions, level, data, bounds, kinds, n_done, offset, tiles):
 	gtiles = numpy.empty(n_live, dtype=numpy.int64)
 	crcs = numpy.empty(n_live, dtype=numpy.int64)
 	position, _, status = _deflate_into(functions, level, data, bounds, kinds,
-		n_done, offset, tiles, stream, 0, sizes, raw, kinds_out, gtiles, crcs, 0)
+		n_done, offset, tiles, stream, int(0), sizes, raw, kinds_out, gtiles, crcs,
+		int(0))
 	return stream, position, sizes, raw, kinds_out, gtiles, crcs, status
 
 
@@ -1146,9 +1148,9 @@ def _chunk_code(n_tracks, classes, nnz, mins, maxs, sums, flags):
 	integers lie beyond 2**24, or a float64 track, makes a chunk that cannot
 	be an integer type float64 rather than float32."""
 
-	integral = True
-	wide = False
-	total = 0
+	integral = bool(True)
+	wide = bool(False)
+	total = int(0)
 	low, high, sum_ = 0.0, 0.0, 0.0
 	for g in range(n_tracks):
 		total += nnz[g]
@@ -1186,9 +1188,9 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	"""
 
 	n_tracks = block.shape[0]
-	total = 0
-	n_present = 0
-	n_points = 0
+	total = int(0)
+	n_present = int(0)
+	n_points = int(0)
 	collected = True
 	for g in range(n_tracks):
 		row = block[g, c0:c0 + width]
@@ -1235,7 +1237,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 	if compressed:
 		counts = counts // _DEFLATED_COUNTS + 4
 	allow_runs = 4 + counts + n_points * (1 + max(w, 1)) < least
-	run_bytes = 0
+	run_bytes = int(0)
 	if allow_runs:
 		for g in range(n_tracks):
 			if nnz[g] > 0:
@@ -1250,7 +1252,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 		kind, _ = _pick_kind(n_tracks, n_present, total, total, w, width,
 			n_points, run_bytes, bool(True), allow_matrix, allow_runs, compressed)
 		if kind != _DENSE:
-			d = 0
+			d = int(0)
 			for g in range(n_tracks):
 				if dbytes[g] < 0:
 					_collect(block[g, c0:c0 + width], width, classes[g], offs, vals,
@@ -1258,7 +1260,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 				d += nnz[g]
 			collected = True
 	if collected:
-		delta_bytes = 0
+		delta_bytes = int(0)
 		for g in range(n_tracks):
 			delta_bytes += dbytes[g]
 		kind, _ = _pick_kind(n_tracks, n_present, total, delta_bytes, w, width,
@@ -1273,7 +1275,7 @@ def _encode_block(block, c0, width, classes, allow_matrix, compressed, clear,
 		# scratch, so the rows are cleared whole below.
 		if code == _ONE:
 			code = _U8
-		d = 0
+		d = int(0)
 		for g in range(n_tracks):
 			npts[g] = _collect_runs(block[g, c0:c0 + width], width, classes[g],
 				offs, vals, d)
@@ -1480,11 +1482,11 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 
 		# The entries of each track, in order, with their statistics and
 		# the bytes of their offsets.
-		total = 0
-		delta_bytes = 0
+		total = int(0)
+		delta_bytes = int(0)
 		adjacent = 0
-		n_present = 0
-		n_touched = 0
+		n_present = int(0)
+		n_touched = int(0)
 		last_track = -1
 		last = 0
 		for e in range(e0, e1):
@@ -1718,9 +1720,9 @@ def _chunk_code_of(touched, n_touched, classes, nnz, mins, maxs, sums, flags):
 	"""`_chunk_code` over the tracks a tile touches, the others
 	contributing nothing."""
 
-	integral = True
-	wide = False
-	total = 0
+	integral = bool(True)
+	wide = bool(False)
+	total = int(0)
 	low, high, sum_ = 0.0, 0.0, 0.0
 	for k in range(n_touched):
 		g = touched[k]
@@ -3133,7 +3135,7 @@ def _list_tiles(tile, data, positions, kinds, n_tracks, slots, pair_chunks,
 	output arrays, which must hold them. Returns the number of entries.
 	"""
 
-	k_out = 0
+	k_out = int(0)
 	no_channels = numpy.zeros((0, 0), dtype=numpy.float64)
 	selected = numpy.flatnonzero(slots >= 0)
 	for q in range(pair_chunks.shape[0]):
@@ -3251,7 +3253,7 @@ def _read_blocks(data, positions, kinds, n_entries, pair_blocks, pair_slots,
 	entry in every mode. Returns the number of entries.
 	"""
 
-	k_out = 0
+	k_out = int(0)
 	for q in range(pair_blocks.shape[0]):
 		block = pair_blocks[q]
 		n = n_entries[block]
@@ -3435,14 +3437,14 @@ def _key_segments(keys, positions, high_shift, tile_shift):
 
 	n = keys.shape[0]
 	count = 0
-	a = 0
+	a = int(0)
 	while a < n:
 		a = _run_end(keys, a, n, high_shift)
 		count += 1
 	bounds = numpy.empty(count + 1, dtype=numpy.int64)
 	lows = numpy.empty(count, dtype=numpy.int64)
 	highs = numpy.empty(count, dtype=numpy.int64)
-	a = 0
+	a = int(0)
 	for k in range(count):
 		b = _run_end(keys, a, n, high_shift)
 		bounds[k] = a

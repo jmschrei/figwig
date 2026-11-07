@@ -83,7 +83,7 @@ say.
 | "is not a bigWig file" on a file figwig wrote | `references/errors.md`: it was never closed |
 | 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
 | `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |
-| threads not making a read faster; a first call that takes 30 s | `references/threads-and-memory.md` |
+| threads not making a read faster; a first call that takes 20 s | `references/threads-and-memory.md` |
 | `tile_sums`, or `sums` of integer tracks, over one chromosome slow on a big multitrack file | `references/figwig-writing.md`: `summary_index=True` |
 | a figwig read slower than expected, or decoding more tracks than asked | `references/threads-and-memory.md` for threads and batches, then `references/figwig-writing.md`: tile, groups and order |
 | "has been replaced or rewritten since this reader opened it" | `references/errors.md`: open the reader again |

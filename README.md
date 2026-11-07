@@ -371,7 +371,7 @@ and `fw.chrom_sizes` say what a file holds, as `figwig info` does from the
 shell. The [figwig files](https://figwig.readthedocs.io/en/latest/figwig.html)
 guide covers the format, its layout, the API, the converters and the first
 read's compile time: the first read of each kind in a new environment
-compiles its kernels, 15 to 30 s each with nothing printed meanwhile, and
+compiles its kernels, 4 to 22 s each with nothing printed meanwhile, and
 numba caches them beside the package, so on a cluster whose install is
 read-only set `NUMBA_CACHE_DIR` to a writable directory.
 

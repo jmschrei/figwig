@@ -74,10 +74,11 @@ stable, and the last section measures the numbers where they matter.
 
 ## The first call
 
-The first call in a fresh environment compiles numba kernels: about a
-second for the bigWig reader and `figwig bam2bw`, tens of seconds for the
-first dense figwig read and more for each further kind (sparse, another
-output dtype, sums, track order, a write). numba caches them next to the
+The first call in a fresh environment compiles numba kernels: a second or
+two for the bigWig reader and `figwig bam2bw`, about 20 s for the first
+dense figwig read and up to 20 s more for each further kind (sparse,
+another output dtype, sums, `read_entries`), a few seconds for a
+track-order read or a write. numba caches them next to the
 installed package or in the user's cache directory; later processes load
 them in a fraction of a second. Warm up with a small call before timing and
 before spawning DataLoader workers, each of which loads the cache.

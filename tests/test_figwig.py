@@ -17,6 +17,7 @@ import pytest
 import figwig
 import figwig.figwig
 import figwig._figwig_kernels
+import figwig._kernels
 
 from figwig import FigWigReader
 from figwig import FigWigWriter
@@ -1644,6 +1645,81 @@ def test_read_entries_plans_within_the_longest_chromosome(fw, track_fw,
 			several.chroms, several.positions, several.tracks, several.values)):
 		assert a.dtype == b.dtype
 		numpy.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_read_entries_past_2_31_bases(tmp_path, order):
+	"""A window of 2**31 bases or more lists its entries with int64 offsets,
+	in a read and in read_entries, both exactly."""
+
+	length = (1 << 31) + 5000
+	positions = numpy.array([0, 17, 1 << 20, (1 << 31) - 1, 1 << 31, length - 1])
+	tracks = numpy.array([0, 1, 0, 1, 1, 0])
+	values = numpy.arange(1, 7, dtype=numpy.uint8)
+	path = tmp_path / 'long.fw'
+	with FigWigWriter(path, {'chr1': length, 'chr2': 1000}, [{'name': 'a',
+			'dtype': 'uint8'}, {'name': 'b', 'dtype': 'uint8'}], order=order,
+			n_jobs=2) as writer:
+		writer.write_sparse(['chr1'] * 6, positions, tracks, values)
+
+	reader = FigWigReader(path)
+	entries = reader.read_entries(chroms='chr1', n_jobs=2)
+	key = numpy.lexsort((positions, tracks))
+	numpy.testing.assert_array_equal(entries.chroms, numpy.zeros(6))
+	numpy.testing.assert_array_equal(entries.positions, positions[key])
+	numpy.testing.assert_array_equal(entries.tracks, tracks[key])
+	numpy.testing.assert_array_equal(entries.values, values[key])
+
+	found = reader.read(['chr1'], [0], length, n_jobs=2, sparse=True)
+	assert found.offsets.dtype == numpy.int64
+	key = numpy.lexsort((positions, tracks))
+	numpy.testing.assert_array_equal(found.offsets, positions[key])
+	numpy.testing.assert_array_equal(found.channels, tracks[key])
+	numpy.testing.assert_array_equal(found.values, values[key])
+
+
+def test_kernels_compile_no_copy_for_a_constant(fw, track_fw, dense_bw,
+		tmp_path):
+	"""Reads of every kind, writes, sparse writes and bigWig reads pass the
+	kernels typed arguments, so that numba compiles no kernel for a literal
+	constant: a variable that starts at 0 and is passed on is typed as the
+	literal 0 and then as an int64, and compiles the kernel it is passed to
+	twice. A kernel loaded from numba's cache types none of its callees, so
+	this finds a literal only where the kernels compile, as in CI once they
+	change."""
+
+	numba = pytest.importorskip('numba')
+	rng = numpy.random.default_rng(3)
+	for path in (fw, track_fw):
+		reader = FigWigReader(path)
+		chroms, starts = random_windows(rng, 40, 500)
+		reader.read(chroms, starts, 500, n_jobs=2)
+		reader.read(chroms, starts, 500, dtype='float64', n_jobs=2)
+		reader.read(chroms, starts, 500, n_jobs=2, sparse=True)
+		reader.read(chroms, starts, 500, n_jobs=2, bins=5)
+		reader.read_entries(n_jobs=2)
+	with FigWigWriter(tmp_path / 'out.fw', {'chr1': 50_000}, [{'name': 'a'}, {
+			'name': 'b', 'dtype': 'uint16'}], groups=2, n_jobs=2) as writer:
+		writer.write('chr1', [0], rng.integers(0, 3, (1, 2, 50_000)))
+	for order in ('positions', 'tracks'):
+		with FigWigWriter(tmp_path / '{}.fw'.format(order), {'chr1': 50_000},
+				[{'name': 'a'}, {'name': 'b'}], order=order, n_jobs=2) as writer:
+			positions = numpy.sort(rng.choice(50_000, 3000, replace=False))
+			writer.write_sparse(['chr1'] * 3000, positions, rng.integers(0, 2,
+				3000), rng.integers(1, 5, 3000))
+
+	bigwig = figwig.BigWigReader(dense_bw[0])
+	for engine in ('zlib', 'auto'):
+		bigwig.read(['chr1'] * 4, [0, 1000, 50_000, 100_000], 1000, n_jobs=2,
+			engine=engine)
+
+	literal = []
+	for module in (figwig._figwig_kernels, figwig._kernels):
+		for name, kernel in vars(module).items():
+			if isinstance(kernel, numba.core.dispatcher.Dispatcher):
+				literal += [name for signature in kernel.signatures if any(
+					isinstance(t, numba.types.Literal) for t in signature)]
+	assert literal == []
 
 
 ###

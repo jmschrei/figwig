@@ -271,7 +271,7 @@ def _inflate_blocks(uncompress, data, starts, sizes, buffer, blocks, length):
 	Returns the number of bytes of `buffer` that were used.
 	"""
 
-	position = 0
+	position = int(0)
 	for k in range(starts.shape[0]):
 		if blocks[k, 5] != 1:
 			continue
@@ -306,7 +306,7 @@ def _isal_inflate_blocks(functions, state, block_state, crc_flag, data,
 	init, inflate = functions
 	ints = state.view(numpy.uint32)
 	pointers = state.view(numpy.uint64)
-	position = 0
+	position = int(0)
 	for k in range(starts.shape[0]):
 		if blocks[k, 5] != 1:
 			continue

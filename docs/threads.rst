@@ -183,15 +183,16 @@ The first call
 --------------
 
 The first read in a new environment compiles figwig's numba kernels, which
-took 0.7 s for the bigWig reader on the machine above, and 1.1 s for
+took 1.1 s for the bigWig reader on the machine above, and 1.8 s for
 ``figwig bam2bw``. A figwig file's kernels are larger, and compiled once per
-element type of a chunk and per output dtype: the first dense read
-compiled for 32 s, the first sparse read for 19 s more, the first sum per
-label for 2 s, the first ``read_entries`` for 15 s, the first track-order
-read for 8 s and the first write for 10 s, about 85 s in all for a process
-that reads and writes every way, each with no output while it compiles
-(116 s before the kernels passed their constants to each other as plain
-values rather than literals, which numba compiled a copy per value for).
+element type of a chunk and per output dtype. Alone in a new process,
+the first dense read compiled for 21 s, a sparse read for 22 s, a sum per
+label for 21 s, ``read_entries`` for 20 s, a track-order read for 3.6 s
+and a write for 7.9 s, each with no output while it compiles. Kinds of call
+share kernels, so a process that reads and writes every way compiled for
+87 s in all: after its dense read of float32 values, a sparse read of
+uint16 values took 19 s more, a sum per label 19 s, ``read_entries`` 17 s,
+a track-order read 2.1 s and a write 8.7 s.
 numba caches them on
 disk, next to the installed package,
 or in the user's cache directory when the package directory cannot be
