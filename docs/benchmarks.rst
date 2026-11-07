@@ -414,8 +414,8 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 512 tracks
      - 1,024 tracks
    * - figwig file, position order
-     - 1.9 / 0.56 / 0.46, 20 MB
-     - 15.0 / 3.7 / 3.8, 148 MB
+     - 1.9 / 0.49 / 0.49, 20 MB
+     - 15.0 / 3.6 / 4.0, 148 MB
      - 172 / 38 / 39, 1.5 GB
      - 350 / 75 / 72, 3.1 GB
    * - figwig file, track order
@@ -453,6 +453,10 @@ stays under 8 GB. Seconds at 1 / 8 / 32 threads:
      - 7.2 / 7.0 / 5.9, 23.9 GB
      - not run
      - not run
+
+The figwig file's writes of 6 and 48 tracks on 8 and 32 threads were
+measured again on 2026-11-06, the median of five processes; the other
+cells are from the first run.
 
 .. image:: figures/format-scaling.png
    :alt: Write and read time against threads for 1 to 1,024 count tracks in each format, log scales
