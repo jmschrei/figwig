@@ -901,7 +901,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - one bigWig per cell (1.4 GB)
    * - write
      - 44 / 7.7 / 4.9
-     - 24 / 7.8 / 8.3
+     - 25 / 8.8 / 9.7
      - 10.6 / 11.4
      - 116 / 78 / 82
    * - 10 pseudobulks over the windows (``labels=``)
@@ -928,7 +928,7 @@ at a time, and at 16 and 32 threads its per-thread output copies pass the
 8 GiB guard, so it is refused there. The scipy writer only sorts and
 saves, and its 16 GB are loaded before any read. The track order's write
 and size, which include each cell's tile sums compressed by libdeflate,
-were measured again on 2026-11-06, the rest of the table before.
+were measured again on 2026-11-07, the rest of the table before.
 
 Reads as tracks
 ~~~~~~~~~~~~~~~
@@ -949,7 +949,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - scipy CSR
    * - write
      - 2.8 / 1.1 / 1.5
-     - 2.6 / 2.2 / 2.5
+     - 2.4 / 2.2 / 2.6
      - 6.8
    * - sum over all reads, 8,192 windows (``labels=``)
      - 0.21 / 0.16 / 0.15
@@ -973,7 +973,7 @@ with its own blocks, and the sparse values gain little from threads, since
 each read touches few chunks. Track order, which plans every read's windows
 at once, takes 1.1 to 2.9 times as long as position order on these reads.
 The track order's write and size, which include each read's tile sums,
-were measured again on 2026-11-06, the rest of the table before.
+were measured again on 2026-11-07, the rest of the table before.
 
 To a GPU
 ~~~~~~~~
