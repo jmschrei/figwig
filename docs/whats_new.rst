@@ -110,6 +110,8 @@ Converters and commands
 
 	- ``figwig reorder`` into track order hands the writer each chromosome's entries as already sorted, and the track-order writer sums its blocks' tiles in one pass: the read depth of the HCT116 ATAC-seq BAM reorders in 39 s on one thread, where it took 57 s, at a peak of 7.9 GB, where it took 14.0 GB. The file is the same to the byte.
 
+	- ``figwig bam2bw -c`` and ``figwig bam2fw -c`` take a SAM file's reads, and those of a BAM file the record kernel hands to pysam, in the kernel's blocks: a run of M, = and X operations split only at D and N, where pysam's ``get_blocks()`` began a block at every operation. An insertion, or a change between = and X, no longer splits a bigWig interval there, so a SAM gives the bigWigs of the same reads as a BAM to the byte; and ``-ps``/``-ns`` empty a read they reach across whole, where they emptied only its first or last operation and left the others covered, in bigWigs and figwig files alike. Without shifts, ``bam2fw -c`` already wrote the same figwig files, which keep values rather than intervals.
+
 Packaging
 ---------
 

@@ -1124,6 +1124,47 @@ def test_read_depth_of_coverage_counts_reads(tmp_path, sizes, monkeypatch,
 	assert "through by a read depth of 5." in capsys.readouterr().out
 
 
+def test_coverage_through_pysam_is_the_kernels_bigwig(tmp_path, sizes):
+	"""A SAM, which pysam's loop reads, gives the bigWigs of the same reads
+	as a BAM, which the record kernel reads, to the byte: a block is a run
+	of M, = and X operations split only at D and N, so an insertion, a
+	padding or a change between = and X does not split it, and the shifts
+	move the run's ends, emptying a read they reach across whole."""
+
+	import hashlib
+	import pysam
+
+	header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": chrom,
+		"LN": length} for chrom, length in BAM_CHROM_SIZES]}
+	cigars = ["5S10M3I10M5S", "10=1X10=", "4=2X3M", "3H10M2P10M3H", "10M5D10M",
+		"10M100N10M", "10M2I5D10M", "6M1I1D6M", "2S1M1I1M1I1M2S", "1M"]
+	records = sorted((60 + 35 * k + 3 * reverse, cigar, reverse) for k, cigar in
+		enumerate(cigars) for reverse in (False, True))
+	path = str(tmp_path / "ops.bam")
+	with pysam.AlignmentFile(path, "wb", header=header) as handle:
+		for k, (start, cigar, reverse) in enumerate(records):
+			read = pysam.AlignedSegment(handle.header)
+			read.query_name = "r{}".format(k)
+			read.reference_id = 0
+			read.reference_start = start
+			read.cigarstring = cigar
+			read.flag = 16 if reverse else 0
+			read.mapping_quality = 60
+			read.query_sequence = "A" * read.query_length
+			handle.write(read)
+	sam = str(tmp_path / "ops.sam")
+	pysam.view("-h", "-o", sam, path, catch_stdout=False)
+
+	def digests(paths):
+		return [hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths]
+
+	for k, flags in enumerate([("-c", "-u"), ("-c",), ("-c", "-u", "-ps", "4",
+			"-ns=-5"), ("-c", "-ps", "2", "-ns=-3")]):
+		kernel = bam2bw(tmp_path / "bam{}".format(k), path, sizes, *flags)
+		loop = bam2bw(tmp_path / "sam{}".format(k), sam, sizes, *flags)
+		assert digests(kernel) == digests(loop), flags
+
+
 # --coverage, the edges: the run decoder itself, inputs the other paths
 # take, batches, clipping at both ends, several files, the options.
 
