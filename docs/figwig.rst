@@ -635,8 +635,8 @@ channel is an attribute like any other.
 Group the tracks by channel over runs of consecutive reads, not by read:
 the reads sorted by start and cut into groups of about a thousand, so that
 each group's chunks cover one stretch of the genome and a window decodes
-the few chunks of the groups whose reads overlap it. A chunk may hold at
-most 2**29 values (tracks times tile), which rules out one group of every
+the few chunks of the groups whose reads overlap it. A chunk holds fewer
+than 2**29 values (tracks times tile), which rules out one group of every
 read, and a group per read costs a planning step per group on every read.
 On the m6A calls of 90,543 Fiber-seq reads in groups of 1,024 (position
 order, tile 16,384, 62 MB), summing every read over 8,192 windows of

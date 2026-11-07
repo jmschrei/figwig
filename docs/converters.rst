@@ -160,8 +160,8 @@ is 8 or more, as :doc:`bam2bw` describes, into tracks of the same values.
 ``--barcode-column N`` writes a fragments file as one track per cell
 instead: column ``N`` (from 1; 4 in a Cell Ranger fragments file) holds
 the barcode, each barcode becomes a track named by it, in order of first
-appearance, every cell of a file goes in one group, or in as few as the
-2**29 values a chunk holds allow (32,768 cells at the default tile;
+appearance, every cell of a file goes in one group, or in as few groups as
+keep each chunk under 2**29 values (32,767 cells at the default tile;
 ``--groups`` for smaller ones), and there is one track per cell rather
 than a pair, since fragments have no strand. ``--cells`` gives a table, tab-separated or
 ``.csv`` with a header, whose first column lists the barcodes to keep, in

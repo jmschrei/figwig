@@ -890,7 +890,7 @@ Limits
    * - tile
      - a power of two from 16 to 65,536 bases
    * - tracks of a group
-     - ``2**29 / tile``, so that a dense chunk of ``f8`` fits a u4 size: 32,768 at the default tile of 16,384
+     - fewer than ``2**29 / tile``, so that a dense chunk of ``f8`` fits a u4 size: 32,767 at the default tile of 16,384. Files of figwig 0.2.0 may hold ``2**29 / tile``, and a reader takes them
    * - values
      - finite binary64 or NaN; integers exact to 2**53
    * - entries per block

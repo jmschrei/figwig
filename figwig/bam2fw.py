@@ -33,7 +33,7 @@ _FRAGMENT_EXTENSIONS = ('.tsv', '.tsv.gz', '.bed', '.bed.gz')
 
 # The values a chunk of the figwig file holds at most, tracks times tile,
 # which FigWigWriter checks; a file's cells are grouped within it by default.
-_CHUNK_VALUES = 1 << 29
+_CHUNK_VALUES = (1 << 29) - 1
 
 _EXTENSIONS = ('.bam', '.sam', '.tsv.gz', '.tsv', '.bed.gz', '.bed')
 
@@ -70,8 +70,9 @@ def _parser(prog):
 		"the file, in order of first appearance.")
 	parser.add_argument('--groups', default=None, type=int, help="With "
 		"--barcode-column, the consecutive cells whose tiles are stored "
-		"together. Default is every cell of a file in one group, up to the "
-		"2**29 values a chunk holds, 32,768 cells at the default tile.")
+		"together. Default is every cell of a file in one group while its "
+		"chunks hold fewer than 2**29 values, cells times tile: up to 32,767 "
+		"cells at the default tile.")
 	parser.add_argument('-t', '--tile', default=_DEFAULT_TILE, type=int,
 		help="The bases per tile, a power of two from 16 to 65536. Default is "
 		"{}.".format(_DEFAULT_TILE))

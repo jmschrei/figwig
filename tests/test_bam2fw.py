@@ -720,6 +720,14 @@ def test_default_groups_stay_within_a_chunk(tmp_path, sizes, monkeypatch):
 		1, 1, 1, 2, 2, 2, 3]
 
 
+def test_default_groups_are_ones_the_writer_takes():
+	"""The default group of cells at any tile holds fewer than 2**29 values
+	per chunk, which FigWigWriter requires."""
+
+	for tile in (16, 1024, 16384, 65536):
+		assert max(figwig.bam2fw._CHUNK_VALUES // tile, 1) * tile < 2 ** 29
+
+
 def test_entries_arrive_in_the_writers_order(tmp_path, sizes):
 	"""The scanner's keys sort into the order the writer encodes in, tile by
 	tile and cell by cell, so bam2fw hands them over presorted; the file must

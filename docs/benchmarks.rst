@@ -664,7 +664,7 @@ is the reading of the file's units, the writer's own thread and
 start-up, about 3 s in all, so the whole gains 6.6 times on 8 threads
 and 11 times on 32. The peak is three to four times the 8 bytes per
 fragment end the keys take. Every barcode of the file, 573,156 tracks
-in 18 groups of 32,768, costs five times as long, since each unit of
+in 18 groups of 32,767, costs five times as long, since each unit of
 the file then scans a copy of the barcode table and the barcodes it
 finds are numbered afterwards, for a file 13% larger. On the
 1,001,098-fragment ``large`` file of the called cells, the figwig
@@ -962,7 +962,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - 2.3 / 0.53 / 0.36
      - 5.8 / 6.8
 
-One group of every read is refused, since a chunk holds at most 2**29
+One group of every read is refused, since a chunk holds fewer than 2**29
 values, and a group per read made the sum over 8,192 windows take 230 s,
 each read paying a planning step per group; groups of consecutive reads
 are the layout. A sum over every read runs in bands of windows on the
