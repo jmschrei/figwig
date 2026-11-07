@@ -896,12 +896,12 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
 
    * - workload
      - figwig, position order (1.0 GB)
-     - figwig, track order (2.4 GB)
+     - figwig, track order (2.7 GB)
      - scipy CSR (16.3 GB, in memory)
      - one bigWig per cell (1.4 GB)
    * - write
      - 44 / 7.7 / 4.9
-     - 22 / 7.6 / 7.6
+     - 24 / 7.8 / 8.3
      - 10.6 / 11.4
      - 116 / 78 / 82
    * - 10 pseudobulks over the windows (``labels=``)
@@ -926,7 +926,9 @@ is a sixteenth of the matrix's size; a tile of cut sites whose nonzero values
 are all 1 stores no values. Track order sums 10,246 tracks one block task
 at a time, and at 16 and 32 threads its per-thread output copies pass the
 8 GiB guard, so it is refused there. The scipy writer only sorts and
-saves, and its 16 GB are loaded before any read.
+saves, and its 16 GB are loaded before any read. The track order's write
+and size, which include each cell's tile sums compressed by libdeflate,
+were measured again on 2026-11-06, the rest of the table before.
 
 Reads as tracks
 ~~~~~~~~~~~~~~~
@@ -934,7 +936,7 @@ Reads as tracks
 The m6A calls (probability at least 0.5) of the 90,543 reads of a K562
 Fiber-seq BAM, 49.6 million calls, one uint8 track per read with the
 read's name, span and strand as attributes, in position order in groups of
-1,024 consecutive reads (62 MB), in track order (226 MB), and as a scipy
+1,024 consecutive reads (62 MB), in track order (229 MB), and as a scipy
 CSR matrix per chromosome (12.7 GB). Windows of 2,048 bases on reads.
 Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
 
@@ -947,7 +949,7 @@ Seconds at 1 / 8 / 32 threads (scipy at 1 / 8):
      - scipy CSR
    * - write
      - 2.8 / 1.1 / 1.5
-     - 2.1 / 1.8 / 2.6
+     - 2.6 / 2.2 / 2.5
      - 6.8
    * - sum over all reads, 8,192 windows (``labels=``)
      - 0.21 / 0.16 / 0.15
@@ -970,6 +972,8 @@ threads, the paired sums over integer reads are one read, each read's span
 with its own blocks, and the sparse values gain little from threads, since
 each read touches few chunks. Track order, which plans every read's windows
 at once, takes 1.1 to 2.9 times as long as position order on these reads.
+The track order's write and size, which include each read's tile sums,
+were measured again on 2026-11-06, the rest of the table before.
 
 To a GPU
 ~~~~~~~~
