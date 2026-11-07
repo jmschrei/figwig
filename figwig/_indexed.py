@@ -519,12 +519,14 @@ _runs_compiled = None
 def _keys_to_runs(keys, lo, hi, low, high, size, first, last, count_lo,
 	count_hi, starts, ends, values, cut_before, cut_after):
 	"""The runs of coverage of keys[lo:hi], sorted keys of one strand whose
-	low _KEY_SHIFT bits are a position on the doubled line plus _KEY_BIAS:
+	low _KEY_SHIFT bits are a position on the line times four, as
+	bam2bw's coverage events are, plus _KEY_BIAS:
 	the stretches between consecutive event places whose depth is not 0,
 	as `_coverage_runs` finds them, cut to [low, high) with the cut ends
 	flagged and, in a chromosome's first or last region, clipped to [0,
-	size). Writes them from 0 on and returns their number, the start events
-	at places in [count_lo, count_hi), and the coverage clipped away."""
+	size). Writes them from 0 on and returns their number, the reads whose
+	first block starts at a place in [count_lo, count_hi), and the coverage
+	clipped away."""
 
 	mask = (numpy.int64(1) << 35) - 1
 	bias = numpy.int64(1) << 33
@@ -535,20 +537,20 @@ def _keys_to_runs(keys, lo, hi, low, high, size, first, last, count_lo,
 	i = lo
 	while i < hi:
 		position = (keys[i] & mask) - bias
-		place = position >> 1
-		# Every event at this place: equal keys, then the other parity.
-		while i < hi and ((keys[i] & mask) - bias) >> 1 == place:
+		place = position >> 2
+		# Every event at this place: the starts, then the ends.
+		while i < hi and ((keys[i] & mask) - bias) >> 2 == place:
 			p = (keys[i] & mask) - bias
-			if p & 1:
+			if p & 2:
 				depth -= 1
 			else:
 				depth += 1
-				if count_lo <= place and place < count_hi:
+				if (p & 3) == 0 and count_lo <= place and place < count_hi:
 					counted += 1
 			i += 1
 		if i >= hi or depth == 0:
 			continue
-		next_place = ((keys[i] & mask) - bias) >> 1
+		next_place = ((keys[i] & mask) - bias) >> 2
 		s, e = place, next_place
 		before, after = s < low, e > high
 		if before:
@@ -589,9 +591,10 @@ def _keys_to_dense(keys, lo, hi, beg, size, first, last, count_lo, count_hi,
 	out):
 	"""The depth of keys[lo:hi], sorted keys of one strand as in
 	`_keys_to_runs`, at each base of `out` from `beg` on, `out` being the
-	region's bases inside the chromosome; the start events at places in
-	[count_lo, count_hi); and, in a chromosome's first or last region, the
-	coverage of the bases outside [0, size), as `_coverage_runs` counts it."""
+	region's bases inside the chromosome; the reads whose first block starts
+	at a place in [count_lo, count_hi); and, in a chromosome's first or last
+	region, the coverage of the bases outside [0, size), as `_coverage_runs`
+	counts it."""
 
 	mask = (numpy.int64(1) << 35) - 1
 	bias = numpy.int64(1) << 33
@@ -603,19 +606,19 @@ def _keys_to_dense(keys, lo, hi, beg, size, first, last, count_lo, count_hi,
 	depth = 0
 	i = lo
 	while i < hi:
-		place = ((keys[i] & mask) - bias) >> 1
-		while i < hi and ((keys[i] & mask) - bias) >> 1 == place:
+		place = ((keys[i] & mask) - bias) >> 2
+		while i < hi and ((keys[i] & mask) - bias) >> 2 == place:
 			p = (keys[i] & mask) - bias
-			if p & 1:
+			if p & 2:
 				depth -= 1
 			else:
 				depth += 1
-				if count_lo <= place and place < count_hi:
+				if (p & 3) == 0 and count_lo <= place and place < count_hi:
 					counted += 1
 			i += 1
 		if i >= hi or depth == 0:
 			continue
-		next_place = ((keys[i] & mask) - bias) >> 1
+		next_place = ((keys[i] & mask) - bias) >> 2
 		if first and place < 0:
 			lost += (min(next_place, 0) - place) * depth
 		if last and next_place > size:
@@ -644,7 +647,7 @@ def _keys_to_sparse(keys, lo, hi, beg, end, size, first, last, count_lo,
 	count_hi, starts, ends, values):
 	"""`_keys_to_dense` over [beg, end) without the window: its runs of
 	one nonzero value, in order, written to starts, ends and values; their
-	number, the start events and the coverage lost."""
+	number, the reads' first blocks and the coverage lost."""
 
 	mask = (numpy.int64(1) << 35) - 1
 	bias = numpy.int64(1) << 33
@@ -654,19 +657,19 @@ def _keys_to_sparse(keys, lo, hi, beg, end, size, first, last, count_lo,
 	depth = 0
 	i = lo
 	while i < hi:
-		place = ((keys[i] & mask) - bias) >> 1
-		while i < hi and ((keys[i] & mask) - bias) >> 1 == place:
+		place = ((keys[i] & mask) - bias) >> 2
+		while i < hi and ((keys[i] & mask) - bias) >> 2 == place:
 			p = (keys[i] & mask) - bias
-			if p & 1:
+			if p & 2:
 				depth -= 1
 			else:
 				depth += 1
-				if count_lo <= place and place < count_hi:
+				if (p & 3) == 0 and count_lo <= place and place < count_hi:
 					counted += 1
 			i += 1
 		if i >= hi or depth == 0:
 			continue
-		next_place = ((keys[i] & mask) - bias) >> 1
+		next_place = ((keys[i] & mask) - bias) >> 2
 		if first and place < 0:
 			lost += (min(next_place, 0) - place) * depth
 		if last and next_place > size:
@@ -690,7 +693,7 @@ def _region_dense(files, chrom, size, beg, end, first, last, margin,
 	"""The depth of each strand at each base of [beg, end) inside chrom, as
 	an int32 array, or as its runs of one nonzero value (starts, ends,
 	values) where it changes value less often than once per `_RUN_SPACING`
-	bases, with the start events and the coverage clipped away that
+	bases, with the reads' first blocks and the coverage clipped away that
 	`_region_runs` gives."""
 
 	stop = (1 << 62) if last else end + margin[1]
@@ -735,8 +738,8 @@ def _region_runs(files, chrom, size, beg, end, first, last, margin, unstranded):
 	"""The runs of each strand over [beg, end) of chrom, (starts, ends,
 	values, cut_before, cut_after), as `_coverage_runs` finds them, cut at
 	the region's edges and, in the first and last regions, clipped to the
-	chromosome; the start events the region holds inside the chromosome,
-	which `_read_count` counts; and the coverage clipped away."""
+	chromosome; the reads whose first block starts in the region inside the
+	chromosome, which `_read_count` counts; and the coverage clipped away."""
 
 	low = -(1 << 62) if first else beg
 	high = (1 << 62) if last else end

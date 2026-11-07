@@ -1073,6 +1073,57 @@ def test_coverage_counts_aligned_blocks(tmp_path, sizes):
 		assert values.min() >= 0 and values[440:470].sum() == 0
 
 
+@pytest.mark.parametrize("path", ["indexed", "kernel", "pysam"])
+def test_read_depth_of_coverage_counts_reads(tmp_path, sizes, monkeypatch,
+		capsys, path):
+	"""-r with -c divides by the reads, one for each read whose first block
+	starts inside its chromosome, however many blocks its deletions and
+	skipped introns cut it into: through the indexed reader in regions of 64
+	bases, which the spliced read crosses, the record kernel and the pysam
+	loop alike, for bam2bw and bam2fw."""
+
+	import pysam
+	import figwig._indexed
+
+	header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": chrom,
+		"LN": length} for chrom, length in BAM_CHROM_SIZES]}
+	records = [("chr1", 100, "20M30N20M"), ("chr1", 200, "10M5D10M"), ("chr1",
+		300, "5S10M3I10M5S"), ("chr1", 400, "30M"), ("chr2", 10, "40I"), ("chr2",
+		20, "10M2N10M2D10M")]
+	path_bam = str(tmp_path / "reads.bam")
+	with pysam.AlignmentFile(path_bam, "wb", header=header) as handle:
+		for k, (chrom, start, cigar) in enumerate(records):
+			read = pysam.AlignedSegment(handle.header)
+			read.query_name = "r{}".format(k)
+			read.reference_id = handle.get_tid(chrom)
+			read.reference_start = start
+			read.cigarstring = cigar
+			read.mapping_quality = 60
+			read.query_sequence = "A" * read.query_length
+			handle.write(read)
+	pysam.index(path_bam)
+	source = path_bam
+	if path == "indexed":
+		monkeypatch.setattr(figwig._indexed, "_regions", fixed_regions(64))
+	elif path == "kernel":
+		monkeypatch.setattr(figwig._indexed, "_MIN_CORES", 1 << 20)
+	else:
+		source = str(tmp_path / "reads.sam")
+		pysam.view("-h", "-o", source, path_bam, catch_stdout=False)
+
+	# Five reads have an aligned block; "40I" has none.
+	capsys.readouterr()
+	plain, = bam2bw(tmp_path / "plain", source, sizes, "-c", "-u")
+	divided, = bam2bw(tmp_path / "divided", source, sizes, "-c", "-u", "-r", "-v")
+	assert "Dividing through by a read depth of 5." in capsys.readouterr().out
+	for chrom, length in CHROM_SIZES:
+		numpy.testing.assert_array_equal(bigwig_values(divided, chrom, length),
+			bigwig_values(plain, chrom, length) / numpy.float32(5))
+
+	bam2fw(tmp_path / "fw", [source], sizes, "-c", "-u", "-r", "-v", "--force")
+	assert "through by a read depth of 5." in capsys.readouterr().out
+
+
 # --coverage, the edges: the run decoder itself, inputs the other paths
 # take, batches, clipping at both ends, several files, the options.
 
@@ -1087,7 +1138,7 @@ def test_coverage_runs_from_events():
 	def events(spans):
 		keys = []
 		for start, end in spans:
-			keys += [2 * start, 2 * end + 1]
+			keys += [4 * start, 4 * end + 2]
 		positions, counts = numpy.unique(numpy.array(keys), return_counts=True)
 		return positions, counts
 
@@ -1402,8 +1453,8 @@ def test_sparse_regions_are_the_runs_of_their_depth(seed):
 	ends = starts + rng.integers(1, 80, 60)
 	starts[:10] = ends[10:20]
 	bias = 1 << 33
-	keys = numpy.sort(numpy.concatenate([bias + 2 * starts, bias + 2 * ends +
-		1])).astype(numpy.int64)
+	keys = numpy.sort(numpy.concatenate([bias + 4 * starts, bias + 4 * ends +
+		2])).astype(numpy.int64)
 	for beg, end in [(0, 300), (250, 700), (650, size), (0, size), (400, 400),
 			(990, size)]:
 		for first in (beg == 0, False):

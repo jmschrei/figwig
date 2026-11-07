@@ -39,7 +39,7 @@ figwig bam2bw fragments.tsv.gz -s hg38.chrom.sizes -n sample -p 8 -f -u   # samp
 | DNase-seq, ChIP-seq BAM | defaults |
 | fragments file (bulk or 10x single-cell) | `-f -u`; 10x fragments are usually Tn5-shifted already |
 | PRO-seq, PRO-cap | `-mp`, with `--rna5` and `-3p` as the protocol needs |
-| read-span coverage for a browser or a pileup-style target (ChIP-seq, RNA-seq) | `-c`, with `-r` for depth normalization; a spliced read covers its exons only |
+| read-span coverage for a browser or a pileup-style target (ChIP-seq, RNA-seq) | `-c`, with `-r` for depth normalization (one count per read, as deepTools' CPM counts); a spliced read covers its exons only |
 
 ## Inputs
 
