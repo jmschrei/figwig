@@ -239,9 +239,13 @@ def _write_runs(writer, name, chrom, length, starts, ends, values, scale_factor,
 			writer.write(chrom, numpy.maximum(starts[lo:hi], a), values[lo:hi,
 				None], ends=numpy.minimum(ends[lo:hi], b), tracks=[name])
 
+	# The last piece ends where the last run does, as the one call of one
+	# thread does, so that both leave the tile it ends in open, and the
+	# writer writes it at the same point of the file.
 	span = None
+	last = int(ends[-1])
 	first = starts[0] // _COVERAGE_PIECE * _COVERAGE_PIECE
-	for a in range(first, int(ends[-1]), _COVERAGE_PIECE):
+	for a in range(first, last, _COVERAGE_PIECE):
 		b = min(a + _COVERAGE_PIECE, length)
 		lo = numpy.searchsorted(ends, a, side='right')
 		hi = numpy.searchsorted(starts, b, side='left')
@@ -251,6 +255,7 @@ def _write_runs(writer, name, chrom, length, starts, ends, values, scale_factor,
 		if span is not None:
 			put(*span)
 			span = None
+		b = min(b, last)
 		writer.write(chrom, [a], _dense_runs(starts[lo:hi] - a, ends[lo:hi] - a,
 			values[lo:hi], b - a)[None, None], tracks=[name])
 	if span is not None:
