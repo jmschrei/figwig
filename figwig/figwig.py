@@ -6935,12 +6935,14 @@ class _Task:
 			positions = numpy.zeros(0, dtype=numpy.int64)
 
 		if self.mode == 'list':
-			empty = numpy.zeros(0, dtype=numpy.int64)
+			# The count takes empty arrays of the entries' type, so that both
+			# calls are one compile.
+			index = _part_index(self.width)
+			empty = numpy.zeros(0, dtype=index)
 			count = _list_tiles(reader.tile, data, positions, self.kinds, len(
 				self.slots), self.slots, pair_chunks, self.pair_bases,
 				self.pair_starts, self.pair_rows, self.width, False, empty, empty,
 				empty, numpy.zeros(0, dtype=numpy.float64))
-			index = _part_index(self.width)
 			rows = numpy.empty(count, dtype=index)
 			channels = numpy.empty(count, dtype=index)
 			offsets = numpy.empty(count, dtype=index)
@@ -6953,11 +6955,15 @@ class _Task:
 
 		# A scratch tile for chunks that many windows fall on, when it fits
 		# _SCRATCH_BYTES; a read of more channels than that decodes each
-		# pair on its own.
+		# pair on its own. It is float64 for sums, and of the output's type
+		# for a plain read, whose values the output holds exactly, so that
+		# the kernels decode into one type of array.
 		n_channels = self.out.shape[1]
-		scratch = numpy.zeros((0, 0), dtype=numpy.float64)
+		kind = numpy.float64 if self.accumulate or self.bins > 1 else \
+			self.out.dtype
+		scratch = numpy.zeros((0, 0), dtype=kind)
 		if n_channels * reader.tile * 8 <= _SCRATCH_BYTES:
-			scratch = numpy.empty((n_channels, reader.tile), dtype=numpy.float64)
+			scratch = numpy.empty((n_channels, reader.tile), dtype=kind)
 
 		args = (reader.tile, data, positions, self.kinds, len(self.slots),
 			self.slots, pair_chunks, self.pair_bases, self.pair_starts,
@@ -7048,14 +7054,20 @@ class _BlockTask:
 		empty = numpy.zeros(0, dtype=numpy.int64)
 		out = self.out if self.out is not None else numpy.zeros((1, 1, 1),
 			dtype=numpy.float32)
-		scratch = numpy.zeros(self.width if self.bins > 1 else 0,
-			dtype=numpy.float64)
+		# A binned read sums through a float64 row; the others take an empty
+		# one of the output's type, so that the kernels decode into one type
+		# of array.
+		scratch = numpy.zeros(self.width, dtype=numpy.float64) if self.bins > 1 \
+			else numpy.zeros(0, dtype=out.dtype)
 		if self.mode == 'list':
+			# The count takes empty arrays of the entries' type, so that both
+			# calls are one compile.
+			index = _part_index(self.width)
+			listed = numpy.zeros(0, dtype=index)
 			count = _read_blocks(data, positions, kinds, n_entries, self.pair_blocks,
 				self.pair_slots, self.pair_starts, self.pair_rows, self.width, out,
-				False, True, False, empty, empty, empty, numpy.zeros(0,
+				False, True, False, listed, listed, listed, numpy.zeros(0,
 				dtype=numpy.float64), scratch, 1, empty, 0)
-			index = _part_index(self.width)
 			rows = numpy.empty(count, dtype=index)
 			channels = numpy.empty(count, dtype=index)
 			offsets = numpy.empty(count, dtype=index)
