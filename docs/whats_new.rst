@@ -98,6 +98,11 @@ Converters and commands
 
 	- ``figwig reorder`` into track order hands the writer each chromosome's entries as already sorted, and the track-order writer sums its blocks' tiles in one pass: the read depth of the HCT116 ATAC-seq BAM reorders in 39 s on one thread, where it took 57 s, at a peak of 7.9 GB, where it took 14.0 GB. The file is the same to the byte.
 
+Packaging
+---------
+
+	- The ``bam2bw`` and ``dev`` extras require python-isal 1.8, as the ``isal`` extra does, where they took 1.0 or later, with which ISA-L reads fall back to zlib.
+
 Documentation
 -------------
 

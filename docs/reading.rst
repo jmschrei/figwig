@@ -285,8 +285,9 @@ ISA-L decompression
 -------------------
 
 Data blocks are inflated by ISA-L, Intel's inflate, when the ``isal`` package
-is installed (``pip install figwig[isal]``; python-isal 1.8 or later, which
-the ``bam2bw`` extra installs too), and by zlib otherwise. ``engine='zlib'``
+is installed (``pip install figwig[isal]``, which the ``bam2bw`` extra
+includes; python-isal 1.8, since 1.9 bundles ISA-L 2.32.1, which reads with
+zlib as below), and by zlib otherwise. ``engine='zlib'``
 or ``engine='isal'`` on ``read`` and ``read_bigwig`` chooses one. Both give
 the same values, and ISA-L reads 1.3 to 1.5 times faster on 1 to 8 threads
 (:doc:`benchmarks`).
