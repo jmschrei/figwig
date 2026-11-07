@@ -3253,6 +3253,34 @@ def test_a_write_copies_its_block_before_returning(tmp_path, monkeypatch,
 	assert written[0] == written[1]
 
 
+@pytest.mark.parametrize('dtype', ['uint8', 'int8', 'uint16', 'int16', 'int32',
+	'float32'])
+def test_a_write_cut_into_tasks_is_the_file_one_thread_writes(tmp_path,
+		monkeypatch, dtype):
+	"""A call's whole tiles cut into tasks, more of them for float values
+	and wider integers than for integers of one or two bytes, give the
+	file one thread writes, with every value of its type's range."""
+
+	monkeypatch.setattr(figwig.figwig, '_WRITE_TASK_BYTES', 10000)
+	info = numpy.iinfo(dtype) if dtype != 'float32' else None
+	rng = numpy.random.default_rng(7)
+	values = rng.integers(info.min if info else -1000, (info.max if info else
+		1000) + 1, (2, 5, 64 * 40), dtype=numpy.int64).astype(dtype)
+	values[:, :, rng.random(64 * 40) < 0.3] = 0
+	if dtype == 'float32':
+		values *= numpy.float32(0.37)
+
+	written = []
+	for n_jobs in (1, 8):
+		path = str(tmp_path / '{}.fw'.format(n_jobs))
+		with FigWigWriter(path, {'chr1': 64 * 100}, ['t{}'.format(i) for i in
+				range(5)], tile=64, n_jobs=n_jobs) as writer:
+			writer.write('chr1', [0, 64 * 50], values)
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
+
+
 @pytest.mark.parametrize('order', ['positions', 'tracks'])
 def test_writes_on_their_own_thread_write_the_file_one_thread_writes(tmp_path,
 		monkeypatch, order):
