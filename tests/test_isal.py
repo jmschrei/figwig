@@ -68,6 +68,33 @@ def test_auto_uses_isal_where_it_can_be_called():
 	assert decoder.functions is not None
 
 
+def test_a_checked_layout_inflates_through_the_kernel(fresh_functions):
+	"""Where the installed ISA-L is a version whose layout `_LAYOUTS` holds,
+	on a 64-bit platform whose python-isal exports ISA-L's inflate, the
+	kernel loads with that layout: the known block inflates through it to
+	zlib's bytes. CI resolves python-isal 1.9 (ISA-L 2.32.1) and, with the
+	lowest dependencies, 1.8 (ISA-L 2.31.1)."""
+
+	import ctypes
+
+	isal = pytest.importorskip('isal')
+	from isal import isal_zlib
+
+	version = getattr(isal, 'ISAL_VERSION', None)
+	if version not in figwig._isal._LAYOUTS or sys.maxsize < 2 ** 32:
+		pytest.skip('ISA-L {} has no checked layout here'.format(version))
+	try:
+		library = ctypes.CDLL(isal_zlib.__file__)
+		library.isal_inflate_init, library.isal_inflate_stateless
+	except (OSError, AttributeError):
+		pytest.skip("python-isal does not export ISA-L's inflate here")
+
+	functions = figwig._isal._isal_functions()
+	assert functions is not None
+	assert functions[1] == figwig._isal._LAYOUTS[version]
+	assert figwig._isal._inflates_a_known_block(functions)
+
+
 def test_auto_without_isal_uses_zlib(monkeypatch, fresh_functions):
 	monkeypatch.setitem(sys.modules, 'isal', None)
 	assert isinstance(_decoder('auto'), _ZlibDecoder)

@@ -12,6 +12,8 @@ Unreleased
 Reading
 -------
 
+	- The ISA-L kernel knows the inflate state of ISA-L 2.32.1, which python-isal 1.9 bundles, as it knew 2.31.1's (python-isal 1.8), so ``engine='auto'`` reads with ISA-L under either, where python-isal 1.9 read with zlib. The two versions' ``struct inflate_state`` is the same, field by field.
+
 	- ``oob=`` on ``BigWigReader.read`` and ``read_bigwig`` sets the value of bases past the end of a chromosome, as in pybigtools' ``values()``. The default stays NaN. Thanks @casblaauw!
 
 	- A bigWig read with ISA-L gives its inflate kernel ISA-L's two functions in one tuple, where it gave them apart and numba typed each on every call under the GIL: a call of the kernel on an empty batch takes 2.9 µs, where it took 58.3 µs. On the benchmarks' server, 1,000 windows of 2,048 bp from the K562 ATAC-seq fold-change bigWig read in 9.4 ms on 8 threads, where they took 10.8 ms, and 20,000 windows in 103 ms on 32 threads, where they took 117 ms; 20,000 windows on 8 threads read in 106 ms, where they took 112, faster in only three of six pairs. The values are the same.

@@ -4,9 +4,9 @@
 and `read_bigwig(bigwigs, chroms, starts, width, ...)`, where `bigwigs` is
 one path or reader (result `(n, width)`) or a list, even of one (result
 `(n, len(bigwigs), width)`, channel `i` from `bigwigs[i]`). Always float32.
-`engine='auto'` inflates with ISA-L when the `isal` extra (python-isal 1.8,
-built on the ISA-L version the kernel knows, 2.31.1; 1.9 bundles 2.32.1 and
-reads with zlib) is installed and with
+`engine='auto'` inflates with ISA-L when the `isal` extra (python-isal 1.8
+or 1.9, built on the ISA-L versions the kernel knows, 2.31.1 and 2.32.1) is
+installed and with
 zlib otherwise; `'zlib'` and `'isal'` choose one. The values are the same.
 
 ```python
