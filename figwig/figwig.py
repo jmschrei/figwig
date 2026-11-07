@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import bisect
 import collections
+import ctypes
 import itertools
 import json
 import os
@@ -114,7 +115,6 @@ from ._figwig_kernels import _radix_scatter
 from ._figwig_kernels import _radix_scatter_values
 from ._figwig_kernels import _radix_starts
 from ._kernels import _compiled
-from ._kernels import _deflate_blocks_libdeflate
 from ._kernels import _libc_pread
 from ._kernels import _libdeflate
 from ._kernels import _libdeflate_crc32
@@ -3857,28 +3857,37 @@ _DEFLATE_FUNCTIONS = []
 
 class _SummaryDeflater:
 	"""Deflates summary and zoom streams into zlib streams with one libdeflate
-	compressor at level 6, without the GIL; one thread at a time uses it.
-	Each stream is deflated alone, so its bytes do not depend on which
-	thread or which deflater made it."""
+	compressor at level 6; one thread at a time uses it. Each stream is
+	deflated alone, so its bytes do not depend on which thread or which
+	deflater made it. libdeflate is called through ctypes, which lets the
+	GIL go, rather than through a kernel, whose first call starts numba's
+	compiler in a process that runs no other kernel, a one-thread merge."""
 
 	def __init__(self):
 		alloc, self._compress, self._free = _libdeflate()
 		self._compressor = alloc(6)
 		if self._compressor == 0:
 			raise MemoryError("libdeflate could not allocate a compressor.")
+		self._grow(1 << 16)
+
+	def _grow(self, size):
+		# numpy leaves the buffer unwritten, where ctypes would zero it while
+		# holding the GIL.
+		self._out = numpy.empty(size, dtype=numpy.uint8)
+		self._at = self._out.ctypes.data
 
 	def __call__(self, parts):
 		"""The zlib stream of the arrays' bytes one after another."""
 
-		data = numpy.concatenate([numpy.ascontiguousarray(part).reshape(-1).view(
-			numpy.uint8) for part in parts])
-		out = numpy.empty(len(data) + len(data) // 8 + 64, dtype=numpy.uint8)
-		sizes = numpy.zeros(1, dtype=numpy.int64)
-		status = _deflate_blocks_libdeflate(self._compress, self._compressor,
-			data, numpy.array([0, len(data)], dtype=numpy.int64), out, sizes)
-		if status != -1:
+		data = b''.join(part.tobytes() for part in parts)
+		bound = len(data) + len(data) // 8 + 64
+		if bound > len(self._out):
+			self._grow(bound)
+		n = self._compress(self._compressor, data, len(data), self._at, len(
+			self._out))
+		if n == 0:
 			raise RuntimeError("a summary could not be compressed.")
-		return out[:sizes[0]].tobytes()
+		return ctypes.string_at(self._at, n)
 
 	def close(self):
 		if self._compressor:
