@@ -4327,6 +4327,54 @@ def test_append_adds_tracks_to_a_file(tmp_path, ref):
 			pass
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('how', ['append', 'add_file'])
+def test_write_sparse_to_tracks_from_another_file(tmp_path, order, how):
+	"""write_sparse to a group that came from another file refuses entries
+	the file's index cannot take, as an earlier call's tiles and ends
+	refuse them for the writer's own groups: in position order a tile the
+	group holds, in track order a base at or before a track's last one. A
+	call it refuses writes nothing, and the entries it takes read back."""
+
+	sizes = {'chr1': 1000, 'chr2': 1000}
+	refused = [('chr1', [500, 600])]
+	taken = [('chr1', [700, 950]), ('chr2', [100, 200])]
+	if order == 'positions':
+		refused.append(('chr1', [505, 530]))
+		taken.append(('chr1', [10, 70]))
+	else:
+		refused.append(('chr1', [10, 70]))
+		taken.append(('chr1', [505, 530]))
+	for chrom, positions in refused + taken:
+		source = str(tmp_path / 'source.fw')
+		with FigWigWriter(source, sizes, ['a', 'b'], tile=64, order=order,
+				groups=1) as writer:
+			writer.write_sparse('chr1', [500, 520], [0, 1], [1, 2])
+		if how == 'append':
+			path = source
+			writer = FigWigWriter(path, None, None, append=True, n_jobs=2)
+		else:
+			path = str(tmp_path / 'out.fw')
+			writer = FigWigWriter(path, sizes, ['c'], tile=64, order=order,
+				n_jobs=2)
+			writer.add_file(source)
+		with writer:
+			if (chrom, positions) in refused:
+				with pytest.raises(ValueError, match="holds from the file|before "
+						"the end of what was written"):
+					writer.write_sparse(chrom, positions, ['a', 'b'], [3, 4])
+				continue
+			writer.write_sparse(chrom, positions, ['a', 'b'], [3, 4])
+
+		reader = FigWigReader(path, verify=True)
+		want = {c: numpy.zeros((2, 1000)) for c in sizes}
+		want['chr1'][[0, 1], [500, 520]] = [1, 2]
+		want[chrom][[0, 1], positions] += [3, 4]
+		for c in sizes:
+			numpy.testing.assert_array_equal(reader.read(c, [0], 1000, tracks=['a',
+				'b'], dtype='float64')[0], want[c])
+
+
 def test_append_in_track_order(tmp_path, ref):
 	path = str(tmp_path / 'grow_t.fw')
 	write_reference(path, ref, order='tracks')

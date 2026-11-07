@@ -66,6 +66,7 @@ writes nothing; writers stay usable.
 | `entries ... both name base ...` | duplicate (track, position) entries in `write_sparse` → sum them first |
 | `which an earlier call already wrote`, `was begun by write` | `write` and `write_sparse` on one tile in two calls |
 | `came from another file, whose tracks cannot be written to` | `write` to a track `append` or `add_file` copied in |
+| `falls in tile N of 'chr1', which the group of 'x' holds from the file it came from` | `write_sparse` to a tile a copied-in group already holds → put those entries in a new file, or write the file again with them |
 | `is being appended to by another writer` | two `append=True` writers → wait for the first to close |
 | `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
 | `none of the chromosomes of x.bw is in the sizes file: it has chr1, chr2, ... and the sizes have 1, 2, ...` | `bw2fw -s` with another assembly's sizes, or names without `chr` → a sizes file naming the bigWig's chromosomes |

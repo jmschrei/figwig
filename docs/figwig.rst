@@ -547,9 +547,10 @@ into a new path drops.
 ``add_file`` adds every track of another file written with the same
 chromosomes, tile, level and order, by copying its chunks, with its
 attributes, dtypes, statistics and summaries; ``figwig merge`` does that
-from the command line. Tracks that came from a file cannot be written to,
-and ``write`` with ``tracks=None`` means every track given to the writer
-itself.
+from the command line. ``write`` cannot write to tracks that came from a
+file, and with ``tracks=None`` means every track given to the writer
+itself; ``write_sparse`` adds entries to them only in tiles their group
+does not hold, and in track order only after each track's last base.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------

@@ -1107,6 +1107,7 @@ class FigWigWriter:
 		self._sealed = [None] * n_groups
 		self._last = [None] * n_groups
 		self._done = [set() for _ in range(n_groups)]
+		self._held = [None] * n_groups
 		self._stats = numpy.zeros((len(self.tracks), 6), dtype=numpy.float64)
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
@@ -1323,6 +1324,10 @@ class FigWigWriter:
 		stats[:, 3] = numpy.where(source.stats['nonzero'] > 0, source.stats['max'],
 			-numpy.inf)
 		groups, classes, live, runs, blocks, sums = [], [], [], [], [], []
+		# What the file holds, which entries written to its groups must not
+		# fall on: in position order its live tiles, and in track order the
+		# end of each track's last block, as an earlier call would leave it.
+		held, lasts = [], []
 		for g, group in enumerate(source._groups):
 			members = group + base_track
 			groups.append(members)
@@ -1335,6 +1340,9 @@ class FigWigWriter:
 				blocks.append([found])
 				live.append([])
 				runs.append([])
+				held.append(None)
+				lasts.append((int(found['chrom'][-1]), int(found['last'][-1]) + 1) if
+					len(found) else None)
 			else:
 				kinds, sizes, raws, offsets, crcs = source._group_index(g)
 				tiles = numpy.flatnonzero(kinds)
@@ -1343,6 +1351,8 @@ class FigWigWriter:
 					sizes[tiles]
 				record['raw'], record['crc'] = raws[tiles], crcs[tiles]
 				live.append([record])
+				held.append(tiles.astype(numpy.int64))
+				lasts.append(None)
 				found = source._runs[g]
 				at = found['offset'] if extents is None else _moved(found['offset'],
 					found['bytes'], extents)
@@ -1377,9 +1387,10 @@ class FigWigWriter:
 			self._sums_held += sum(tiles.nbytes + values.nbytes for pieces in sums for
 				tiles, values in pieces)
 			self._spill_sums()
-		for name in ('_pending', '_buffers', '_open', '_sealed', '_last',
-				'_item_types'):
+		for name in ('_pending', '_buffers', '_open', '_sealed', '_item_types'):
 			setattr(self, name, splice(getattr(self, name), [None] * n_groups))
+		self._last = splice(self._last, lasts)
+		self._held = splice(self._held, held)
 		self._done = splice(self._done, [set() for _ in range(n_groups)])
 		self._adopted |= set(range(base_group, base_group + n_groups))
 
@@ -1706,8 +1717,11 @@ class FigWigWriter:
 		the tiles its entries fall in, so every other base of those groups'
 		tracks is 0 there, and a group's entries come after its earlier
 		items on each chromosome; in position order they also seal the tile
-		they end in, so that a later call cannot add to it. No two entries
-		may name one base of one track. A call that raises writes nothing.
+		they end in, so that a later call cannot add to it. A group that
+		came from another file, through `append=True` or `add_file`, takes
+		entries only in tiles it does not hold, and in track order only
+		after each track's last base. No two entries may name one base of one
+		track. A call that raises writes nothing.
 
 		One call takes about 90 bytes of memory per entry besides the arrays
 		given, so a genome's entries are best written a chromosome at a
@@ -1945,6 +1959,24 @@ class FigWigWriter:
 				self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
 					1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
 					entries=entries)
+
+		# A group that came from another file holds its tiles already, and a
+		# second chunk of one of them would leave the index out of order.
+		if entries and self._adopted:
+			for a, b, tid in zip(bounds[:-1].tolist(), bounds[1:].tolist(), tids[
+					bounds[:-1]].tolist()):
+				g = group_at(a)
+				held = self._held[g]
+				if held is None or len(held) == 0:
+					continue
+				hit = numpy.isin(self._tile_offsets[tid] + positions[a:b] // tile, held)
+				if hit.any():
+					k = a + int(numpy.argmax(hit))
+					raise ValueError("{} falls in tile {} of {!r}, which the group of "
+						"{!r} holds from the file it came from; its tracks take new "
+						"tiles only.".format(describe(given(k)), int(positions[k]) //
+						tile, self._chrom_list[tid][0], self.tracks[self._groups[g][0]][
+						'name']))
 
 		self._written = True
 		pieces = []

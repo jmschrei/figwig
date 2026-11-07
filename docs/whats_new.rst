@@ -71,6 +71,8 @@ figwig files
 
 	- ``FigWigWriter`` refuses a group of 2**29 values per chunk, tracks times tile, such as 8,192 tracks at a tile of 65,536 or 32,768 at the default tile, and takes one track fewer, where it took it and wrote a file no reader could open once the group's tracks were dense with float64 values: such a chunk takes 2**32 bytes, one more than its u4 size holds. ``figwig bam2fw --barcode-column`` puts at most 32,767 cells in a group at the default tile, where it put 32,768.
 
+	- ``write_sparse`` refuses entries in a tile that a group from ``append=True`` or ``add_file`` already holds, and in track order entries at or before a track's last base, where it took them and wrote a file whose index could not be read.
+
 Converters and commands
 -----------------------
 
