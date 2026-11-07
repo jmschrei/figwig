@@ -1107,6 +1107,7 @@ class FigWigWriter:
 		self._sealed = [None] * n_groups
 		self._last = [None] * n_groups
 		self._done = [set() for _ in range(n_groups)]
+		self._held = [None] * n_groups
 		self._stats = numpy.zeros((len(self.tracks), 6), dtype=numpy.float64)
 		self._stats[:, 2] = numpy.inf
 		self._stats[:, 3] = -numpy.inf
@@ -1323,6 +1324,10 @@ class FigWigWriter:
 		stats[:, 3] = numpy.where(source.stats['nonzero'] > 0, source.stats['max'],
 			-numpy.inf)
 		groups, classes, live, runs, blocks, sums = [], [], [], [], [], []
+		# What the file holds, which entries written to its groups must not
+		# fall on: in position order its live tiles, and in track order the
+		# end of each track's last block, as an earlier call would leave it.
+		held, lasts = [], []
 		for g, group in enumerate(source._groups):
 			members = group + base_track
 			groups.append(members)
@@ -1335,6 +1340,9 @@ class FigWigWriter:
 				blocks.append([found])
 				live.append([])
 				runs.append([])
+				held.append(None)
+				lasts.append((int(found['chrom'][-1]), int(found['last'][-1]) + 1) if
+					len(found) else None)
 			else:
 				kinds, sizes, raws, offsets, crcs = source._group_index(g)
 				tiles = numpy.flatnonzero(kinds)
@@ -1343,6 +1351,8 @@ class FigWigWriter:
 					sizes[tiles]
 				record['raw'], record['crc'] = raws[tiles], crcs[tiles]
 				live.append([record])
+				held.append(tiles.astype(numpy.int64))
+				lasts.append(None)
 				found = source._runs[g]
 				at = found['offset'] if extents is None else _moved(found['offset'],
 					found['bytes'], extents)
@@ -1377,9 +1387,10 @@ class FigWigWriter:
 			self._sums_held += sum(tiles.nbytes + values.nbytes for pieces in sums for
 				tiles, values in pieces)
 			self._spill_sums()
-		for name in ('_pending', '_buffers', '_open', '_sealed', '_last',
-				'_item_types'):
+		for name in ('_pending', '_buffers', '_open', '_sealed', '_item_types'):
 			setattr(self, name, splice(getattr(self, name), [None] * n_groups))
+		self._last = splice(self._last, lasts)
+		self._held = splice(self._held, held)
 		self._done = splice(self._done, [set() for _ in range(n_groups)])
 		self._adopted |= set(range(base_group, base_group + n_groups))
 
@@ -1458,6 +1469,12 @@ class FigWigWriter:
 				raise ValueError("chromosome {!r} is written again after the "
 					"group of {!r} moved on from it.".format(self._chrom_list[tid][
 					0], self.tracks[self._groups[g][0]]['name']))
+			# A track's blocks lie in chromosome order, which the index keeps.
+			if self.order == 'tracks' and last is not None and tid < last[0]:
+				raise ValueError("chromosome {!r} is written after {!r}, but comes "
+					"before it in chrom_sizes; in track order each track's "
+					"chromosomes come in that order.".format(self._chrom_list[tid][0],
+					self._chrom_list[last[0]][0]))
 			if last is not None and tid == last[0] and starts[a] < last[1]:
 				raise ValueError("{} starts at {}, before the end of what was "
 					"written on it before, {}.".format(describe(a if order is None
@@ -1494,7 +1511,9 @@ class FigWigWriter:
 		Items may be given in any order, and are sorted by chromosome and
 		start, but must not overlap. Within each group, the items of a call
 		come after those of earlier calls on the same chromosome, and a
-		group cannot return to a chromosome it has left. A window may run
+		group cannot return to a chromosome it has left; in track order a
+		later call cannot take a chromosome that comes before one an earlier
+		call wrote in `chrom_sizes`. A window may run
 		past the end of its chromosome only where its values are NaN or 0,
 		as reads give them there.
 
@@ -1706,8 +1725,11 @@ class FigWigWriter:
 		the tiles its entries fall in, so every other base of those groups'
 		tracks is 0 there, and a group's entries come after its earlier
 		items on each chromosome; in position order they also seal the tile
-		they end in, so that a later call cannot add to it. No two entries
-		may name one base of one track. A call that raises writes nothing.
+		they end in, so that a later call cannot add to it. A group that
+		came from another file, through `append=True` or `add_file`, takes
+		entries only in tiles it does not hold, and in track order only
+		after each track's last base. No two entries may name one base of one
+		track. A call that raises writes nothing.
 
 		One call takes about 90 bytes of memory per entry besides the arrays
 		given, so a genome's entries are best written a chromosome at a
@@ -1938,13 +1960,32 @@ class FigWigWriter:
 				open_of[g]
 			if last is None and not done and sealed is None and open_ is None:
 				continue
-			if tid in done or (last is not None and tid == last[0] and low < last[
-					1]) or (sealed is not None and tid == sealed[0] and low // tile <=
-					sealed[1]) or (entries and open_ is not None and tid == open_[0]
-					and low // tile == open_[1]):
+			if tid in done or (not entries and last is not None and tid < last[
+					0]) or (last is not None and tid == last[0] and low < last[1]) or (
+					sealed is not None and tid == sealed[0] and low // tile <= sealed[
+					1]) or (entries and open_ is not None and tid == open_[0] and low //
+					tile == open_[1]):
 				self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
 					1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
 					entries=entries)
+
+		# A group that came from another file holds its tiles already, and a
+		# second chunk of one of them would leave the index out of order.
+		if entries and self._adopted:
+			for a, b, tid in zip(bounds[:-1].tolist(), bounds[1:].tolist(), tids[
+					bounds[:-1]].tolist()):
+				g = group_at(a)
+				held = self._held[g]
+				if held is None or len(held) == 0:
+					continue
+				hit = numpy.isin(self._tile_offsets[tid] + positions[a:b] // tile, held)
+				if hit.any():
+					k = a + int(numpy.argmax(hit))
+					raise ValueError("{} falls in tile {} of {!r}, which the group of "
+						"{!r} holds from the file it came from; its tracks take new "
+						"tiles only.".format(describe(given(k)), int(positions[k]) //
+						tile, self._chrom_list[tid][0], self.tracks[self._groups[g][0]][
+						'name']))
 
 		self._written = True
 		pieces = []
@@ -3898,7 +3939,10 @@ class FigWigReader:
 	verify: bool, optional
 		Whether to check every chunk read against the CRC-32 the file keeps
 		for it, which a compressed chunk's zlib checksum covers already and
-		an uncompressed chunk does not. Default is False.
+		an uncompressed chunk does not. With it, `sums` reads every chunk
+		under its intervals; without it, `sums` of integer tracks takes the
+		tiles an interval covers whole from the file's tile sums and does not
+		read their chunks. Default is False.
 
 	Attributes
 	----------
@@ -5134,10 +5178,11 @@ class FigWigReader:
 		2**24, where it is exact; the tracks' largest value times the longest
 		interval stays below 2**53, so every sum is exact and equal to the
 		one `_read` adds up base by base. Returns None where any of this
-		does not hold, or nothing spans a whole tile, for `_read` to sum
-		every interval whole."""
+		does not hold, nothing spans a whole tile, or the reader verifies
+		every chunk it reads, which the tile sums would leave unread, for
+		`_read` to sum every interval whole."""
 
-		if nan not in ('propagate', 'skip') or len(starts) == 0:
+		if self.verify or nan not in ('propagate', 'skip') or len(starts) == 0:
 			return None
 		tile = self.tile
 		first = -(-starts // tile)

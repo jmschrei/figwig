@@ -19,8 +19,12 @@ from ._kernels import _isal_inflate_blocks
 # its size in bytes, and the byte offsets of its block_state and crc_flag
 # fields, from that version's include/igzip_lib.h on a 64-bit platform. Its
 # first fields, which every version shares, are written by
-# `_isal_inflate_blocks`.
-_LAYOUTS = {'2.31.1': (87368, 21160, 21172)}
+# `_isal_inflate_blocks`. python-isal 1.8 bundles ISA-L 2.31.1 and 1.9 bundles
+# 2.32.1, whose igzip_lib.h differs from 2.31.1's only in comments.
+_LAYOUTS = {
+	'2.31.1': (87368, 21160, 21172),
+	'2.32.1': (87368, 21160, 21172),
+}
 
 
 @lru_cache(None)

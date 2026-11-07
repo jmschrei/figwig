@@ -120,7 +120,7 @@ copies it into ``~/.claude/skills/figwig``:
     figwig install-skill -d DIRECTORY    # into DIRECTORY/figwig
     figwig install-skill --force         # replace an installed copy
 
-An installed copy raises ``FileExistsError`` unless ``--force`` is given, so
+An installed copy is left as it is, with a message, unless ``--force`` is given, so
 after upgrading figwig, run it with ``--force`` to pick up a changed skill.
 ``--symlink`` links to the copy inside the installed package instead, so that
 the skill follows the package; the link breaks if the package moves or is

@@ -504,7 +504,9 @@ writer that raises or is never closed leaves the path as it was, and a
 converter may write over its own input. A writer that is garbage collected
 with values written and no ``close`` warns. Every chunk's CRC-32 goes into
 the index, and ``FigWigReader(path, verify=True)`` checks each chunk it
-reads against it; a compressed chunk's zlib checksum is checked on every
+reads against it, and has ``sums`` read every chunk under its intervals,
+where without it a sum of integer tracks takes the tiles an interval
+covers whole from the tile sums and does not read their chunks; a compressed chunk's zlib checksum is checked on every
 read either way, as are the CRC-32 of a chunk a compressed file stores as
 it is, of the tables and directory (in the header) at open and of each
 group's index record when it is read, so ``verify`` is for uncompressed
@@ -547,9 +549,10 @@ into a new path drops.
 ``add_file`` adds every track of another file written with the same
 chromosomes, tile, level and order, by copying its chunks, with its
 attributes, dtypes, statistics and summaries; ``figwig merge`` does that
-from the command line. Tracks that came from a file cannot be written to,
-and ``write`` with ``tracks=None`` means every track given to the writer
-itself.
+from the command line. ``write`` cannot write to tracks that came from a
+file, and with ``tracks=None`` means every track given to the writer
+itself; ``write_sparse`` adds entries to them only in tiles their group
+does not hold, and in track order only after each track's last base.
 
 Writing nonzero bases, and the two orders
 -----------------------------------------

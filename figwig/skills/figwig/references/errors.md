@@ -60,12 +60,14 @@ writes nothing; writers stay usable.
 |---|---|
 | `tracks must make up whole groups` | a `write` named some tracks of a group |
 | `written again after the group of ... moved on from it`, `starts at ..., before the end of what was written on it before` | a group returned to an earlier chromosome, or items out of order across calls |
+| `chromosome 'chr1' is written after 'chr2', but comes before it in chrom_sizes; in track order …` | track order takes each track's chromosomes in `chrom_sizes` order across calls → loop over `writer.chrom_sizes` |
 | `a window may run past the end only where its values are NaN or 0` | |
 | `track ... is uint16, and a value is ...`, `lies beyond float32's range` | a declared dtype the values do not fit → a wider one, or none |
 | `values must be finite or NaN, but one is infinite`, `an integer lies beyond 2**53, which a figwig file cannot hold exactly` | in `write`, `write_sparse` or a bigWig given to `bw2fw` → clip or scale first |
 | `entries ... both name base ...` | duplicate (track, position) entries in `write_sparse` → sum them first |
 | `which an earlier call already wrote`, `was begun by write` | `write` and `write_sparse` on one tile in two calls |
 | `came from another file, whose tracks cannot be written to` | `write` to a track `append` or `add_file` copied in |
+| `falls in tile N of 'chr1', which the group of 'x' holds from the file it came from` | `write_sparse` to a tile a copied-in group already holds → put those entries in a new file, or write the file again with them |
 | `is being appended to by another writer` | two `append=True` writers → wait for the first to close |
 | `was written with order\|tile\|level ... where this writer has`, `was written with other chromosomes or lengths: it has ...` | `add_file` or `merge` of unlike files → `reorder` one, or `bw2fw -s` the same sizes |
 | `none of the chromosomes of x.bw is in the sizes file: it has chr1, chr2, ... and the sizes have 1, 2, ...` | `bw2fw -s` with another assembly's sizes, or names without `chr` → a sizes file naming the bigWig's chromosomes |

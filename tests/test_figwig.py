@@ -4354,6 +4354,30 @@ def test_verify_checks_every_chunk(tmp_path):
 	assert copy.verify
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+def test_sums_with_verify_read_the_chunks_of_whole_tiles(tmp_path, order):
+	"""A sum of an integer track over whole tiles comes from the tile sums,
+	which do not read the chunks; with verify=True it reads and checks them,
+	so a flipped byte in an uncompressed chunk under it raises."""
+
+	path = str(tmp_path / 'v.fw')
+	values = (numpy.arange(2000) % 50 + 1).astype(numpy.float64)[None, None]
+	write_figwig(path, {'chr1': 2000}, [{'name': 'a', 'dtype': 'uint16'}],
+		'chr1', [0], values, tile=256, level=0, order=order)
+	total = float(values.sum())
+	assert FigWigReader(path, verify=True).sums('chr1', [0], [2000]).item() == \
+		total
+	with open(path, 'rb') as handle:
+		data = bytearray(handle.read())
+	data[300] ^= 0x40
+	with open(path, 'wb') as handle:
+		handle.write(bytes(data))
+	with pytest.raises(ValueError, match="checksum|corrupt"):
+		FigWigReader(path, verify=True).sums('chr1', [0], [2000])
+	if order == 'positions':
+		assert FigWigReader(path).sums('chr1', [0], [2000]).item() == total
+
+
 def test_append_adds_tracks_to_a_file(tmp_path, ref):
 	"""append=True starts from the file's tracks, whose chunks are copied,
 	and adds the new ones after them; the old tracks cannot be written."""
@@ -4401,6 +4425,89 @@ def test_append_adds_tracks_to_a_file(tmp_path, ref):
 	with pytest.raises(ValueError, match="no tracks"):
 		with FigWigWriter(str(tmp_path / 'none.fw'), {'chr1': 10}, None):
 			pass
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('how', ['append', 'add_file'])
+def test_write_sparse_to_tracks_from_another_file(tmp_path, order, how):
+	"""write_sparse to a group that came from another file refuses entries
+	the file's index cannot take, as an earlier call's tiles and ends
+	refuse them for the writer's own groups: in position order a tile the
+	group holds, in track order a base at or before a track's last one. A
+	call it refuses writes nothing, and the entries it takes read back."""
+
+	sizes = {'chr1': 1000, 'chr2': 1000}
+	refused = [('chr1', [500, 600])]
+	taken = [('chr1', [700, 950]), ('chr2', [100, 200])]
+	if order == 'positions':
+		refused.append(('chr1', [505, 530]))
+		taken.append(('chr1', [10, 70]))
+	else:
+		refused.append(('chr1', [10, 70]))
+		taken.append(('chr1', [505, 530]))
+	for chrom, positions in refused + taken:
+		source = str(tmp_path / 'source.fw')
+		with FigWigWriter(source, sizes, ['a', 'b'], tile=64, order=order,
+				groups=1) as writer:
+			writer.write_sparse('chr1', [500, 520], [0, 1], [1, 2])
+		if how == 'append':
+			path = source
+			writer = FigWigWriter(path, None, None, append=True, n_jobs=2)
+		else:
+			path = str(tmp_path / 'out.fw')
+			writer = FigWigWriter(path, sizes, ['c'], tile=64, order=order,
+				n_jobs=2)
+			writer.add_file(source)
+		with writer:
+			if (chrom, positions) in refused:
+				with pytest.raises(ValueError, match="holds from the file|before "
+						"the end of what was written"):
+					writer.write_sparse(chrom, positions, ['a', 'b'], [3, 4])
+				continue
+			writer.write_sparse(chrom, positions, ['a', 'b'], [3, 4])
+
+		reader = FigWigReader(path, verify=True)
+		want = {c: numpy.zeros((2, 1000)) for c in sizes}
+		want['chr1'][[0, 1], [500, 520]] = [1, 2]
+		want[chrom][[0, 1], positions] += [3, 4]
+		for c in sizes:
+			numpy.testing.assert_array_equal(reader.read(c, [0], 1000, tracks=['a',
+				'b'], dtype='float64')[0], want[c])
+
+
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('how', ['write', 'write_sparse'])
+def test_track_order_takes_chromosomes_in_order(tmp_path, order, how):
+	"""In track order, whose blocks lie in chromosome order, a call on a
+	chromosome before one an earlier call wrote is refused and writes
+	nothing; in position order it is taken. Either way the file reads back
+	what was taken."""
+
+	path = str(tmp_path / 'x.fw')
+	with FigWigWriter(path, {'chr1': 1000, 'chr2': 1000}, ['a'], tile=64,
+			order=order, n_jobs=2) as writer:
+
+		def put(chrom, at, value):
+			if how == 'write':
+				writer.write(chrom, [at], numpy.full((1, 1, 5), value))
+			else:
+				writer.write_sparse(chrom, [at], [0], [value])
+
+		put('chr2', 500, 1.0)
+		if order == 'tracks':
+			with pytest.raises(ValueError, match="comes before it in chrom_sizes"):
+				put('chr1', 10, 2.0)
+			put('chr2', 600, 3.0)
+		else:
+			put('chr1', 10, 2.0)
+
+	reader = FigWigReader(path, verify=True)
+	assert reader.read('chr2', [500], 1).item() == 1
+	if order == 'tracks':
+		assert reader.read('chr2', [600], 1).item() == 3
+		assert reader.read('chr1', [10], 1).item() == 0
+	else:
+		assert reader.read('chr1', [10], 1).item() == 2
 
 
 def test_append_in_track_order(tmp_path, ref):

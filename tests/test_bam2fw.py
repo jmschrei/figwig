@@ -963,6 +963,33 @@ def test_coverage_mixes_runs_and_windows(tmp_path, sizes, monkeypatch):
 		assert a.read() == b.read()
 
 
+@pytest.mark.parametrize("piece", [64, 1 << 22])
+@pytest.mark.parametrize("spacing", [0, 32, 1 << 30])
+@pytest.mark.parametrize("stranded", [False, True])
+def test_coverage_of_several_files_on_threads_is_the_file_of_one_thread(
+		tmp_path, coverage_bam, sizes, monkeypatch, piece, spacing, stranded):
+	"""bam2fw -c of two files, a group per track, writes on threads the file
+	one thread writes, byte for byte: a chromosome's last run may end inside
+	a tile, on a tile's end or at the chromosome's end, and its last piece
+	may go in as a window or as runs, and the tile it ends in is written at
+	the same point of the file either way."""
+
+	reads = [("chr1", 100, 30, False), ("chr1", 592, 16, False), ("chr2", 300, 9,
+		True), ("chr2", 480, 20, False), ("chr3", 184, 16, True)]
+	other = str(write_bam(tmp_path / "other.bam", BAM_CHROM_SIZES, reads))
+	monkeypatch.setattr(figwig.bam2fw, "_COVERAGE_PIECE", piece)
+	monkeypatch.setattr(figwig.bam2fw, "_RUN_SPACING", spacing)
+	flags = ("-c", "-t", "16") + (() if stranded else ("-u",))
+	one = bam2fw(tmp_path / "one", [coverage_bam, other], sizes, *flags)
+	with open(one, "rb") as handle:
+		expected = handle.read()
+	for p in ("2", "4"):
+		threaded = bam2fw(tmp_path / p, [coverage_bam, other], sizes, "-p", p,
+			*flags)
+		with open(threaded, "rb") as handle:
+			assert handle.read() == expected
+
+
 def test_coverage_reports_the_bases_clipped_away(tmp_path, coverage_bam, sizes,
 		capsys):
 	bam2bw(tmp_path, coverage_bam, sizes, "-c")

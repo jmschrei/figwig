@@ -130,7 +130,10 @@ def _main(argv=None, fast_exit=True):
 	args = _parser().parse_args(argv)
 	if args.command == 'install-skill':
 		from . import install_skill
-		install_skill.run(args)
+		try:
+			install_skill.run(args)
+		except OSError as e:
+			raise SystemExit("figwig install-skill: {}".format(e))
 
 
 if __name__ == '__main__':

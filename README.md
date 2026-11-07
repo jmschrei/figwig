@@ -218,7 +218,7 @@ figwig install-skill
 ```
 
 After upgrading figwig, run `figwig install-skill --force` to replace the
-installed copy, which otherwise raises `FileExistsError`. `-d DIRECTORY`
+installed copy, which it otherwise leaves, with a message. `-d DIRECTORY`
 installs into another skills directory, and `--symlink` links to the copy
 inside the installed package instead of copying it.
 

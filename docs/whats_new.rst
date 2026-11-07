@@ -12,6 +12,8 @@ Unreleased
 Reading
 -------
 
+	- The ISA-L kernel knows the inflate state of ISA-L 2.32.1, which python-isal 1.9 bundles, as it knew 2.31.1's (python-isal 1.8), so ``engine='auto'`` reads with ISA-L under either, where python-isal 1.9 read with zlib. The two versions' ``struct inflate_state`` is the same, field by field.
+
 	- ``oob=`` on ``BigWigReader.read`` and ``read_bigwig`` sets the value of bases past the end of a chromosome, as in pybigtools' ``values()``. The default stays NaN. Thanks @casblaauw!
 
 	- A bigWig read with ISA-L gives its inflate kernel ISA-L's two functions in one tuple, where it gave them apart and numba typed each on every call under the GIL: a call of the kernel on an empty batch takes 2.9 µs, where it took 58.3 µs. On the benchmarks' server, 1,000 windows of 2,048 bp from the K562 ATAC-seq fold-change bigWig read in 9.4 ms on 8 threads, where they took 10.8 ms, and 20,000 windows in 103 ms on 32 threads, where they took 117 ms; 20,000 windows on 8 threads read in 106 ms, where they took 112, faster in only three of six pairs. The values are the same.
@@ -73,8 +75,16 @@ figwig files
 
 	- ``FigWigWriter`` refuses a group of 2**29 values per chunk, tracks times tile, such as 8,192 tracks at a tile of 65,536 or 32,768 at the default tile, and takes one track fewer, where it took it and wrote a file no reader could open once the group's tracks were dense with float64 values: such a chunk takes 2**32 bytes, one more than its u4 size holds. ``figwig bam2fw --barcode-column`` puts at most 32,767 cells in a group at the default tile, where it put 32,768.
 
+	- ``write_sparse`` refuses entries in a tile that a group from ``append=True`` or ``add_file`` already holds, and in track order entries at or before a track's last base, where it took them and wrote a file whose index could not be read.
+
+	- In track order, ``write`` and ``write_sparse`` refuse a call on a chromosome that comes before one an earlier call wrote, in ``chrom_sizes`` order, where they took it and wrote a file whose index could not be read; figwig 0.2.0 did the same. Position order still takes chromosomes in any order across calls.
+
+	- ``sums`` on a reader with ``verify=True`` reads and checks every chunk under its intervals, where for integer tracks it took the tiles an interval covers whole from the tile sums and so returned a sum over a corrupt chunk without checking it; without ``verify`` it still takes them from the tile sums.
+
 Converters and commands
 -----------------------
+
+	- ``figwig install-skill`` over an installed copy without ``--force`` prints the message saying to use it and exits with status 1, where it printed a traceback.
 
 	- ``--summary-index`` on ``figwig bw2fw`` and ``bam2fw`` writes the regional summary index, and ``figwig reorder`` and ``merge`` write one when the header of their input (of the first file, for ``merge``) announces one, unless ``--no-summary-index``, or when ``--summary-index`` is given.
 
@@ -93,6 +103,11 @@ Converters and commands
 	- ``figwig fw2bw`` writes the bigWigs of a group of at most ``-p`` tracks each on a thread of its own, with at most two pieces of the group in flight, where every piece waited for each of its tracks' bigWigs before the next was written; a larger group's bigWigs are written ``-p`` at a time, each piece whole before the next is read, as before: the twelve bigWigs above convert in 8.95 s at ``-p 8``, where they took 9.99 s, and in 9.1 s at ``-p 32``, where they took 10.1 s. With the writer's changes above, ``figwig bw2fw`` converts them in 9.3 s at ``-p 8``, where it took 10.4 s, and in 10.7 s at ``-p 32``, where it took 14.0 s. The files are the same to the byte.
 
 	- ``figwig reorder`` into track order hands the writer each chromosome's entries as already sorted, and the track-order writer sums its blocks' tiles in one pass: the read depth of the HCT116 ATAC-seq BAM reorders in 39 s on one thread, where it took 57 s, at a peak of 7.9 GB, where it took 14.0 GB. The file is the same to the byte.
+
+Packaging
+---------
+
+	- The ``bam2bw`` and ``dev`` extras require python-isal 1.8, as the ``isal`` extra does, where they took 1.0 or later, with which ISA-L reads fall back to zlib.
 
 Documentation
 -------------

@@ -47,7 +47,8 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
   `bw2fw --missing nan` keeps them apart (`references/converters.md`).
 - Each `write` covers whole groups. Items may come in any order within a
   call but must not overlap; within a group later calls come after earlier
-  ones on a chromosome, and a group cannot return to a chromosome it left.
+  ones on a chromosome, and a group cannot return to a chromosome it left;
+  in track order later calls also take chromosomes in `chrom_sizes` order.
   A window may run past its chromosome's end only where its values are NaN
   or 0. A call that raises writes nothing.
 - `write` with `ends=` (intervals) encodes on the pool as windows do; only
@@ -125,8 +126,10 @@ with FigWigWriter("pbmc.fw", chrom_sizes, tracks, groups=len(tracks), level=0) a
   the append closes.
 - `writer.add_file(path)` copies every track of another file written with
   the same chromosomes, tile, level and order, chunks and all; `figwig
-  merge` is that from the shell. Tracks that came from a file cannot be
-  written to.
+  merge` is that from the shell. `write` cannot write to tracks that came
+  from a file (by `append=True` or `add_file`); `write_sparse` adds entries
+  to them only in tiles their group does not hold, and in track order only
+  after each track's last base.
 - `FigWigReader(path, verify=True)` checks every chunk's CRC-32 as it is
   read; compressed chunks are checksummed by zlib on every read anyway, so
   it is for uncompressed files. The header, tables and index are checked
