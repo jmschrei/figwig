@@ -1469,6 +1469,12 @@ class FigWigWriter:
 				raise ValueError("chromosome {!r} is written again after the "
 					"group of {!r} moved on from it.".format(self._chrom_list[tid][
 					0], self.tracks[self._groups[g][0]]['name']))
+			# A track's blocks lie in chromosome order, which the index keeps.
+			if self.order == 'tracks' and last is not None and tid < last[0]:
+				raise ValueError("chromosome {!r} is written after {!r}, but comes "
+					"before it in chrom_sizes; in track order each track's "
+					"chromosomes come in that order.".format(self._chrom_list[tid][0],
+					self._chrom_list[last[0]][0]))
 			if last is not None and tid == last[0] and starts[a] < last[1]:
 				raise ValueError("{} starts at {}, before the end of what was "
 					"written on it before, {}.".format(describe(a if order is None
@@ -1505,7 +1511,9 @@ class FigWigWriter:
 		Items may be given in any order, and are sorted by chromosome and
 		start, but must not overlap. Within each group, the items of a call
 		come after those of earlier calls on the same chromosome, and a
-		group cannot return to a chromosome it has left. A window may run
+		group cannot return to a chromosome it has left; in track order a
+		later call cannot take a chromosome that comes before one an earlier
+		call wrote in `chrom_sizes`. A window may run
 		past the end of its chromosome only where its values are NaN or 0,
 		as reads give them there.
 
@@ -1952,10 +1960,11 @@ class FigWigWriter:
 				open_of[g]
 			if last is None and not done and sealed is None and open_ is None:
 				continue
-			if tid in done or (last is not None and tid == last[0] and low < last[
-					1]) or (sealed is not None and tid == sealed[0] and low // tile <=
-					sealed[1]) or (entries and open_ is not None and tid == open_[0]
-					and low // tile == open_[1]):
+			if tid in done or (not entries and last is not None and tid < last[
+					0]) or (last is not None and tid == last[0] and low < last[1]) or (
+					sealed is not None and tid == sealed[0] and low // tile <= sealed[
+					1]) or (entries and open_ is not None and tid == open_[0] and low //
+					tile == open_[1]):
 				self._check_order_of(g, tids[a:a + 1], lows[k:k + 1], highs[k:k + 1] +
 					1, numpy.array([0, 1]), lambda j, c=a: describe(given(c)), None,
 					entries=entries)

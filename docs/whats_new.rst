@@ -73,6 +73,8 @@ figwig files
 
 	- ``write_sparse`` refuses entries in a tile that a group from ``append=True`` or ``add_file`` already holds, and in track order entries at or before a track's last base, where it took them and wrote a file whose index could not be read.
 
+	- In track order, ``write`` and ``write_sparse`` refuse a call on a chromosome that comes before one an earlier call wrote, in ``chrom_sizes`` order, where they took it and wrote a file whose index could not be read; figwig 0.2.0 did the same. Position order still takes chromosomes in any order across calls.
+
 Converters and commands
 -----------------------
 

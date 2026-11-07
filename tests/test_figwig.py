@@ -4375,6 +4375,41 @@ def test_write_sparse_to_tracks_from_another_file(tmp_path, order, how):
 				'b'], dtype='float64')[0], want[c])
 
 
+@pytest.mark.parametrize('order', ['positions', 'tracks'])
+@pytest.mark.parametrize('how', ['write', 'write_sparse'])
+def test_track_order_takes_chromosomes_in_order(tmp_path, order, how):
+	"""In track order, whose blocks lie in chromosome order, a call on a
+	chromosome before one an earlier call wrote is refused and writes
+	nothing; in position order it is taken. Either way the file reads back
+	what was taken."""
+
+	path = str(tmp_path / 'x.fw')
+	with FigWigWriter(path, {'chr1': 1000, 'chr2': 1000}, ['a'], tile=64,
+			order=order, n_jobs=2) as writer:
+
+		def put(chrom, at, value):
+			if how == 'write':
+				writer.write(chrom, [at], numpy.full((1, 1, 5), value))
+			else:
+				writer.write_sparse(chrom, [at], [0], [value])
+
+		put('chr2', 500, 1.0)
+		if order == 'tracks':
+			with pytest.raises(ValueError, match="comes before it in chrom_sizes"):
+				put('chr1', 10, 2.0)
+			put('chr2', 600, 3.0)
+		else:
+			put('chr1', 10, 2.0)
+
+	reader = FigWigReader(path, verify=True)
+	assert reader.read('chr2', [500], 1).item() == 1
+	if order == 'tracks':
+		assert reader.read('chr2', [600], 1).item() == 3
+		assert reader.read('chr1', [10], 1).item() == 0
+	else:
+		assert reader.read('chr1', [10], 1).item() == 2
+
+
 def test_append_in_track_order(tmp_path, ref):
 	path = str(tmp_path / 'grow_t.fw')
 	write_reference(path, ref, order='tracks')

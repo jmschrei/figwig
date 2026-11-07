@@ -47,7 +47,8 @@ with FigWigWriter("k562.fw", chrom_sizes, tracks, genome="hg38") as writer:
   `bw2fw --missing nan` keeps them apart (`references/converters.md`).
 - Each `write` covers whole groups. Items may come in any order within a
   call but must not overlap; within a group later calls come after earlier
-  ones on a chromosome, and a group cannot return to a chromosome it left.
+  ones on a chromosome, and a group cannot return to a chromosome it left;
+  in track order later calls also take chromosomes in `chrom_sizes` order.
   A window may run past its chromosome's end only where its values are NaN
   or 0. A call that raises writes nothing.
 - `write` with `ends=` (intervals) encodes on the pool as windows do; only
