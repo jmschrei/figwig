@@ -78,6 +78,8 @@ figwig files
 Converters and commands
 -----------------------
 
+	- ``figwig install-skill`` over an installed copy without ``--force`` prints the message saying to use it and exits with status 1, where it printed a traceback.
+
 	- ``--summary-index`` on ``figwig bw2fw`` and ``bam2fw`` writes the regional summary index, and ``figwig reorder`` and ``merge`` write one when the header of their input (of the first file, for ``merge``) announces one, unless ``--no-summary-index``, or when ``--summary-index`` is given.
 
 	- ``figwig info -b`` counts a file's regional summary index apart from its unused bytes.

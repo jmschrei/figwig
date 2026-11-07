@@ -51,8 +51,25 @@ def test_copy_install_leaves_out_checkpoints_and_caches(tmp_path, monkeypatch):
 
 def test_installing_twice_without_force_raises(tmp_path):
 	install(tmp_path)
-	with pytest.raises(FileExistsError, match="Re-run with --force"):
+	with pytest.raises(SystemExit, match="Re-run with --force"):
 		install(tmp_path)
+
+
+def test_installing_twice_from_the_shell_prints_one_line(tmp_path):
+	"""The command run a second time says to use --force on one line and
+	exits 1, as the other commands do, rather than printing a traceback."""
+
+	import subprocess
+	import sys
+
+	command = [sys.executable, '-m', 'figwig', 'install-skill', '-d', str(
+		tmp_path)]
+	subprocess.run(command, check=True, capture_output=True)
+	again = subprocess.run(command, capture_output=True, text=True)
+	assert again.returncode == 1
+	assert again.stderr.strip().splitlines() == ["figwig install-skill: A skill "
+		"already exists at {}. Re-run with --force to overwrite it.".format(
+		tmp_path / 'figwig')]
 
 
 def test_force_replaces_an_existing_skill(tmp_path):
@@ -66,7 +83,7 @@ def test_force_replaces_an_existing_skill(tmp_path):
 
 def test_force_replaces_a_dangling_symlink(tmp_path):
 	(tmp_path / "figwig").symlink_to(tmp_path / "moved")
-	with pytest.raises(FileExistsError):
+	with pytest.raises(SystemExit, match="Re-run with --force"):
 		install(tmp_path)
 
 	dest = install(tmp_path, "-f")
