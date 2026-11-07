@@ -17,6 +17,7 @@ import pytest
 import figwig
 import figwig.figwig
 import figwig._figwig_kernels
+import figwig._kernels
 
 from figwig import FigWigReader
 from figwig import FigWigWriter
@@ -1659,11 +1660,15 @@ def test_read_entries_past_2_31_bases(tmp_path, order):
 	numpy.testing.assert_array_equal(found.values, values[key])
 
 
-def test_kernels_compile_no_copy_for_a_constant(fw, track_fw, tmp_path):
-	"""Reads of every kind and writes pass the kernels typed arguments, so
-	that numba compiles no kernel for a literal constant: a variable that
-	starts at 0 and is passed on is typed as the literal 0 and then as an
-	int64, and compiles the kernel it is passed to twice."""
+def test_kernels_compile_no_copy_for_a_constant(fw, track_fw, dense_bw,
+		tmp_path):
+	"""Reads of every kind, writes, sparse writes and bigWig reads pass the
+	kernels typed arguments, so that numba compiles no kernel for a literal
+	constant: a variable that starts at 0 and is passed on is typed as the
+	literal 0 and then as an int64, and compiles the kernel it is passed to
+	twice. A kernel loaded from numba's cache types none of its callees, so
+	this finds a literal only where the kernels compile, as in CI once they
+	change."""
 
 	numba = pytest.importorskip('numba')
 	rng = numpy.random.default_rng(3)
@@ -1678,12 +1683,24 @@ def test_kernels_compile_no_copy_for_a_constant(fw, track_fw, tmp_path):
 	with FigWigWriter(tmp_path / 'out.fw', {'chr1': 50_000}, [{'name': 'a'}, {
 			'name': 'b', 'dtype': 'uint16'}], groups=2, n_jobs=2) as writer:
 		writer.write('chr1', [0], rng.integers(0, 3, (1, 2, 50_000)))
+	for order in ('positions', 'tracks'):
+		with FigWigWriter(tmp_path / '{}.fw'.format(order), {'chr1': 50_000},
+				[{'name': 'a'}, {'name': 'b'}], order=order, n_jobs=2) as writer:
+			positions = numpy.sort(rng.choice(50_000, 3000, replace=False))
+			writer.write_sparse(['chr1'] * 3000, positions, rng.integers(0, 2,
+				3000), rng.integers(1, 5, 3000))
+
+	bigwig = figwig.BigWigReader(dense_bw[0])
+	for engine in ('zlib', 'auto'):
+		bigwig.read(['chr1'] * 4, [0, 1000, 50_000, 100_000], 1000, n_jobs=2,
+			engine=engine)
 
 	literal = []
-	for name, kernel in vars(figwig._figwig_kernels).items():
-		if isinstance(kernel, numba.core.dispatcher.Dispatcher):
-			literal += [name for signature in kernel.signatures if any(isinstance(
-				t, numba.types.Literal) for t in signature)]
+	for module in (figwig._figwig_kernels, figwig._kernels):
+		for name, kernel in vars(module).items():
+			if isinstance(kernel, numba.core.dispatcher.Dispatcher):
+				literal += [name for signature in kernel.signatures if any(
+					isinstance(t, numba.types.Literal) for t in signature)]
 	assert literal == []
 
 

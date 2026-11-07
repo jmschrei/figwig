@@ -701,9 +701,9 @@ def _entries_task(functions, level, tile, piece_tracks, first, piece_tiles,
 	where = numpy.empty(n_tiles, dtype=numpy.int64)
 	crcs = numpy.empty(n_tiles, dtype=numpy.int64)
 	kinds_all = numpy.zeros(n_tiles, dtype=numpy.uint8)
-	j = 0
+	j = int(0)
 	status = -1
-	t = 0
+	t = int(0)
 	while t < n_tiles:
 		buffer = out[:min(room[t] + 16, go_bytes + need_after[t])]
 		bounds = numpy.zeros(n_tiles - t + 1, dtype=numpy.int64)
@@ -1482,11 +1482,11 @@ def _encode_entries(tile, n_tracks, tiles, first, tracks, positions, values,
 
 		# The entries of each track, in order, with their statistics and
 		# the bytes of their offsets.
-		total = 0
-		delta_bytes = 0
+		total = int(0)
+		delta_bytes = int(0)
 		adjacent = 0
-		n_present = 0
-		n_touched = 0
+		n_present = int(0)
+		n_touched = int(0)
 		last_track = -1
 		last = 0
 		for e in range(e0, e1):
@@ -3437,14 +3437,14 @@ def _key_segments(keys, positions, high_shift, tile_shift):
 
 	n = keys.shape[0]
 	count = 0
-	a = 0
+	a = int(0)
 	while a < n:
 		a = _run_end(keys, a, n, high_shift)
 		count += 1
 	bounds = numpy.empty(count + 1, dtype=numpy.int64)
 	lows = numpy.empty(count, dtype=numpy.int64)
 	highs = numpy.empty(count, dtype=numpy.int64)
-	a = 0
+	a = int(0)
 	for k in range(count):
 		b = _run_end(keys, a, n, high_shift)
 		bounds[k] = a
