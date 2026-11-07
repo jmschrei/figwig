@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import bisect
 import collections
+import ctypes
 import itertools
 import json
 import os
@@ -931,7 +932,9 @@ class FigWigWriter:
 
 	engine: str, optional
 		What compresses the chunks: 'zlib', 'libdeflate', 'isal' or 'auto';
-		see `BigWigWriter`. Default is 'auto'.
+		see `BigWigWriter`. The tile sums and zoom levels are compressed at
+		level 6 by libdeflate when it is the engine, and by zlib otherwise.
+		Default is 'auto'.
 
 	n_jobs: int, optional
 		The most threads that encode and compress at once, besides the
@@ -2999,10 +3002,11 @@ class FigWigWriter:
 		live = numpy.flatnonzero(tile_sums.any(axis=1))
 		return self._tile_offsets[tid] + tiles[live], tile_sums[live]
 
-	def _summary_record(self, g):
+	def _summary_record(self, g, deflater=None):
 		"""The summary of group g for the index: the tiles with a nonzero
 		sum and each track's sum over them, deflated, with the stream's
-		CRC-32, or an empty record."""
+		CRC-32, or an empty record. Its streams are deflated by `deflater`,
+		a `_SummaryDeflater`, or by zlib when it is None."""
 
 		if not self._keeps[g]:
 			return struct.pack('<III', 0, 0, 0) + struct.pack('<I', 0)
@@ -3013,9 +3017,9 @@ class FigWigWriter:
 		sums = numpy.concatenate([v for _, v in pieces] + [numpy.zeros((0,
 			n_tracks), dtype=numpy.float32)]).astype(numpy.float64)
 		if len(tiles) == 0:
-			stream = self._summary_stream(g, 0, tiles, sums)
+			stream = self._summary_stream(g, 0, tiles, sums, deflater)
 			return struct.pack('<III', 0, len(stream), zlib.crc32(stream)) + \
-				stream + self._zoom_section(tiles, sums, g)
+				stream + self._zoom_section(tiles, sums, g, deflater)
 		# Pieces kept in tile order with no tile twice, as most writes keep
 		# them, are already the sorted and summed rows.
 		if not (tiles[1:] > tiles[:-1]).all():
@@ -3025,17 +3029,19 @@ class FigWigWriter:
 			starts = numpy.flatnonzero(first)
 			sums = numpy.add.reduceat(sums, starts, axis=0)
 			tiles = tiles[starts]
-		stream = self._summary_stream(g, 0, tiles, sums)
+		stream = self._summary_stream(g, 0, tiles, sums, deflater)
 		return struct.pack('<III', len(tiles), len(stream), zlib.crc32(stream)) \
-			+ stream + self._zoom_section(tiles, sums, g)
+			+ stream + self._zoom_section(tiles, sums, g, deflater)
 
-	def _summary_stream(self, g, level, bins, sums):
+	def _summary_stream(self, g, level, bins, sums, deflater=None):
 		if self._index_builder is not None:
 			return self._index_builder.compress(g, level, bins, sums)
-		return zlib.compress(bins.astype('<u4').tobytes() + sums.astype(
-			'<f4' if level == 0 else '<f8').tobytes(), 6)
+		parts = bins.astype('<u4'), sums.astype('<f4' if level == 0 else '<f8')
+		if deflater is None:
+			return zlib.compress(parts[0].tobytes() + parts[1].tobytes(), 6)
+		return deflater(parts)
 
-	def _zoom_section(self, tiles, sums, g):
+	def _zoom_section(self, tiles, sums, g, deflater=None):
 		"""The zoom levels of a group, from its tile sums (file tiles
 		ascending, sums (tiles, tracks) float64): the level count, then per
 		level its factor, bin count, stream length and CRC-32, and a zlib
@@ -3055,7 +3061,7 @@ class FigWigWriter:
 				bins = bins[first]
 			else:
 				bins, zsums = tiles, sums
-			stream = self._summary_stream(g, k + 1, bins, zsums)
+			stream = self._summary_stream(g, k + 1, bins, zsums, deflater)
 			parts.append(struct.pack('<IIII', factor, len(bins), len(stream),
 				zlib.crc32(stream)) + stream)
 		return b''.join(parts)
@@ -3571,7 +3577,7 @@ class FigWigWriter:
 				self._index_builder = _SummaryIndex([len(g) for g in self._groups],
 					[self._n_tiles] + [grid[1] for grid in self._zoom_grids])
 
-			def record_of(g):
+			def record_of(g, deflater):
 				if self.order == 'tracks':
 					# Joined as bytes: numpy.concatenate promotes the fields of each
 					# structured array it is given.
@@ -3592,7 +3598,19 @@ class FigWigWriter:
 					record = struct.pack('<II', len(runs), zlib.crc32(body)) + body
 				if self._index_builder is not None:
 					self._index_builder.raw_sizes[g] = len(record)
-				return record + self._summary_record(g)
+				return record + self._summary_record(g, deflater)
+
+			# Summaries and zoom levels are deflated by libdeflate where it is
+			# the engine, a compressor to each part of the groups, and by zlib
+			# otherwise.
+			def records_of(first, last):
+				deflater = _SummaryDeflater() if self.engine == 'libdeflate' and \
+					self._index_builder is None else None
+				try:
+					return [record_of(g, deflater) for g in range(first, last)]
+				finally:
+					if deflater is not None:
+						deflater.close()
 
 			# Each group's record deflates its live tiles and summary, which
 			# for thousands of groups is seconds on one thread; the groups go
@@ -3600,13 +3618,12 @@ class FigWigWriter:
 			# of 90,000 reads made a task of each tiny record.
 			n_groups = len(self._groups)
 			if self._pool is None:
-				records = [record_of(g) for g in range(n_groups)]
+				records = records_of(0, n_groups)
 			else:
 				cuts = numpy.linspace(0, n_groups, min(n_groups, 4 * self.n_jobs) +
 					1).astype(numpy.int64).tolist()
-				records = [record for part in self._pool.map(lambda k: [record_of(g)
-					for g in range(cuts[k], cuts[k + 1])], range(len(cuts) - 1)) for
-					record in part]
+				records = [record for part in self._pool.map(lambda k: records_of(
+					cuts[k], cuts[k + 1]), range(len(cuts) - 1)) for record in part]
 			index_size = self._index_builder.size() if self._index_builder else 0
 			self._settle_writes()
 			index_at = self._file.tell()
@@ -3843,6 +3860,46 @@ def _deflate_functions():
 
 
 _DEFLATE_FUNCTIONS = []
+
+
+class _SummaryDeflater:
+	"""Deflates summary and zoom streams into zlib streams with one libdeflate
+	compressor at level 6; one thread at a time uses it. Each stream is
+	deflated alone, so its bytes do not depend on which thread or which
+	deflater made it. libdeflate is called through ctypes, which lets the
+	GIL go, rather than through a kernel, whose first call starts numba's
+	compiler in a process that runs no other kernel, a one-thread merge."""
+
+	def __init__(self):
+		alloc, self._compress, self._free = _libdeflate()
+		self._compressor = alloc(6)
+		if self._compressor == 0:
+			raise MemoryError("libdeflate could not allocate a compressor.")
+		self._grow(1 << 16)
+
+	def _grow(self, size):
+		# numpy leaves the buffer unwritten, where ctypes would zero it while
+		# holding the GIL.
+		self._out = numpy.empty(size, dtype=numpy.uint8)
+		self._at = self._out.ctypes.data
+
+	def __call__(self, parts):
+		"""The zlib stream of the arrays' bytes one after another."""
+
+		data = b''.join(part.tobytes() for part in parts)
+		bound = len(data) + len(data) // 8 + 64
+		if bound > len(self._out):
+			self._grow(bound)
+		n = self._compress(self._compressor, data, len(data), self._at, len(
+			self._out))
+		if n == 0:
+			raise RuntimeError("a summary could not be compressed.")
+		return ctypes.string_at(self._at, n)
+
+	def close(self):
+		if self._compressor:
+			self._free(self._compressor)
+			self._compressor = 0
 
 
 def _gather_parts(parts):

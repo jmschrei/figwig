@@ -4319,6 +4319,28 @@ def test_add_file_and_append_keep_each_groups_summary(tmp_path, monkeypatch):
 		1, 2]])
 
 
+def test_summaries_deflated_on_threads_are_the_bytes_of_one(tmp_path):
+	"""The groups' records, with their summaries and zoom levels, deflated in
+	parts on the pool at close, are the bytes one thread writes, for one
+	track per group in track order and for groups of four in position
+	order."""
+
+	rng = numpy.random.default_rng(3)
+	values = (rng.integers(1, 4, (40, 6400)) * (rng.random((40, 6400)) < 0.05)
+		).astype(float)
+	names = ['t{}'.format(i) for i in range(40)]
+	for order, groups in (('tracks', None), ('positions', 4)):
+		contents = set()
+		for n_jobs in (1, 3, 8):
+			path = tmp_path / '{}_{}.fw'.format(order, n_jobs)
+			with FigWigWriter(path, {'chr1': 6400}, names, tile=64, groups=groups,
+					order=order, zooms=2, n_jobs=n_jobs) as writer:
+				writer.write('chr1', [0], values[None])
+			contents.add(path.read_bytes())
+		assert len(contents) == 1, order
+		assert len(FigWigReader(path).zooms) == 2
+
+
 def test_tile_sums_inflate_each_summary_once(tmp_path, monkeypatch):
 	"""A group's tile sums are read from the file once and then kept, the
 	least recently read dropped past the cache's bytes; what a call returns

@@ -11,13 +11,17 @@ index record it gives is compared with `FigWigReader`'s.
 
 import json
 import struct
+import sys
+import zlib
 
 import numpy
 import pytest
 
 import figwig
+import figwig.writer
 
 from figwig import FigWigReader
+from figwig import FigWigWriter
 from figwig.figwig import _HEADER
 
 from . import format_reference as spec
@@ -229,6 +233,47 @@ def test_summaries_are_the_tile_sums(files):
 				zlisted = numpy.zeros_like(zexpected)
 				zlisted[bins] = zsums
 				assert numpy.array_equal(zlisted, zexpected)
+
+
+@pytest.mark.parametrize('engine', ['libdeflate', 'zlib', 'auto'])
+def test_summaries_are_deflated_by_the_engine_of_the_chunks(tmp_path,
+	monkeypatch, engine):
+	"""Each summary and zoom level is the zlib stream that the chunks' engine
+	makes of its bytes at level 6: libdeflate's where libdeflate is the
+	engine, and zlib's otherwise, the bytes every file had before, also with
+	'auto' where libdeflate does not load."""
+
+	if engine == 'libdeflate' and sys.platform == 'win32':
+		pytest.skip("libdeflate's functions do not load on Windows")
+	if engine == 'auto':
+		monkeypatch.setattr(figwig.writer, '_libdeflate', lambda: None)
+
+	def compress(raw):
+		if engine == 'libdeflate':
+			import deflate
+			return deflate.zlib_compress(raw, 6)
+		return zlib.compress(raw, 6)
+
+	rng = numpy.random.default_rng(4)
+	values = rng.integers(0, 3, (5, 20000)) * (rng.random((5, 20000)) < 0.2)
+	path = tmp_path / 'f.fw'
+	for order, groups in (('positions', [['a', 'b'], ['c'], ['d', 'e']]),
+			('tracks', None)):
+		with FigWigWriter(path, {'chr1': 12000, 'chr2': 8000}, list('abcde'),
+				tile=64, groups=groups, order=order, zooms=2, engine=engine,
+				n_jobs=1) as writer:
+			writer.write('chr1', [0], values[None, :, :12000].astype(float))
+			writer.write('chr2', [0], values[None, :, 12000:].astype(float))
+		file = spec.File(path)
+		data = path.read_bytes()
+		for group in file.groups:
+			tiles, sums = group.summary
+			assert compress(tiles.astype('<u4').tobytes() + sums.astype(
+				'<f4').tobytes()) in data
+			assert len(group.zooms) == 2
+			for factor, bins, zsums in group.zooms:
+				assert compress(bins.astype('<u4').tobytes() + zsums.astype(
+					'<f8').tobytes()) in data
 
 
 def test_appended_file_keeps_dead_bytes_and_chunks_in_place(files):
