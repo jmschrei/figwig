@@ -2236,8 +2236,15 @@ class FigWigWriter:
 		if self._pool is not None:
 			# Up to one task per thread from one call, each of at least
 			# _WRITE_TASK_BYTES of tiles, so that a call of a few hundred
-			# dense tiles keeps the pool busy.
-			tasks = min(self.n_jobs, max(2, len(tiles) * bound // _WRITE_TASK_BYTES))
+			# dense tiles keeps the pool busy. Integers of one or two bytes
+			# count at their own width: such count tracks encode fast, and a
+			# call of them cut as finely as float tracks spent more on its
+			# tasks than on its tiles. Their sums are exact, so the cut does
+			# not change the file.
+			width = min(values.dtype.itemsize, 4) if values.dtype.kind in 'iu' \
+				else 4
+			tasks = min(self.n_jobs, max(2, len(tiles) * (n_tracks * tile * width +
+				16) // _WRITE_TASK_BYTES))
 			per_batch = max(1, min(per_batch, -(-len(tiles) // tasks)))
 
 		# Whole tiles belong to the window that covers them, and the segments

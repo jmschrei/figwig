@@ -81,6 +81,8 @@ figwig files
 
 	- ``sums`` on a reader with ``verify=True`` reads and checks every chunk under its intervals, where for integer tracks it took the tiles an interval covers whole from the tile sums and so returned a sum over a corrupt chunk without checking it; without ``verify`` it still takes them from the tile sums.
 
+	- ``write`` copies each call's values for the writer's threads in a vectorized loop, where the loop copied one value at a time, and cuts a call of integer values of one or two bytes into tasks by their own bytes, where it counted four bytes a value and cut a call of count tracks into more tasks than encoding them repays. On 8 and 32 threads of the benchmarks' server, 6 uint16 count tracks over chr1, written in calls of 1 Mb, take 0.49 s, where they took 0.81 and 0.89 s, and 48 such tracks 3.6 and 4.0 s, where they took 4.1 and 4.3 s. The files are the same to the byte.
+
 Converters and commands
 -----------------------
 

@@ -3220,6 +3220,67 @@ def test_write_checks_and_copies_in_parts_as_one_thread(tmp_path, monkeypatch,
 	assert written[0] == written[1]
 
 
+@pytest.mark.parametrize('dtype', ['uint16', 'int8', 'float32', 'float64'])
+def test_a_write_copies_its_block_before_returning(tmp_path, monkeypatch,
+		dtype):
+	"""A write's block copied on the pool, in pieces whose last one in a
+	row is short, of every channel or of some out of order, is the block:
+	overwriting the caller's values once each call returns leaves the file
+	one thread writes, which encodes inside the call."""
+
+	for name, value in (('_COPY_ON_POOL', 1), ('_COPY_PART_BYTES', 1),
+			('_GATHER_BASES', 7), ('_COPY_WAVE_BYTES', 1)):
+		monkeypatch.setattr(figwig.figwig, name, value)
+	rng = numpy.random.default_rng(5)
+	tracks = [{'name': name, 'dtype': dtype} for name in 'abcd']
+	sizes = {'chr1': 4000, 'chr2': 4000}
+	calls = [('chr1', [0, 300, 1000], None), ('chr2', [64, 2000], ['d', 'b', 'a',
+		'c'])]
+
+	written = []
+	for n_jobs in (1, 4):
+		path = str(tmp_path / '{}.fw'.format(n_jobs))
+		with FigWigWriter(path, sizes, tracks, tile=64, groups=[['a', 'b'], ['c',
+				'd']], n_jobs=n_jobs) as writer:
+			for k, (chrom, starts, order) in enumerate(calls):
+				values = numpy.random.default_rng(k).integers(0, 100, (len(starts), 4,
+					250)).astype(dtype)
+				values[:, :, ::3] = 0
+				writer.write(chrom, starts, values, tracks=order)
+				values[:] = rng.integers(0, 100, values.shape).astype(dtype)
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
+
+
+@pytest.mark.parametrize('dtype', ['uint8', 'int8', 'uint16', 'int16', 'int32',
+	'float32'])
+def test_a_write_cut_into_tasks_is_the_file_one_thread_writes(tmp_path,
+		monkeypatch, dtype):
+	"""A call's whole tiles cut into tasks, more of them for float values
+	and wider integers than for integers of one or two bytes, give the
+	file one thread writes, with every value of its type's range."""
+
+	monkeypatch.setattr(figwig.figwig, '_WRITE_TASK_BYTES', 10000)
+	info = numpy.iinfo(dtype) if dtype != 'float32' else None
+	rng = numpy.random.default_rng(7)
+	values = rng.integers(info.min if info else -1000, (info.max if info else
+		1000) + 1, (2, 5, 64 * 40), dtype=numpy.int64).astype(dtype)
+	values[:, :, rng.random(64 * 40) < 0.3] = 0
+	if dtype == 'float32':
+		values *= numpy.float32(0.37)
+
+	written = []
+	for n_jobs in (1, 8):
+		path = str(tmp_path / '{}.fw'.format(n_jobs))
+		with FigWigWriter(path, {'chr1': 64 * 100}, ['t{}'.format(i) for i in
+				range(5)], tile=64, n_jobs=n_jobs) as writer:
+			writer.write('chr1', [0, 64 * 50], values)
+		with open(path, 'rb') as handle:
+			written.append(handle.read())
+	assert written[0] == written[1]
+
+
 @pytest.mark.parametrize('order', ['positions', 'tracks'])
 def test_writes_on_their_own_thread_write_the_file_one_thread_writes(tmp_path,
 		monkeypatch, order):
