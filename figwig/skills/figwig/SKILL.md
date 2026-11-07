@@ -81,7 +81,7 @@ say.
 
 | You see… | Read |
 |---|---|
-| any `ValueError`, `TypeError`, `UserWarning` or `ResourceWarning` from figwig, or a command's message | `references/errors.md` |
+| any `ValueError`, `TypeError`, numba `TypingError`, `UserWarning` or `ResourceWarning` from figwig, or a command's message | `references/errors.md` |
 | "is not a bigWig file" on a file figwig wrote | `references/errors.md`: it was never closed |
 | 0 where you expected NaN, or the reverse; numbers that differ from pyBigWig or deepTools | `references/reading.md` for bigWigs, `references/figwig-reading.md` for `.fw` |
 | `figwig bam2bw` on one core, or an empty minus-strand bigWig | `references/bam2bw.md` |

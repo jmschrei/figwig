@@ -225,7 +225,9 @@ Each item is a whole batch, read in one call: the ``BatchSampler`` hands
 ``__getitem__`` a new mix of indices each epoch. A ``BigWigReader`` can be
 pickled, carrying its index if it has read it, so it can go to DataLoader
 workers under any start method; reading once in the main process, as
-``__init__`` does here, saves each worker from reading the index again. The
+``__init__`` does here, saves each worker from reading the index again and
+compiles the kernels before the workers start, which would otherwise
+compile them into numba's cache at the same time (:doc:`threads`). The
 workers already read in parallel, so each reads its batch on one thread;
 :doc:`threads` has the numbers behind that choice. For several tracks, keep a
 list of readers and call ``read_bigwig`` with it.

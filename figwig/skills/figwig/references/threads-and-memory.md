@@ -81,8 +81,12 @@ dense figwig read and up to 20 s more for each further kind (sparse,
 another output dtype, sums, `read_entries`), a few seconds for a
 track-order read or a write. numba caches them next to the
 installed package or in the user's cache directory; later processes load
-them in a fraction of a second. Warm up with a small call before timing and
-before spawning DataLoader workers, each of which loads the cache.
+them in a fraction of a second. Warm up with a small call of each kind, in
+one process, before timing and before starting DataLoader workers or
+`pytest -n`: processes that compile at once into one cache can save one
+kernel version over another, and a later process then raises a `TypingError`
+naming a `CPUDispatcher` or `can't unbox array`. Deleting the cache's
+`.nbi`/`.nbc` files mends it; a `NUMBA_CACHE_DIR` per process avoids it.
 
 ## Measuring on the target machine
 

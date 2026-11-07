@@ -140,6 +140,8 @@ A `FigWigReader` pickles without its index, which each worker reads again
 Dataset as `references/reading.md` shows for `BigWigReader`, with
 `n_jobs=1` in workers. Workers help once reading is the bottleneck; under
 `spawn` each pays a few seconds on its first batch to load the compiled
-kernels. The reader checks on every read that the file at its path is the
+kernels. Read once in the main process before the workers start, so that
+they do not compile into numba's cache at the same time
+(`references/threads-and-memory.md`). The reader checks on every read that the file at its path is the
 one it opened (inode and header) and raises if a conversion replaced it or
 an append to it has closed; it keeps reading while the append runs.

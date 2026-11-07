@@ -199,9 +199,16 @@ a track-order read 2.1 s and a write 8.7 s.
 numba caches them on
 disk, next to the installed package,
 or in the user's cache directory when the package directory cannot be
-written, and later processes load them in a tenth of a second. Warm up with
-a small read before timing figwig, and before starting DataLoader workers
-under ``spawn``, each of which loads the cache. One ``BigWigReader`` or
+written, and later processes load them in a tenth of a second. The cache is
+not safe for processes that compile at the same time: two that compile
+different versions of one kernel can save them to the same file, and a later
+process then loads the wrong one and raises a ``TypingError`` that names a
+``CPUDispatcher``, or ``TypeError: can't unbox array``. So, in one process,
+make a small read of each kind the others will make before starting
+DataLoader workers (under any start method) or ``pytest -n``, and before
+timing figwig; or give each process its own ``NUMBA_CACHE_DIR``. Deleting
+the cache's ``.nbi`` and ``.nbc`` files mends one that has gone wrong. One
+``BigWigReader`` or
 ``FigWigReader`` can be read from several threads at once, and holds no
 open file between reads; a ``FigWigReader`` keeps each group's index, 21
 bytes per tile of the genome, from the first read that touches it.

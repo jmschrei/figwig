@@ -3,6 +3,12 @@
 Messages are quoted up to the first value they fill in. A call that raises
 writes nothing; writers stay usable.
 
+## Any call
+
+| Message | Cause → fix |
+|---|---|
+| numba `TypingError: … Invalid use of type(CPUDispatcher(<function …>)) with parameters …`, `TypeError: can't unbox array from PyObject into native value` | processes that compiled at the same time into one numba cache saved one kernel version over another → delete the cache's `.nbi`/`.nbc` files (`figwig/__pycache__`, or `NUMBA_CACHE_DIR`), then warm up in one process before starting workers (`references/threads-and-memory.md`) |
+
 ## Reading bigWigs
 
 | Message | Cause → fix |
