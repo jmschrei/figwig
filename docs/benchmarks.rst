@@ -163,7 +163,7 @@ figwig bam2bw, ``-p 8``  **1.82 s**  **1.31 s**  949 MB            1,180 MB     
 
 figwig's bigWigs are 3% larger because they are compressed at level 1
 rather than pyBigWig's level 6. The first call in a new environment also
-compiles figwig's kernels, which took 1.1 s on the tiny input.
+compiles figwig's kernels, which took 1.8 s on the tiny input.
 
 Coverage of every aligned base
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
