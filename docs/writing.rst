@@ -145,8 +145,8 @@ if that is more, then 4 times larger at each level, up to the longest
 chromosome. figwig skips a level that has no fewer records than the last one
 it kept, and goes on to the coarser ones. The levels are built when the writer
 is closed, from the data blocks read back from the file, which adds a pass
-over the data: writing 15.9 million per-base counts on 8 threads took 0.18 s
-without zoom levels and 0.75 s with them (:doc:`benchmarks`). Pass
+over the data: writing 15.9 million per-base counts on 8 threads took 0.14 s
+without zoom levels and 0.70 s with them (:doc:`benchmarks`). Pass
 ``zooms=0`` for a file no genome browser will draw.
 
 Compression
@@ -167,9 +167,9 @@ at libdeflate's level 1, into files 3% larger than pyBigWig's.
 at levels 1 to 3, but at levels 1 and 2 its output can differ from one run to the next on the same input, so
 its files are not reproducible byte for byte; their values are.
 
-Blocks are compressed on up to ``n_jobs`` threads, besides the calling
-thread, which lays out the next batch of about a million items meanwhile.
-:doc:`threads` shows how the time falls with threads.
+With ``n_jobs`` above 1, blocks are compressed on ``n_jobs`` threads while
+another thread lays out the next batch of items; with 1, the calling thread
+does all of it. :doc:`threads` shows how the time falls with threads.
 
 Files identical to pyBigWig's
 -----------------------------

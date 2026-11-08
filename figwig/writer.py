@@ -499,7 +499,7 @@ class BigWigWriter:
 	where it changes section type; those are not written here.
 
 	Each data block is compressed on its own, so blocks are compressed on up
-	to `n_jobs` threads at once while the calling thread lays out the next
+	to `n_jobs` threads at once while another thread lays out the next
 	batch, and the file does not depend on the number of threads. zlib and
 	libdeflate are called without holding the GIL.
 
@@ -536,8 +536,8 @@ class BigWigWriter:
 		reader reads. Where zlib's library cannot be loaded, as on Windows,
 		'zlib' compresses with Python's zlib module, with the same bytes, and
 		libdeflate's functions cannot be loaded there either. 'auto' is
-		libdeflate when its functions can be loaded, and zlib otherwise. 'isal' needs the `isal` package, and is faster still at
-		levels 1 to 3, but at levels 1 and 2 its output has been seen to
+		libdeflate when its functions can be loaded, and zlib otherwise. 'isal' needs the `isal` package, and is faster still
+		at levels 1 to 3, but at levels 1 and 2 its output has been seen to
 		differ from one run to the next on the same input, so files written
 		with it are not reproducible byte for byte; their values are.
 		Default is 'auto'.

@@ -21,15 +21,19 @@ reader.
 ==============================================================  ==========================================  ============================================
 task                                                            figwig                                      fastest other tool
 ==============================================================  ==========================================  ============================================
-read 167,750 windows of 1,000 bp from an ATAC-seq bigWig        0.135 s on 8 threads                        1.25 s, pybigtools
-read 8,192 windows of 2,048 bp from 48 count tracks             0.085 s on 8 threads, from one figwig file  0.27 s from 48 bigWigs, figwig; 4.0 s, zarr
-write 15.9 million per-base counts                              0.18 s on 8 threads                         4.20 s, pyBigWig
-write 21.2 million intervals with zoom levels                   0.55 s on 8 threads                         5.47 s, pybigtools
+read 167,750 windows of 1,000 bp from an ATAC-seq bigWig        0.103 s on 8 threads                        1.25 s, pybigtools
+read 8,192 windows of 2,048 bp from 48 count tracks             0.071 s on 8 threads, from one figwig file  0.19 s from 48 bigWigs, figwig; 4.0 s, zarr
+write 15.9 million per-base counts                              0.14 s on 8 threads                         4.20 s, pyBigWig
+write 21.2 million intervals with zoom levels                   0.45 s on 8 threads                         5.47 s, pybigtools
 convert a 2.4 GB ATAC-seq BAM to two stranded bigWigs           4.65 s and 910 MB at ``-p 2``               58.48 s and 3,039 MB, bam2bw 0.5.1
 ==============================================================  ==========================================  ============================================
 
 These were measured on a 2x AMD EPYC 9575F; :doc:`benchmarks` has the
 setup, every comparison, and how the times fall with threads.
+
+The reading example uses two public ENCODE bigWigs, ENCFF830RWF (238 MB) and
+ENCFF989SAK (645 MB), which download from
+``https://www.encodeproject.org/files/<accession>/@@download/<accession>.bigWig``.
 
 .. code-block:: python
 

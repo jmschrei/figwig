@@ -39,7 +39,7 @@ name or a URL. ``-t`` sets the tile size, ``--groups`` the consecutive
 tracks stored together (8 by default; group tracks of one kind together,
 since a count track grouped with a float track is stored and decoded with
 it), ``--dtype`` one dtype for every track, ``-l`` the compression
-level, with 0 for uncompressed chunks, which costs four bytes per base of
+level (6 by default), with 0 for uncompressed chunks, which costs four bytes per base of
 a dense float track, and ``-z`` the number of zoom levels to keep beside
 the tile sums (none by default; ``bam2fw`` takes it too, and ``reorder``
 and ``merge`` keep the input's), and ``--summary-index`` to write the
@@ -54,9 +54,9 @@ groups after its tracks; its chromosomes, tile and level are kept, and
 that the file does not have is left out with a warning. The defaults
 suit count tracks, which read fastest in one group of many; for dense
 float tracks read in short windows, such as conservation or fold-change
-signal, ``-t 1024 --groups 1`` reads a third faster on one thread for a
-file a quarter larger, and the default is faster from 8 threads on
-(:doc:`benchmarks`).
+signal, ``-t 1024 --groups 1`` reads short windows 1.4 to 1.7 times faster
+on 1 to 32 threads, for a file 29% larger and a whole chromosome read more
+slowly on 1 and 8 threads (:doc:`benchmarks`).
 
 ``-m`` takes a metadata table: tab-separated, or comma-separated with a
 ``.csv`` extension, with a header and one row per bigWig, matched on its
@@ -81,7 +81,8 @@ zeros mean something other than their gaps, such as the 0% sites of a
 methylation track against its unsequenced sites, the unaligned bases of
 a conservation track, or the explicit 0.0 intervals of a fold-change or
 p-value track, which the default drops (``bw2fw`` then ``fw2bw`` with
-``--missing nan`` on both is lossless); the track is then float32, which
+``--missing nan`` on both is lossless, except that an interval whose value is
+NaN comes back as a gap); the track is then float32, which
 costs a compressed
 file little (0.4% on nine chr22 annotation tracks, nothing measurable on
 a genome-wide fold-change track) and doubles an uncompressed one. The
@@ -109,7 +110,8 @@ reads that table, so the two commands round-trip a file's tracks, names and
 attributes. ``-t`` names the tracks to write and ``--select`` takes
 ``KEY=VALUE`` pairs that their attributes must have. ``-z N`` writes N
 zoom levels into the bigWigs, for a genome browser, each level adding to
-the file (none by default), and ``-l`` sets their compression level. A
+the file (none by default), and ``-l`` sets the bigWigs' compression level (6
+by default). A
 track's bases that are 0, and a float track's NaN, are left out of its
 bigWig, as ``BigWigWriter.write`` leaves them out with
 ``missing=0.0``, so reading the bigWig with ``read_bigwig`` gives the same
@@ -174,7 +176,7 @@ so ``--cells`` with the called cells is the usual call. The file is read
 in BGZF units on the ``-p`` threads, as ``figwig bam2bw`` reads it, and
 each cell's fragment ends (``-f``, the usual choice; ``-ps`` and ``-ns``
 shift them) go in as entries, holding 8 bytes per end while the file is
-scanned and about three times that at the peak. With several files each file's cells are its own group, named
+scanned and four to six times that at the peak. With several files each file's cells are its own group, named
 ``<name>.<barcode>``, with the file's attributes from ``-m`` and the
 cell's from ``--cells``. :doc:`benchmarks` times the conversion against
 the other ways of making a per-cell file.
@@ -208,7 +210,7 @@ input's when it is in position order and to 16,384 and 8 otherwise; ``-l``
 sets the compression level, which defaults to the input's when the output
 is in the input's order, and otherwise to 6 in position order and 0 in
 track order, so a file reordered to track order is uncompressed, and
-three to four times larger, unless ``-l`` says otherwise. The output has a
+1.6 to 4.7 times larger, unless ``-l`` says otherwise. The output has a
 regional summary index when the header of the input announces one, unless
 ``--no-summary-index`` says otherwise, and ``--summary-index`` writes one for
 an input that has none. The output may
@@ -238,8 +240,9 @@ file announces one, unless ``--no-summary-index`` says otherwise, and
 ``--summary-index`` writes one when it does not; it is written anew over the
 merged tracks, not copied.
 The output may be one of the inputs, and no other existing file
-unless ``-f`` is given. ``-g`` records a reference genome; the first
-file's is kept otherwise, as are its attributes.
+unless ``-f`` is given. ``-g`` records a reference genome; without it the
+merged file takes the genome the files name, and files that name different
+genomes are refused. The first file's attributes are kept.
 
 figwig info
 -----------
@@ -250,7 +253,7 @@ figwig info
     figwig info -b k562.fw
 
 ``figwig info`` prints a file's path, format version, the figwig that
-wrote it, genome, order, tile, compression level, chromosomes, groups,
+wrote it, zoom levels, genome, order, tile, compression level, chromosomes, groups,
 tracks, size in bytes and attributes, one per line, then a tab-separated
 table of its tracks with their name, dtype, group, nonzero bases (NaN
 bases are not counted), sum and every attribute. A control character in a

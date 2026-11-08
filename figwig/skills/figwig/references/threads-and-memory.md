@@ -11,7 +11,7 @@ stable, and the last section measures the numbers where they matter.
   reading every window in one call gains up to 8 to 32 threads. A reused
   reader beats a path, which re-reads the index on every call.
 - figwig files: one thread per 64 chunks touched, up to `n_jobs`, but no
-  more than one per 256 KB of chunks decoded and per 2 MB of dense output
+  more than one per 256 KiB of chunks decoded and per 2 MiB of dense output
   (at least 4 where asked for; a read summed per bin over fewer windows
   than threads keeps them all), with the pool kept between reads, and
   batches cut so that each thread gets at least two, however large the
@@ -19,7 +19,7 @@ stable, and the last section measures the numbers where they matter.
   two; on a read of several groups each thread takes the next batch as it
   ends one. Gains end near 8 threads for sparse
   reads and continue to 32 for dense float tracks, which read at the
-  defaults 1.6 to 3.2x faster than their bigWigs on 1 to 32 threads. `sums`
+  defaults 1.6 to 3.3x faster than their bigWigs on 1 to 32 threads. `sums`
   run every group at once; `paired=True` over integer tracks and short
   intervals is one read, and otherwise sums its batches of integer tracks
   side by side in position order; `labels=` over several groups of integer
@@ -42,7 +42,7 @@ stable, and the last section measures the numbers where they matter.
   `n_jobs` pool threads encode and compress it, and a summary thread folds
   it in, so the calling thread only takes the next batch; the writer runs
   `n_jobs + 2` threads. With libdeflate gains end near 8 threads; zlib keeps
-  gaining to 32. Zoom levels add a pass over the data, 2 to 4x
+  gaining to 32. Zoom levels add a pass over the data, 1.3 to 5x
   the time of a write without them, and their memory grows with threads.
 - figwig files: whole tiles encode on the pool, in up to one task per
   thread of at least 4 MB of tiles per call, and intervals and partial
@@ -64,8 +64,9 @@ stable, and the last section measures the numbers where they matter.
 
 - A dense output is `n × channels × width × itemsize`: 8,192 windows × 48
   tracks × 2,048 bases is 3.2 GB as float32. `out=` reuses one array.
-- A sparse figwig read costs about 40 bytes per entry while sorting; a
-  `write_sparse` call about 90 bytes per entry (write a chromosome at a time).
+- A sparse figwig read costs about 40 bytes per entry while sorting, besides
+  the 25 of the returned arrays; a `write_sparse` call about 60 bytes per
+  entry (write a chromosome at a time).
 - A bigWig write's working memory does not grow with the size of a call.
 - Threads multiply across processes: 8 workers at `n_jobs=8` is 64
   threads. Keep processes × `n_jobs` within the free cores, and set
@@ -80,8 +81,12 @@ dense figwig read and up to 20 s more for each further kind (sparse,
 another output dtype, sums, `read_entries`), a few seconds for a
 track-order read or a write. numba caches them next to the
 installed package or in the user's cache directory; later processes load
-them in a fraction of a second. Warm up with a small call before timing and
-before spawning DataLoader workers, each of which loads the cache.
+them in a fraction of a second. Warm up with a small call of each kind, in
+one process, before timing and before starting DataLoader workers or
+`pytest -n`: processes that compile at once into one cache can save one
+kernel version over another, and a later process then raises a `TypingError`
+naming a `CPUDispatcher` or `can't unbox array`. Deleting the cache's
+`.nbi`/`.nbc` files mends it; a `NUMBA_CACHE_DIR` per process avoids it.
 
 ## Measuring on the target machine
 

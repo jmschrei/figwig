@@ -51,7 +51,7 @@ def write_contacts(path, names, n_bins, bin1, bin2, count, tile=256, group=1024)
   one chromosome at a time in position order (`references/figwig-writing.md`),
   so the entries are regrouped by the column's chromosome. At full depth,
   spill them to a file per column chromosome and write each in calls that
-  end on a tile: a call takes about 90 bytes per entry, several GB for
+  end on a tile: a call takes about 60 bytes per entry, several GB for
   chr1's columns at 5 kb.
 - Published `.mcool` files repeat pixels: 4DN's K562 file 4DNFI18UHVRO stores
   thousands of (bin1, bin2) pairs twice at each resolution, and
@@ -61,9 +61,10 @@ def write_contacts(path, names, n_bins, bin1, bin2, count, tile=256, group=1024)
 ## Reading
 
 ```python
+import numpy
 from figwig import FigWigReader
 
-fw = FigWigReader(path)
+fw = FigWigReader(path)                              # path, names, n_bins: as written above
 offsets = numpy.concatenate([[0], numpy.cumsum(n_bins)])
 n = int(offsets[-1])                                 # 'diagonal' is track n
 c, s, k = 0, 10, 20                                  # chromosome, first bin, bins

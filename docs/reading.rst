@@ -161,10 +161,11 @@ throughout, and one warning per read names the chromosomes:
     UserWarning: 2 windows are on chromosomes not in ENCFF830RWF.bigWig, and are
     0.0 throughout: '1', '2'. Its chromosomes include 'chr1', 'chr10', 'chr11'.
 
-Writers leave out chromosomes without data, so a sample without reads on chrY,
-say, has no chrY in its file, and that is not an error. A different naming
-scheme (``1`` against ``chr1``) looks the same, which is why the warning
-lists some of the file's own names. ``set(chroms) - set(bw.chrom_sizes)``
+Many writers leave out chromosomes without data (figwig's keeps every one of
+its ``chrom_sizes``), so a sample without reads on chrY, say, has no chrY in
+its file, and that is not an error. A different naming scheme (``1`` against
+``chr1``) looks the same, which is why the warning lists some of the file's
+own names. ``set(chroms) - set(bw.chrom_sizes)``
 finds the names before reading. Under pytest's ``filterwarnings = error``,
 the warning is an exception.
 
@@ -224,15 +225,17 @@ Each item is a whole batch, read in one call: the ``BatchSampler`` hands
 ``__getitem__`` a new mix of indices each epoch. A ``BigWigReader`` can be
 pickled, carrying its index if it has read it, so it can go to DataLoader
 workers under any start method; reading once in the main process, as
-``__init__`` does here, saves each worker from reading the index again. The
+``__init__`` does here, saves each worker from reading the index again and
+compiles the kernels before the workers start, which would otherwise
+compile them into numba's cache at the same time (:doc:`threads`). The
 workers already read in parallel, so each reads its batch on one thread;
 :doc:`threads` has the numbers behind that choice. For several tracks, keep a
 list of readers and call ``read_bigwig`` with it.
 
 When every window fits in memory, reading all of them once is faster still,
 and ``torch.from_numpy`` wraps the result without a copy: 88,971 windows of
-1,000 bp from both bigWigs above (712 MB) took 0.27 s on 8 threads, where an
-epoch read by 4 workers, one batch of 64 at a time, took about 1.7 s.
+1,000 bp from both bigWigs above (712 MB) took 0.20 s on 8 threads, where an
+epoch read by 4 workers, one batch of 64 at a time, took about 1.2 s.
 
 What it reads, and what it refuses
 ----------------------------------
@@ -255,8 +258,7 @@ compressed or not, at base-pair resolution. Everything else raises a
 
 A read that raises because a data block cannot be read may already have
 written other windows into ``out``. figwig does not read bigWigs over HTTP: a
-URL is taken for a path, and raises ``FileNotFoundError``. It does not return
-binned summaries or use the zoom levels when it reads.
+URL is taken for a path, and raises ``FileNotFoundError``.
 
 Falling back to another reader
 ------------------------------
@@ -277,19 +279,20 @@ Falling back to another reader
 
 figwig's tests compare it against pybigtools' ``values()``, bit for bit,
 which makes pybigtools a natural fallback for the bigWigs figwig refuses.
-A bigBed raises the same ``ValueError``, and pybigtools' ``values()`` on
-a bigBed panics with an exception that is not an ``Exception``, so check
-the file's magic first where a path may be either.
+A bigBed raises the same ``ValueError``. pybigtools' ``values()`` on a
+bigBed can panic with a ``PanicException``, which is a ``BaseException`` and
+not an ``Exception``, or return zeros, so check the file's magic first where a
+path may be either.
 
 ISA-L decompression
 -------------------
 
 Data blocks are inflated by ISA-L, Intel's inflate, when the ``isal`` package
-is installed (``pip install figwig[isal]``; python-isal 1.8 or later, which
-the ``bam2bw`` extra installs too), and by zlib otherwise. ``engine='zlib'``
-or ``engine='isal'`` on ``read`` and ``read_bigwig`` chooses one. Both give
-the same values, and ISA-L reads 1.3 to 1.5 times faster on 1 to 8 threads
-(:doc:`benchmarks`).
+is installed (``pip install figwig[isal]``, which needs python-isal 1.8 or
+later; the ``bam2bw`` extra installs ``isal`` too, from version 1.0), and by
+zlib otherwise. ``engine='zlib'`` or ``engine='isal'`` on ``read`` and
+``read_bigwig`` chooses one. Both give the same values, and ISA-L reads 1.3 to
+1.6 times faster on 1 to 8 threads (:doc:`benchmarks`).
 
 figwig calls ISA-L through two functions that python-isal's extension module
 exports, from numba and without the GIL, so no compiler is needed. The
@@ -298,5 +301,5 @@ they have in ISA-L 2.31.1 and 2.32.1, the versions python-isal 1.8 and 1.9
 bundle, on 64-bit platforms, and before the first read it inflates one
 known block that way and compares the bytes with zlib's. With another ISA-L
 version, or when that check fails, ``'auto'`` reads with zlib, and
-``engine='isal'`` goes through python-isal's Python API, which holds the GIL
-and is slower than zlib on several threads.
+``engine='isal'`` goes through python-isal's Python API, one call per block,
+which is slower than zlib on several threads.
