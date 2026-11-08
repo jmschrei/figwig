@@ -6,8 +6,10 @@ Release History
 ===============
 
 
-Unreleased
-==========
+Version 0.3.0
+=============
+
+figwig 0.3.0 keeps the tile sums and zoom levels of every group of a figwig file that can hold them, past the 350 tracks where 0.2.0 kept none, adds an optional regional summary index for genome-browser views, and makes reads, writes and the converters faster on threads. It fixes ``figwig bam2bw -c -r`` and ``bam2fw -c -r``, which divided by aligned blocks rather than reads and so give other values now, and writes that could leave a file no reader could open. The format stays version 1: figwig 0.2.0 reads the files 0.3.0 writes, and 0.3.0 reads 0.2.0's.
 
 Reading
 -------
