@@ -187,31 +187,29 @@ The first call
 
 The first read in a new environment compiles figwig's numba kernels, which
 took 1.1 s for the bigWig reader on the machine above, and 1.8 s for
-``figwig bam2bw``. A figwig file's kernels are larger, and compiled once per
-element type of a chunk and per output dtype. Alone in a new process,
+``figwig bam2bw``. A figwig file's kernels are larger, and compiled once
+per element type of a chunk and per output dtype. Alone in a new process,
 the first dense read compiled for 21 s, a sparse read for 22 s, a sum per
-label for 21 s, ``read_entries`` for 20 s, a track-order read for 3.6 s
-and a write for 7.9 s, each with no output while it compiles. Kinds of call
+label for 21 s, ``read_entries`` for 20 s, a track-order read for 3.6 s and
+a write for 7.9 s, each with no output while it compiles. Kinds of call
 share kernels, so a process that reads and writes every way compiled for
 87 s in all: after its dense read of float32 values, a sparse read of
 uint16 values took 19 s more, a sum per label 19 s, ``read_entries`` 17 s,
-a track-order read 2.1 s and a write 8.7 s.
-numba caches them on
-disk, next to the installed package,
-or in the user's cache directory when the package directory cannot be
-written, and later processes load them in a tenth of a second. The cache is
-not safe for processes that compile at the same time: two that compile
-different versions of one kernel can save them to the same file, and a later
-process then loads the wrong one and raises a ``TypingError`` that names a
-``CPUDispatcher``, or ``TypeError: can't unbox array``. So, in one process,
-make a small read of each kind the others will make before starting
-DataLoader workers (under any start method) or ``pytest -n``, and before
-timing figwig; or give each process its own ``NUMBA_CACHE_DIR``. Deleting
-the cache's ``.nbi`` and ``.nbc`` files mends one that has gone wrong. One
-``BigWigReader`` or
+a track-order read 2.1 s and a write 8.7 s. numba caches them on disk, next
+to the installed package, or in the user's cache directory when the package
+directory cannot be written, and later processes load them in a tenth of a
+second. The cache is not safe for processes that compile at the same time:
+two that compile different versions of one kernel can save them to the same
+file, and a later process then loads the wrong one and raises a
+``TypingError`` that names a ``CPUDispatcher``, or
+``TypeError: can't unbox array``. So, in one process, make a small read of
+each kind the others will make before starting DataLoader workers (under
+any start method) or ``pytest -n``, and before timing figwig; or give each
+process its own ``NUMBA_CACHE_DIR``. Deleting the cache's ``.nbi`` and
+``.nbc`` files mends one that has gone wrong. One ``BigWigReader`` or
 ``FigWigReader`` can be read from several threads at once, and holds no
-open file between reads; a ``FigWigReader`` keeps each group's index, 21
-bytes per tile of the genome, from the first read that touches it.
+open file between reads; a ``FigWigReader`` keeps each group's index,
+21 bytes per tile of the genome, from the first read that touches it.
 
 Platforms
 ---------
