@@ -1120,16 +1120,26 @@ def _tile_cuts(positions, tile, per_batch, max_tiles):
 	cuts = [0]
 	at = 0
 	tiles = 1
-	previous = positions[0] // tile if n > 0 else 0
-	for e in range(1, n):
+	e = 0
+	while e < n:
+		# The tile's end, by a binary search, since the tiles only rise.
 		t = positions[e] // tile
-		if t != previous:
-			if e - at >= per_batch or tiles >= max_tiles:
-				cuts.append(e)
-				at = e
-				tiles = 0
-			tiles += 1
-			previous = t
+		low = e + 1
+		high = n
+		while low < high:
+			middle = (low + high) // 2
+			if positions[middle] // tile <= t:
+				low = middle + 1
+			else:
+				high = middle
+		e = low
+		if e == n:
+			break
+		if e - at >= per_batch or tiles >= max_tiles:
+			cuts.append(e)
+			at = e
+			tiles = 0
+		tiles += 1
 	cuts.append(n)
 	return numpy.array(cuts, dtype=numpy.int64)
 
