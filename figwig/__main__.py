@@ -5,7 +5,9 @@
 The `figwig` command, also run as `python -m figwig`. `figwig bam2bw`
 converts SAM/BAM files or BED/tsv files of fragments into per-base bigWig
 tracks (see `figwig.bam2bw`), `figwig bam2fw` converts them into one figwig
-file (see `figwig.bam2fw`), `figwig bw2fw` and `figwig fw2bw` convert
+file (see `figwig.bam2fw`), `figwig fiberbam2fw` converts a Fiber-seq BAM into a
+figwig file with a track per read and channel (see `figwig.fiberbam2fw`),
+`figwig bw2fw` and `figwig fw2bw` convert
 between bigWigs and figwig files (see `figwig.bw2fw` and `figwig.fw2bw`),
 `figwig reorder` writes a figwig file in the other order (see
 `figwig.reorder`), `figwig merge` writes the tracks of several figwig files
@@ -35,6 +37,9 @@ def _parser():
 	commands.add_parser('bam2fw', help="Convert SAM/BAM or BED/tsv files into "
 		"one figwig file of per-base counts, a track per strand of each file; "
 		"see figwig bam2fw -h.")
+	commands.add_parser('fiberbam2fw', help="Convert a Fiber-seq BAM into one "
+		"figwig file with a track per read and channel (m6A, 5mC, nucleosomes, "
+		"MSPs, FIRE quality); see figwig fiberbam2fw -h.")
 	commands.add_parser('bw2fw', help="Convert bigWig files into one figwig "
 		"file, one track per bigWig; see figwig bw2fw -h.")
 	commands.add_parser('fw2bw', help="Convert a figwig file's tracks into "
@@ -105,6 +110,10 @@ def _main(argv=None, fast_exit=True):
 	if len(argv) > 0 and argv[0] == 'bam2fw':
 		from . import bam2fw
 		bam2fw.main(argv[1:], prog='figwig bam2fw')
+		return
+	if len(argv) > 0 and argv[0] == 'fiberbam2fw':
+		from . import fiberbam2fw
+		fiberbam2fw.main(argv[1:], prog='figwig fiberbam2fw')
 		return
 	if len(argv) > 0 and argv[0] == 'bw2fw':
 		from . import bw2fw
