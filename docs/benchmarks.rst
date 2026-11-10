@@ -1031,22 +1031,22 @@ BAM), peak memory on 4 threads, and the sizes:
      - 1,709
      - 15.2 MB
      - 9.9 MB
-     - 1.1 / 0.74 / 0.69 / 0.67
-     - 0.8 GB
+     - 1.1 / 0.75 / 0.70 / 0.70
+     - 0.9 GB
      - 2.5
    * - medium
      - 8,647
      - 76.8 MB
      - 49.1 MB
-     - 3.3 / 1.6 / 1.3 / 1.1
-     - 1.5 GB
+     - 3.3 / 1.5 / 1.3 / 1.4
+     - 1.6 GB
      - 13.0
    * - large
      - 99,685
      - 886 MB
      - 605 MB
-     - 36 / 14 / 9.3 / 8.1
-     - 2.5 GB
+     - 35 / 13 / 11 / 8.5
+     - 2.6 GB
      - not run
 
 The pysam column is a loop over the BAM that places every m6A and 5mC
@@ -1055,11 +1055,11 @@ probability on the reference with ``modified_bases`` and
 channels. The file is the same to the byte on 1, 4 and 16 threads. Each
 block of reads is inflated and parsed on one of up to 8 threads, and the
 writer takes its entries already in its own order. ``--group-size 256`` on
-the medium BAM takes 0.9 GB, where 1,024 takes 1.5 GB, at 1.4 s and 49.2 MB.
+the medium BAM takes 0.85 GB, where 1,024 takes 1.6 GB, at 1.4 s and 49.5 MB.
 Of the medium BAM's 49.1 MB, the m6A track of every read (``-c m6a``) is
-27.4 MB and takes 1.2 s, the nucleosomes, MSPs and FIRE qualities (``-c
-nuc,msp,fire``) 15.0 MB and 1.3 s, and ``--threshold 125`` (m6A and 5mC as 1
-where the probability reaches it) 28.1 MB and 1.4 s, all on 4 threads.
+27.4 MB and takes 1.1 s, the nucleosomes, MSPs and FIRE qualities (``-c
+nuc,msp,fire``) 15.0 MB and 1.4 s, and ``--threshold 125`` (m6A and 5mC as 1
+where the probability reaches it) 28.1 MB and 1.5 s, all on 4 threads.
 Reading the files back at 8 threads: the 128 windows of 2,048 bases at random
 reads of the medium file, every read overlapping each with its five channels
 as (windows, reads, channels, width), take 0.41 s, and each read's m6A total
