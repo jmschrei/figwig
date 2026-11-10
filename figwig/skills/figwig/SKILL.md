@@ -24,7 +24,7 @@ figwig file (`.fw`): many tracks in one file, a JSON record per track.
 Depends on numpy and numba only; docs at <https://figwig.readthedocs.io>.
 Public API: `BigWigReader`/`read_bigwig`, `BigWigWriter`/`write_bigwig`,
 `FigWigReader`/`read_figwig`, `is_figwig`, `FigWigWriter`/`write_figwig`; commands
-`figwig bam2bw`, `bam2fw`, `bw2fw`, `fw2bw`, `reorder`, `merge`, `info`.
+`figwig bam2bw`, `bam2fw`, `fiberbam2fw`, `bw2fw`, `fw2bw`, `reorder`, `merge`, `info`.
 Read signatures from the code; the files here hold what the code does not
 say.
 
@@ -70,7 +70,7 @@ say.
 | read windows from one bigWig or several; reuse readers; a Dataset or DataLoader over bigWigs | `references/reading.md` |
 | write model predictions, intervals or per-base counts to bigWigs; a genome-wide track a batch at a time; files identical to pyBigWig's | `references/writing.md` |
 | BAM, SAM, BED or fragment files → bigWig count tracks | `references/bam2bw.md` |
-| bigWigs ↔ figwig file (`bw2fw`, `fw2bw`), reads → figwig tracks (`bam2fw`), `reorder`, `merge`, `info`, the metadata table, `--missing nan` | `references/converters.md` |
+| bigWigs ↔ figwig file (`bw2fw`, `fw2bw`), reads → figwig tracks (`bam2fw`), a Fiber-seq BAM → a track per read and channel (`fiberbam2fw`), `reorder`, `merge`, `info`, the metadata table, `--missing nan` | `references/converters.md` |
 | read a figwig file: tracks by attribute, dtype, `sparse=`, `labels=` pseudobulks, `bins=`, `sums` over peaks or genes, `tile_sums`, zoom levels, reads or cells as `channels=`/`items=`, GPU output, DataLoader | `references/figwig-reading.md` |
 | write a figwig file: tracks and dtypes, tile, groups and order, `write_sparse` for cells or reads, `append=True`, `add_file`, `verify=True`, `summary_index=` | `references/figwig-writing.md` |
 | a whole job: a training set from many bigWigs or BAMs, genome-wide predictions, a single-cell file, summaries over peaks, a lossless signal round trip, Fiber-seq reads as tracks | `references/recipes.md` |

@@ -6,6 +6,15 @@ Release History
 ===============
 
 
+Unreleased
+==========
+
+Converters and commands
+-----------------------
+
+	- ``figwig fiberbam2fw`` writes a coordinate-sorted Fiber-seq BAM as one figwig file with five tracks per read: the m6A and 5mC probabilities of its MM and ML tags, and its nucleosomes, MSPs and FIRE qualities (the ``ns``, ``nl``, ``as``, ``al`` and ``aq`` tags, or ``MA`` and ``AQ``), on reference coordinates, in groups of 1,024 consecutive reads of a channel, with each alignment's span, strand, mapping quality, flag, length, ``HP``, ``RG``, ``rq``, ``ec``, sample and per-channel call counts as attributes. ``read(..., channels="channel", items="read")`` then gives (windows, reads, channels, width). The values match ``ft extract --all`` for every call and footprint of the 8,647 alignments of a K562 BAM, and htslib's reading of MM and ML at every probability. The 99,685 alignments of its large BAM convert in 14 s on 4 threads and 36 s on one, into 605 MB (886 MB as BAM), and the file does not depend on the thread count. See :doc:`converters` and :doc:`benchmarks`.
+
+
 Version 0.3.0
 =============
 

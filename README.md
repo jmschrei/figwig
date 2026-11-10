@@ -286,13 +286,14 @@ bam2bw's entries but not its bytes. `figwig bam2bw -h` lists the arguments,
 and the [documentation](https://figwig.readthedocs.io/en/latest/bam2bw.html)
 says how files are read and shared across cores.
 
-#### figwig bw2fw, fw2bw, bam2fw, reorder, merge and info
+#### figwig bw2fw, fw2bw, bam2fw, fiberbam2fw, reorder, merge and info
 
 ```bash
 figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> k562.fw
 figwig fw2bw k562.fw -o bigwigs -p 8 --select assay=ATAC-seq                      # tracks -> bigwigs/<name>.bw
 figwig bam2fw a.bam b.bam -s hg38.chrom.sizes -n k562 -m files.tsv -p 8          # reads -> k562.fw
 figwig bam2fw fragments.tsv.gz -s hg38.chrom.sizes -n pbmc --barcode-column 4 --cells cells.tsv -f -p 8   # a track per cell
+figwig fiberbam2fw fibers.bam -n fibers -g hg38 -p 8                               # Fiber-seq reads -> a track per read and channel
 figwig reorder k562.fw by_track.fw --order tracks                                # the other order
 figwig merge -o all.fw k562.fw hepg2.fw                                          # files -> one file
 figwig info k562.fw                                                              # what the file holds
@@ -304,7 +305,9 @@ attributes, or adds them to a file with `--append`; `figwig fw2bw` writes a
 figwig file's tracks back as bigWigs with such a table; `figwig bam2fw`
 takes `figwig bam2bw`'s arguments and writes each input file as its own pair
 of stranded tracks, or a fragments file as one track per cell with
-`--barcode-column`; `figwig reorder` rewrites a file in the other order;
+`--barcode-column`; `figwig fiberbam2fw` writes a Fiber-seq BAM as five tracks per
+read (m6A and 5mC probabilities, nucleosomes, MSPs, FIRE quality) with the
+read's alignment and tags as attributes; `figwig reorder` rewrites a file in the other order;
 `figwig merge` copies several files' tracks into one; and `figwig info`
 prints a file's tracks, attributes and statistics. The
 [converters](https://figwig.readthedocs.io/en/latest/converters.html) page

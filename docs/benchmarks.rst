@@ -1007,6 +1007,75 @@ at once, takes 1.1 to 2.9 times as long as position order on these reads.
 The track order's write and size, which include each read's tile sums,
 were measured again on 2026-11-07, the rest of the table before.
 
+Fiber-seq BAM to a figwig file
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``figwig fiberbam2fw`` on the K562 Fiber-seq BAMs of three sizes (every
+alignment overlapping a window, 8,647 alignments for the medium BAM, and
+99,685 genome-wide, 91,907 of them primary, for the large one), with all
+five channels, uint8 tracks, level 1, groups of 1,024 reads and output on
+tmpfs. Seconds on 1 / 4 / 8 / 16 threads (best of 3, of 2 for the large
+BAM), peak memory on 4 threads, and the sizes:
+
+.. list-table::
+   :header-rows: 1
+
+   * - BAM
+     - alignments
+     - BAM size
+     - figwig file
+     - seconds
+     - memory
+     - pysam, 1 thread
+   * - small
+     - 1,709
+     - 15.2 MB
+     - 9.9 MB
+     - 1.1 / 0.74 / 0.69 / 0.67
+     - 0.8 GB
+     - 2.5
+   * - medium
+     - 8,647
+     - 76.8 MB
+     - 49.1 MB
+     - 3.3 / 1.6 / 1.3 / 1.1
+     - 1.5 GB
+     - 13.0
+   * - large
+     - 99,685
+     - 886 MB
+     - 605 MB
+     - 36 / 14 / 9.3 / 8.1
+     - 2.5 GB
+     - not run
+
+The pysam column is a loop over the BAM that places every m6A and 5mC
+probability on the reference with ``modified_bases`` and
+``get_reference_positions`` and writes nothing, for two of the five
+channels. The file is the same to the byte on 1, 4 and 16 threads. Each
+block of reads is inflated and parsed on one of up to 8 threads, and the
+writer takes its entries already in its own order. ``--group-size 256`` on
+the medium BAM takes 0.9 GB, where 1,024 takes 1.5 GB, at 1.4 s and 49.2 MB.
+Of the medium BAM's 49.1 MB, the m6A track of every read (``-c m6a``) is
+27.4 MB and takes 1.2 s, the nucleosomes, MSPs and FIRE qualities (``-c
+nuc,msp,fire``) 15.0 MB and 1.3 s, and ``--threshold 125`` (m6A and 5mC as 1
+where the probability reaches it) 28.1 MB and 1.4 s, all on 4 threads.
+Reading the files back at 8 threads: the 128 windows of 2,048 bases at random
+reads of the medium file, every read overlapping each with its five channels
+as (windows, reads, channels, width), take 0.41 s, and each read's m6A total
+over its span, 0.37 s for the 8,647 reads; the large file opens in 1.5 s
+(498,425 track records) and sums its 99,685 reads' m6A over their spans in
+2.1 s.
+
+The values were checked against the other readers of these BAMs. Every one
+of the 8,647 alignments of the medium BAM gives ``ft extract --all``
+(fibertools) the same m6A and 5mC positions and probabilities (5,069,402 and
+1,176,397 calls above its threshold of 125) and the same bases for its
+nucleosomes (90.7 million), MSPs (25.6 million) and FIREs (3.2 million),
+with the same FIRE qualities, and htslib's reading of MM and ML (pysam's
+``modified_bases``) agrees at every base and every probability, those below
+125 and those of 0 included.
+
 To a GPU
 ~~~~~~~~
 

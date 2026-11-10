@@ -1,17 +1,17 @@
-figwig bw2fw, fw2bw, bam2fw, reorder, merge and info
-====================================================
+figwig bw2fw, fw2bw, bam2fw, fiberbam2fw, reorder, merge and info
+=================================================================
 
-Five commands move tracks between bigWigs, reads and :doc:`figwig files
+Six commands move tracks between bigWigs, reads and :doc:`figwig files
 <figwig>`, between a figwig file's two orders, and between figwig files,
 and ``figwig info`` prints what a file holds. Each converter but ``merge``
 takes ``-p``, the number of threads to read and compress on (1 by
 default), and every converter takes ``-v``, which prints a line per group
 of tracks and a summary of the output on stderr; ``-t`` is the tile in
-``bw2fw``, ``bam2fw`` and ``reorder`` and the track list in ``fw2bw``, and
+``bw2fw``, ``bam2fw``, ``fiberbam2fw`` and ``reorder`` and the track list in ``fw2bw``, and
 ``-m`` takes a tab-separated table, or a comma-separated one when its name
 ends in ``.csv``. Every converter refuses to write over an output that
 exists unless ``-f`` is given (``--force`` for ``bam2fw``, whose ``-f``
-means fragments), every converter writes its output beside its path and
+means fragments, and ``fiberbam2fw``), every converter writes its output beside its path and
 moves it into place when complete, so a conversion that fails or is
 killed leaves no half-written output, a missing input is a message rather
 than a traceback, and Ctrl-C exits with 130.
@@ -191,6 +191,94 @@ the other ways of making a per-cell file.
                          [--groups GROUPS] [-t TILE] [--dtype DTYPE] [-z ZOOMS]
                          [-l LEVEL] [--summary-index] [--force] [-v]
                          filename [filename ...]
+
+figwig fiberbam2fw
+------------------
+
+.. code-block:: bash
+
+    figwig fiberbam2fw -n fibers -g hg38 -p 4 fibers.bam
+    figwig fiberbam2fw -n fibers -m files.tsv -p 4 --threshold 125 a.bam b.bam
+    figwig fiberbam2fw -n fibers -c m6a,nuc --primary-only fibers.bam
+
+``figwig fiberbam2fw`` writes the reads of a coordinate-sorted Fiber-seq
+BAM as five tracks each, on reference coordinates, into ``<-n>.fw``. A
+Fiber-seq read is one chromatin fiber, and its signal is per read and per
+base. The channels are
+
+- ``m6a``: the probability (the ML tag, 0 to 255) that each A of the
+  molecule, and each T whose opposite A is methylated, carries an m6A, from
+  the ``A+a`` and ``T-a`` blocks of MM;
+- ``cpg``: the probability of 5mC at each CpG, from ``C+m``;
+- ``nuc``: 1 over each nucleosome of the ``ns`` and ``nl`` tags;
+- ``msp``: 1 over each methyltransferase-sensitive patch, the stretches
+  between nucleosomes, of ``as`` and ``al``;
+- ``fire``: the FIRE quality ``aq`` over each MSP that has one above 0.
+
+Tracks are named ``<read>.<channel>`` and carry the attributes ``read``
+(the track's alignment: the read's name, with ``@<chrom>:<start>`` added to
+a second alignment of the same read, such as a supplementary one),
+``read_name``, ``channel``, ``chrom``, ``start`` and ``end`` (the reference
+span, base 0, end exclusive), ``strand``, ``mapq``, ``flag``, ``length``
+(the molecule's), the tags named by ``--tags`` (``HP``, ``RG``, ``rq`` and
+``ec`` by default) and the ``sample`` of the read group's ``SM``, and the
+per-channel counts: ``m6a_calls`` and ``cpg_calls`` (every call in MM,
+including those of probability 0), ``m6a_unplaced`` and ``cpg_unplaced``
+(calls on a base with no reference base, an insertion or a soft clip),
+``at_bases`` (A and T in the molecule, the denominator of an m6A rate),
+``nuc_calls``, ``msp_calls`` and ``fire_calls`` (intervals), and
+``n_values`` (nonzero bases written). The file's own attributes record the
+files, channels, threshold, filters and how many alignments each filter left
+out. A table given to ``-m``, as for ``bam2fw``, puts a ``name`` prefix
+before a file's tracks and its other columns on them. Several files go one
+after another into one file and must agree on their chromosomes, which are
+those of the header; with several files, each file's tracks are prefixed
+by its name.
+
+Every track is ``uint8``. The tracks of a channel over 1,024 consecutive
+reads (``--group-size``) are one group, in position order, the layout
+:ref:`reads, cells and channels as tracks <reads-cells-channels>` describes,
+so ``read(..., channels="channel", items="read")`` gives (windows, reads,
+channels, width) and ``sums(..., paired=True)`` a total per read over its own
+span. A call of probability 0 is not written, which a base without a call
+shares, and ``m6a_calls`` and ``n_values`` tell them apart.
+``--threshold T`` writes 1 for each call of probability at least ``T``
+instead (fibertools calls m6A at 125) and leaves the others out. ``-c`` picks the
+channels, ``--primary-only`` leaves out supplementary alignments, which carry
+the whole read's MM and are placed by their own alignment, so that a read
+split across two loci has a track on each, ``--min-mapq`` the alignments
+below a quality; secondary alignments, unmapped ones and those with none of
+the tags the channels need are always left out. The tags follow
+fibertools: ``MM`` and ``ML``, and ``ns``, ``nl``, ``as``, ``al`` and
+``aq`` in molecule coordinates, or an ``MA`` tag with ``AQ``, whose starts
+count from 1.
+
+MM counts bases along the original molecule, which for a reverse-strand
+alignment is the reverse complement of SEQ, and ``ns`` and ``as`` are
+offsets along that molecule too; both are mapped to the reference through
+the alignment, a footprint covering the reference from its first to its last
+base that has one. The file's values equal ``ft extract --all``'s for every
+call it lists and every footprint, and htslib's reading of MM and ML at
+every probability (see the checks in :doc:`benchmarks`). An alignment whose MM names
+more bases than the read holds, whose ML is shorter than its MM, whose MM is
+malformed, that carries 6mA on a base and strand other than ``A+`` or
+``T-``, or that has no sequence or is hard-clipped (so that the bases MM
+counts are not there), has the calls it cannot place left out, with one
+warning that names the first such read; its footprints are still written,
+a hard clip counted into the molecule's length. A file that is not coordinate sorted, or has a read past the
+end of its header's chromosome, is refused. Blocks of reads are inflated
+and parsed on up to 8 of the ``-p`` threads, and the file does not depend
+on ``-p``. It needs the ``bam2bw`` extra and runs on Linux and macOS.
+:doc:`benchmarks` gives the time, memory and size.
+
+.. code-block:: text
+
+    usage: figwig fiberbam2fw [-h] -n NAME [-p PARALLEL] [-m METADATA] [-g GENOME]
+                              [-c CHANNELS] [--threshold THRESHOLD] [--tags TAGS]
+                              [--primary-only] [--min-mapq MIN_MAPQ]
+                              [--group-size GROUP_SIZE] [-t TILE] [-z ZOOMS]
+                              [-l LEVEL] [--force] [-v]
+                              filename [filename ...]
 
 figwig reorder
 --------------
