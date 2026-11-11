@@ -39,8 +39,8 @@ import importlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-import common
-import render
+import common  # noqa: E402
+import render  # noqa: E402
 
 MODULES = {'bulk-1': 'bulk', 'bulk-48': 'bulk', 'bulk-1024': 'bulk', 'scatac': 'scatac',
 	'fiber': 'fiber', 'hic': 'hic', 'schic': 'schic'}

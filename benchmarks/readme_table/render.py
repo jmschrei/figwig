@@ -5,7 +5,6 @@
 README between its markers."""
 
 import re
-import datetime
 
 START = '<!-- readme-table:start -->'
 END = '<!-- readme-table:end -->'
@@ -26,7 +25,7 @@ def significant(value, digits=3):
 
 
 def seconds(value):
-	if value < 0.01:
+	if value < 0.1:
 		return '{} ms'.format(significant(value * 1000))
 	return '{} s'.format(significant(value))
 
@@ -86,7 +85,7 @@ def block(results):
 		'<summary>Read time, write time and file size by assay, against what most people use today</summary>',
 		'',
 		'Each cell is figwig against the baseline, figwig first, in bold where it is smaller. figwig ran '
-		'on {threads} threads; each baseline is given its fastest setting (the other tools mostly do not '
+		'on {threads} threads unless a note says otherwise; each baseline is given its fastest setting (the other tools mostly do not '
 		'gain from threads). Reads are windows of 2,048 bp unless noted.'.format(threads=meta['threads']),
 		'', table(rows), '']
 	if notes:
