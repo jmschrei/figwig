@@ -35,6 +35,7 @@ import getpass
 import argparse
 import datetime
 import importlib
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -116,12 +117,18 @@ def main():
 	results['meta'] = {'threads': args.threads, 'repeats': args.repeats,
 		'versions': common.versions(), 'machine': common.machine(), 'commit': common.commit(),
 		'idle_percent_at_start': round(idle, 1)}
+	failed = []
 	try:
 		for key in wanted:
 			module = importlib.import_module(MODULES[key])
 			start = time.time()
 			print('=== {}'.format(key), flush=True)
-			row = module.ROWS[key](ctx)
+			try:
+				row = module.ROWS[key](ctx)
+			except Exception:
+				traceback.print_exc()
+				failed.append(key)
+				continue
 			row['date'] = datetime.datetime.now().isoformat(timespec='seconds')
 			row['elapsed_seconds'] = round(time.time() - start, 1)
 			results['rows'][key] = row
@@ -132,6 +139,8 @@ def main():
 		if not args.keep:
 			shutil.rmtree(scratch, ignore_errors=True)
 	print(render.table(results['rows']))
+	if failed:
+		sys.exit('failed rows: {}'.format(', '.join(failed)))
 
 
 if __name__ == '__main__':

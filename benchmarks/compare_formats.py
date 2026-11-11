@@ -113,8 +113,9 @@ def shell(command, env):
 	t0 = time.perf_counter()
 	result = subprocess.run(command, env=env, capture_output=True, text=True)
 	if result.returncode != 0:
-		raise RuntimeError('{} failed: {}'.format(' '.join(command),
-			result.stderr[-2000:]))
+		raise RuntimeError('failed with {}: {} ... {}\ncommand: {}'.format(
+			result.returncode, result.stderr[:1000], result.stderr[-1000:],
+			' '.join(command)[:500]))
 	return time.perf_counter() - t0
 
 

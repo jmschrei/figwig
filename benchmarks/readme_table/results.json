@@ -1,0 +1,576 @@
+{
+	"meta": {
+		"commit": "a5fd2a6",
+		"idle_percent_at_start": 94.0,
+		"machine": {
+			"cores": 256,
+			"cpu": "AMD EPYC 9575F 64-Core Processor",
+			"platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+			"python": "3.12.13"
+		},
+		"repeats": 3,
+		"threads": 8,
+		"versions": {
+			"cooler": "0.12.1",
+			"deflate": "0.9.0",
+			"figwig": "0.3.0",
+			"h5py": "3.16.0",
+			"hictkpy": "1.4.0",
+			"isal": "1.9.1",
+			"numba": "0.68.1",
+			"numpy": "2.5.4",
+			"pandas": "2.3.3",
+			"pyBigWig": "0.3.29",
+			"pybigtools": "0.2.5",
+			"pysam": "0.24.1",
+			"scipy": "1.18.1",
+			"snapatac2": "2.10.0",
+			"zarr": "3.4.2"
+		}
+	},
+	"rows": {
+		"bulk-1": {
+			"baseline": "one bigWig; read by pybigtools, written by pyBigWig",
+			"date": "2026-11-11T17:42:00",
+			"elapsed_seconds": 86.6,
+			"inputs": {
+				"bigwig": "atac/full/atac_full_HCT116_hg38_PE101.bam (figwig bam2bw -u, 5' ends)",
+				"bigwig_mb": 67.026078,
+				"peaks": null,
+				"width": 1000,
+				"windows": 167750,
+				"windows_from": "random bases with signal and as many random negatives at least 1,000 bp from any base with signal (no peak file for this sample)",
+				"written_as_single_bases": true,
+				"written_items": 30469903,
+				"zoom_levels_written": 0
+			},
+			"notes": [],
+			"raw": {
+				"read": {
+					"figwig": {
+						"median": 0.09844797477126122,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09894026396796107,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09844797477126122,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09395409189164639,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 1 thread, given windows": {
+						"median": 3.8203937648795545,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.8196374578401446,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.8203937648795545,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.833200507797301,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 1 thread, sorted windows": {
+						"median": 1.8614876829087734,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8593882010318339,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8614876829087734,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8686080169864,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 8 threads, given windows": {
+						"median": 4.085933280643076,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.083579449914396,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.103296176996082,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.085933280643076,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 8 threads, sorted windows": {
+						"median": 1.9567534099332988,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9736677869223058,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9474404649809003,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9567534099332988,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					}
+				},
+				"read_sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+				"write": {
+					"figwig": {
+						"median": 0.24516921117901802,
+						"results": [
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 829.49609375,
+								"seconds": 0.24532529106363654,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 829.55078125,
+								"seconds": 0.24516921117901802,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 831.33984375,
+								"seconds": 0.2315696133300662,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							}
+						]
+					},
+					"pyBigWig": {
+						"median": 8.13453279202804,
+						"results": [
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 652.30078125,
+								"seconds": 8.13453279202804,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 653.22265625,
+								"seconds": 8.114818964153528,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 653.0546875,
+								"seconds": 8.14179391413927,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							}
+						]
+					}
+				},
+				"write_hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e"
+			},
+			"read": [
+				{
+					"baseline": 1.8614876829087734,
+					"baseline_name": "pybigtools, 1 thread, sorted windows",
+					"baseline_text": null,
+					"figwig": 0.09844797477126122,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "1 ATAC-seq track, 167,750 windows of 1,000 bp on random signal bases and negatives",
+			"size": [
+				{
+					"baseline": 64.445934,
+					"baseline_name": "pyBigWig",
+					"baseline_text": null,
+					"figwig": 64.41043,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 8.13453279202804,
+					"baseline_name": "pyBigWig, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.24516921117901802,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"bulk-48": {
+			"baseline": "one bigWig per track; read by pybigtools, written by pyBigWig",
+			"date": "2026-11-11T17:47:14",
+			"elapsed_seconds": 313.3,
+			"inputs": {
+				"baseline_zoom_levels": 10,
+				"derived": "rolled copies of the real tracks (compare_formats.prepare_tracks)",
+				"figwig_file": "one group of all tracks, tile 16,384, libdeflate 6, bw2fw",
+				"peaks": "atac/large/atac_large_K562_hg38_PE_IDR-conservative_ENCFF855PCP.narrowPeak.gz",
+				"prepare_derived_seconds": 12.711542923934758,
+				"real_count": 6,
+				"real_tracks": [
+					"dnase/full/dnase_full_K562_hg38_SE36_ENCFF425WDA.bam",
+					"chip-seq/full/chip-seq_full_K562-CTCF_hg38_SE36_ENCFF172KOJ.bam",
+					"cage/full/cage_full_K562_hg38_SE_ENCFF754FAU.bam",
+					"pro-cap/full/pro-cap_full_K562_hg38_PE_ENCFF877SQU.bam",
+					"chip-seq/full/chip-seq_full_K562-H3K4me3_hg38_SE76crop36.bam",
+					"chip-seq/full/chip-seq_full_K562-MAX_hg38_SE101crop100.bam"
+				],
+				"tracks": 48,
+				"width": 2048,
+				"windows": 8192
+			},
+			"notes": [],
+			"raw": {
+				"read": {
+					"figwig file": {
+						"median": 0.07271894114091992,
+						"results": [
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07271894114091992,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07262425124645233,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07272942084819078,
+								"threads": 8
+							}
+						]
+					},
+					"pybigtools, 1 thread": {
+						"median": 4.679362363182008,
+						"results": [
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.645667776931077,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.679362363182008,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.716865384019911,
+								"windows": 8192
+							}
+						]
+					},
+					"pybigtools, 8 threads": {
+						"median": 7.835202240850776,
+						"results": [
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.850508113391697,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.762310151010752,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.835202240850776,
+								"windows": 8192
+							}
+						]
+					}
+				},
+				"read_digest": "8d954527c00e",
+				"write_baseline": {
+					"median": 69.42434316081926,
+					"results": [
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.38739554770291
+						},
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.42434316081926
+						},
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.49908026261255
+						}
+					]
+				},
+				"write_figwig_file": {
+					"median": 2.0415670559741557,
+					"results": [
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.0385818970389664
+						},
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.2079678787849844
+						},
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.0415670559741557
+						}
+					]
+				}
+			},
+			"read": [
+				{
+					"baseline": 4.679362363182008,
+					"baseline_name": "pybigtools, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.07271894114091992,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "48 count tracks over chr1, 8,192 windows of 2,048 bp",
+			"size": [
+				{
+					"baseline": 1078.53512,
+					"baseline_name": "pyBigWig",
+					"baseline_text": null,
+					"figwig": 97.17597,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 69.42434316081926,
+					"baseline_name": "pyBigWig, 1 thread",
+					"baseline_text": null,
+					"figwig": 2.0415670559741557,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		}
+	}
+}

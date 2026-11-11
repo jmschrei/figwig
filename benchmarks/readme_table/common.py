@@ -61,7 +61,7 @@ def worker(ctx, target, threads=1, extra_env=None, timeout=None, **kwargs):
 		text=True, timeout=timeout)
 	if result.returncode != 0:
 		raise RuntimeError('{} {} failed ({}):\n{}'.format(target, kwargs, result.returncode,
-			result.stderr[-3000:]))
+			result.stderr[:1500] + ' ... ' + result.stderr[-1500:]))
 	return json.loads(result.stdout.strip().splitlines()[-1])
 
 
