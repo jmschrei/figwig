@@ -45,6 +45,9 @@ Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
 every setup, the other tables (figwig files against bigWigs, zarr and HDF5 at
 6, 48 and 512 tracks; writers; threads) and the plots.
 
+<!-- readme-table:start -->
+<!-- readme-table:end -->
+
 ## Installation
 
 ```bash
