@@ -620,6 +620,8 @@ with ``missing=0.0`` and ``keep_nan=True``, and ``bw2fw --missing nan``
 keeps the bases no interval covers apart from 0, for tracks where the two
 differ.
 
+.. _reads-cells-channels:
+
 Reads, cells and channels as tracks
 -----------------------------------
 
@@ -636,7 +638,8 @@ their first appearance among the tracks read, each item needing every
 channel once; ``bins`` and ``sums`` arrange the same way, into (windows,
 reads, channels, bins) and (intervals, reads, channels). The arrangement
 is a reshape of the ordinary read and changes no bytes of a file: a
-channel is an attribute like any other.
+channel is an attribute like any other. ``figwig fiberbam2fw`` writes a
+Fiber-seq BAM in this layout, five channels per read (:doc:`converters`).
 
 Group the tracks by channel over runs of consecutive reads, not by read:
 the reads sorted by start and cut into groups of about a thousand, so that

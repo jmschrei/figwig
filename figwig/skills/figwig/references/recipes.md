@@ -74,6 +74,15 @@ on both sides.
 
 ## Reads as tracks (Fiber-seq, per-read channels)
 
+From a Fiber-seq BAM (coordinate-sorted, with MM/ML and the `ns`/`nl`/`as`/
+`al`/`aq` or `MA`/`AQ` tags), `figwig fiberbam2fw -n fibers -g hg38 -p 4
+fibers.bam` writes steps 1-3 below with five channels per read: `m6a` and
+`cpg` (the ML probability, 0-255, of each A/T and CpG; `--threshold 125`
+writes 1 where it is reached), `nuc`, `msp` (1 over each footprint) and
+`fire` (the FIRE quality `aq` over each MSP). Tracks are `<read>.<channel>`
+with the alignment, `HP`, `RG`, `rq`, `ec` and the per-read call counts as
+attributes (`references/converters.md`). To build the file by hand:
+
 1. Sort reads by start. One track per read and channel, named `r17.m6a`,
    with attributes `read`, `channel`, `strand` and the span.
 2. `groups=` lists of about 1,000 consecutive reads per channel, position

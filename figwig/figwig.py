@@ -1827,6 +1827,10 @@ class FigWigWriter:
 		# Declared dtypes are checked over all their tracks' entries at once,
 		# with each track's range found in one pass of a kernel.
 		declared = [] if ids is None else ids[self._declared_integers()[ids]].tolist()
+		if declared and values.dtype.kind in 'iu' and all(numpy.can_cast(
+				values.dtype, dtype) for dtype in {self.tracks[i]['dtype'] for i in
+				declared}):
+			declared = []
 		if declared:
 			# Each part of the call on the pool finds its own ranges, a row
 			# each, and its first bad entry.

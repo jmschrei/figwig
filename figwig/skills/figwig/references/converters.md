@@ -1,4 +1,4 @@
-# Converting: bw2fw, fw2bw, bam2fw, reorder, merge, info
+# Converting: bw2fw, fw2bw, bam2fw, fiberbam2fw, reorder, merge, info
 
 ```bash
 figwig bw2fw -o k562.fw -m tracks.tsv -g hg38 -p 8 atac.+.bw atac.-.bw dnase.bw   # bigWigs -> one file
@@ -7,6 +7,7 @@ figwig bw2fw -o wgbs.fw --missing nan -p 8 methylation.bw                       
 figwig fw2bw k562.fw -o bigwigs -p 8 [--select assay=ATAC-seq | -t atac.+ atac.-]  # tracks -> bigwigs/<name>.bw + k562.tsv
 figwig bam2fw -s hg38.chrom.sizes -n k562 -m files.tsv -p 8 a.bam b.bam           # reads -> k562.fw, a pair of tracks per file
 figwig bam2fw -s hg38.chrom.sizes -n pbmc -f -p 8 --barcode-column 4 --cells cells.tsv fragments.tsv.gz   # a track per cell
+figwig fiberbam2fw -n fibers -g hg38 -p 4 fibers.bam                              # Fiber-seq BAM -> five tracks per read
 figwig reorder k562.fw by_track.fw --order tracks                                 # or positions, -t, --groups, -l
 figwig merge -o all.fw k562.fw hepg2.fw                                           # copy files' tracks into one
 figwig info k562.fw [-b]                                                          # genome, order, tile, chromosomes, size, a track table
@@ -94,6 +95,33 @@ out (`-v` counts them). Use `-f` to count both ends, as for any fragments
 file. Memory is 8 bytes per fragment end during the scan and four to six
 times that at the peak. Several files give `<name>.<barcode>` tracks, a
 group per file.
+
+## fiberbam2fw
+
+A coordinate-sorted Fiber-seq BAM (MM/ML, `ns`/`nl`/`as`/`al`/`aq` or
+`MA`/`AQ`) into five tracks per alignment, `<read>.<channel>`, uint8, on
+reference coordinates; the chromosomes are the header's. Channels (`-c` picks):
+`m6a` and `cpg` hold the ML probability (0-255) at each A/T (`A+a`, `T-a`) and
+CpG (`C+m`), a call of 0 is not written (`--threshold 125` writes 1 where it
+is reached, the rest nothing), `nuc` and `msp` hold 1 over each footprint,
+`fire` the `aq` quality over each MSP. Attributes on every track: `read`
+(unique per alignment; `@chrom:start` is added to a second alignment of a
+read), `read_name`, `channel`, `chrom`, `start`, `end`, `strand`, `mapq`,
+`flag`, `length`, `--tags` (`HP,RG,rq,ec`), `sample` (the read group's SM),
+and per-channel counts (`m6a_calls`, `m6a_unplaced`, `at_bases`, `cpg_calls`,
+`nuc_calls`, `msp_calls`, `fire_calls`, `n_values`). Groups are 1,024
+consecutive reads of one channel (`--group-size`), so
+`read(..., channels="channel", items="read")` gives (windows, reads,
+channels, width). `--primary-only` drops supplementary alignments (each has
+its own tracks otherwise), `--min-mapq`; secondary, unmapped and untagged
+alignments are always left out (counted in the file's `fiberbam2fw`
+attribute). `-m` and several files work as in `bam2fw`. Unsorted input, or
+a read past its chromosome's header length, is refused; an unplaceable MM
+(skip past the read, short ML, 6mA on T+ or A-, hard clip or no SEQ) is
+warned about once and its calls are left out. It matches `ft extract --all`
+and htslib's MM/ML reading; the output does not depend on `-p`. Memory is
+1.5 GB at `-p 4` on 8,647 alignments with the default `--group-size 1024`
+and 0.9 GB at 256.
 
 ## reorder and merge
 
