@@ -1,0 +1,12 @@
+pybigtools==0.2.5
+pyBigWig
+zarr
+numcodecs
+scipy
+pandas
+pysam
+snapatac2>=2.10
+cooler
+hictkpy
+h5py
+polars

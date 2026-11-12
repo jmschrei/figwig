@@ -1,0 +1,1779 @@
+{
+	"meta": {
+		"commit": "2858597",
+		"idle_percent_at_start": 93.7,
+		"machine": {
+			"cores": 256,
+			"cpu": "AMD EPYC 9575F 64-Core Processor",
+			"platform": "Linux-7.0.0-38-generic-x86_64-with-glibc2.39",
+			"python": "3.12.13"
+		},
+		"repeats": 3,
+		"threads": 8,
+		"versions": {
+			"cooler": "0.12.1",
+			"deflate": "0.9.0",
+			"figwig": "0.3.0",
+			"h5py": "3.16.0",
+			"hictkpy": "1.4.0",
+			"isal": "1.9.1",
+			"numba": "0.68.1",
+			"numpy": "2.5.4",
+			"pandas": "2.3.3",
+			"pyBigWig": "0.3.29",
+			"pybigtools": "0.2.5",
+			"pysam": "0.24.1",
+			"scipy": "1.18.1",
+			"snapatac2": "2.10.0",
+			"zarr": "3.4.2"
+		}
+	},
+	"rows": {
+		"bulk-1": {
+			"baseline": "one bigWig; read by pybigtools, written by pyBigWig",
+			"date": "2026-11-11T17:42:00",
+			"elapsed_seconds": 86.6,
+			"inputs": {
+				"bigwig": "atac/full/atac_full_HCT116_hg38_PE101.bam (figwig bam2bw -u, 5' ends)",
+				"bigwig_mb": 67.026078,
+				"peaks": null,
+				"width": 1000,
+				"windows": 167750,
+				"windows_from": "random bases with signal and as many random negatives at least 1,000 bp from any base with signal (no peak file for this sample)",
+				"written_as_single_bases": true,
+				"written_items": 30469903,
+				"zoom_levels_written": 0
+			},
+			"notes": [],
+			"raw": {
+				"read": {
+					"figwig": {
+						"median": 0.09844797477126122,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09894026396796107,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09844797477126122,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "figwig",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 0.09395409189164639,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.3.0",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 1 thread, given windows": {
+						"median": 3.8203937648795545,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.8196374578401446,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.8203937648795545,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 3.833200507797301,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 1 thread, sorted windows": {
+						"median": 1.8614876829087734,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8593882010318339,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8614876829087734,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.8686080169864,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 1,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 8 threads, given windows": {
+						"median": 4.085933280643076,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.083579449914396,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.103296176996082,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "given",
+								"python": "3.12.13",
+								"seconds": 4.085933280643076,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					},
+					"pybigtools, 8 threads, sorted windows": {
+						"median": 1.9567534099332988,
+						"results": [
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9736677869223058,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9474404649809003,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							},
+							{
+								"bigwig": "atac-counts.bw",
+								"lib": "pybigtools",
+								"nonzero": 8385231,
+								"numpy": "2.5.4",
+								"order": "sorted",
+								"python": "3.12.13",
+								"seconds": 1.9567534099332988,
+								"sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+								"threads": 8,
+								"version": "0.2.5",
+								"windows": 167750
+							}
+						]
+					}
+				},
+				"read_sha256": "466314c4ca39b951e077a2fb558496cb41d3653f418f4e704f2907e6fd1897aa",
+				"write": {
+					"figwig": {
+						"median": 0.24516921117901802,
+						"results": [
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 829.49609375,
+								"seconds": 0.24532529106363654,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 829.55078125,
+								"seconds": 0.24516921117901802,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64410430,
+								"engine": "libdeflate",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "figwig",
+								"peak_mb": 831.33984375,
+								"seconds": 0.2315696133300662,
+								"single": true,
+								"threads": 8,
+								"zooms": 0
+							}
+						]
+					},
+					"pyBigWig": {
+						"median": 8.13453279202804,
+						"results": [
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 652.30078125,
+								"seconds": 8.13453279202804,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 653.22265625,
+								"seconds": 8.114818964153528,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							},
+							{
+								"bigwig": "/dev/shm/figwig-readme-table-jmschrei/run-3674044/bulk-1/atac-counts.bw",
+								"bytes": 64445934,
+								"engine": "zlib",
+								"hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e",
+								"items": 30469903,
+								"lib": "pybigwig",
+								"peak_mb": 653.0546875,
+								"seconds": 8.14179391413927,
+								"single": true,
+								"threads": 1,
+								"zooms": 0
+							}
+						]
+					}
+				},
+				"write_hash": "2253160ae4a98c4c1d8f34c90d8c7341bbe2d5ad9b200e5f8e88c82c00a2345e"
+			},
+			"read": [
+				{
+					"baseline": 1.8614876829087734,
+					"baseline_name": "pybigtools, 1 thread, sorted windows",
+					"baseline_text": null,
+					"figwig": 0.09844797477126122,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "1 ATAC-seq track, 167,750 windows of 1,000 bp on random signal bases and negatives",
+			"size": [
+				{
+					"baseline": 64.445934,
+					"baseline_name": "pyBigWig",
+					"baseline_text": null,
+					"figwig": 64.41043,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 8.13453279202804,
+					"baseline_name": "pyBigWig, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.24516921117901802,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"bulk-1024": {
+			"baseline": "one bigWig per track; read by pybigtools, written by figwig",
+			"date": "2026-11-11T19:54:56",
+			"elapsed_seconds": 2229.1,
+			"inputs": {
+				"baseline_zoom_levels": 10,
+				"derived": "rolled copies of the real tracks (compare_formats.prepare_tracks)",
+				"figwig_file": "one group of all tracks, tile 16,384, libdeflate 6, bw2fw",
+				"peaks": "atac/large/atac_large_K562_hg38_PE_IDR-conservative_ENCFF855PCP.narrowPeak.gz",
+				"prepare_derived_seconds": 295.53421213198453,
+				"real_count": 6,
+				"real_tracks": [
+					"dnase/full/dnase_full_K562_hg38_SE36_ENCFF425WDA.bam",
+					"chip-seq/full/chip-seq_full_K562-CTCF_hg38_SE36_ENCFF172KOJ.bam",
+					"cage/full/cage_full_K562_hg38_SE_ENCFF754FAU.bam",
+					"pro-cap/full/pro-cap_full_K562_hg38_PE_ENCFF877SQU.bam",
+					"chip-seq/full/chip-seq_full_K562-H3K4me3_hg38_SE76crop36.bam",
+					"chip-seq/full/chip-seq_full_K562-MAX_hg38_SE101crop100.bam"
+				],
+				"tracks": 1024,
+				"width": 2048,
+				"windows": 1024
+			},
+			"notes": [
+				"The 1,024-track baseline write and size are the 1,024 bigWigs figwig wrote with 10 zoom levels (497 s, 21.2 GB); pyBigWig was not run at that size."
+			],
+			"raw": {
+				"read": {
+					"figwig file": {
+						"median": 0.1715391860343516,
+						"results": [
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.1715391860343516,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.17304171109572053,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.16998738190159202,
+								"threads": 8
+							}
+						]
+					},
+					"pybigtools, 1 thread": {
+						"median": 22.37248484697193,
+						"results": [
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.212020909879357,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.37248484697193,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.500809740275145,
+								"windows": 1024
+							}
+						]
+					},
+					"pybigtools, 8 threads": {
+						"median": 37.9855444082059,
+						"results": [
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 37.9855444082059,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 38.06585601484403,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 37.98445579176769,
+								"windows": 1024
+							}
+						]
+					}
+				},
+				"read_digest": "1cdf46e9c991",
+				"write_baseline": {
+					"median": 496.9286579317413,
+					"results": [
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 500.95527844969183
+						},
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 496.4895760123618
+						},
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 496.9286579317413
+						}
+					]
+				},
+				"write_figwig_file": {
+					"median": 33.23032078705728,
+					"results": [
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.23032078705728
+						},
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.433803133666515
+						},
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.1632394939661
+						}
+					]
+				}
+			},
+			"read": [
+				{
+					"baseline": 22.37248484697193,
+					"baseline_name": "pybigtools, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.1715391860343516,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "1,024 count tracks over chr1, 1,024 windows of 2,048 bp",
+			"size": [
+				{
+					"baseline": 21176.941594,
+					"baseline_name": "the bigWigs written by figwig; pyBigWig not run",
+					"baseline_text": null,
+					"figwig": 2042.361894,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 496.9286579317413,
+					"baseline_name": "bigWigs written by figwig from a file of groups of 8; pyBigWig not run",
+					"baseline_text": null,
+					"figwig": 33.23032078705728,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"bulk-48": {
+			"baseline": "one bigWig per track; read by pybigtools, written by pyBigWig",
+			"date": "2026-11-11T17:47:14",
+			"elapsed_seconds": 313.3,
+			"inputs": {
+				"baseline_zoom_levels": 10,
+				"derived": "rolled copies of the real tracks (compare_formats.prepare_tracks)",
+				"figwig_file": "one group of all tracks, tile 16,384, libdeflate 6, bw2fw",
+				"peaks": "atac/large/atac_large_K562_hg38_PE_IDR-conservative_ENCFF855PCP.narrowPeak.gz",
+				"prepare_derived_seconds": 12.711542923934758,
+				"real_count": 6,
+				"real_tracks": [
+					"dnase/full/dnase_full_K562_hg38_SE36_ENCFF425WDA.bam",
+					"chip-seq/full/chip-seq_full_K562-CTCF_hg38_SE36_ENCFF172KOJ.bam",
+					"cage/full/cage_full_K562_hg38_SE_ENCFF754FAU.bam",
+					"pro-cap/full/pro-cap_full_K562_hg38_PE_ENCFF877SQU.bam",
+					"chip-seq/full/chip-seq_full_K562-H3K4me3_hg38_SE76crop36.bam",
+					"chip-seq/full/chip-seq_full_K562-MAX_hg38_SE101crop100.bam"
+				],
+				"tracks": 48,
+				"width": 2048,
+				"windows": 8192
+			},
+			"notes": [],
+			"raw": {
+				"read": {
+					"figwig file": {
+						"median": 0.07271894114091992,
+						"results": [
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07271894114091992,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07262425124645233,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "8d954527c00e",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 48,
+								"seconds": 0.07272942084819078,
+								"threads": 8
+							}
+						]
+					},
+					"pybigtools, 1 thread": {
+						"median": 4.679362363182008,
+						"results": [
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.645667776931077,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.679362363182008,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 4.716865384019911,
+								"windows": 8192
+							}
+						]
+					},
+					"pybigtools, 8 threads": {
+						"median": 7.835202240850776,
+						"results": [
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.850508113391697,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.762310151010752,
+								"windows": 8192
+							},
+							{
+								"digest": "8d954527c00e",
+								"n": 48,
+								"seconds": 7.835202240850776,
+								"windows": 8192
+							}
+						]
+					}
+				},
+				"read_digest": "8d954527c00e",
+				"write_baseline": {
+					"median": 69.42434316081926,
+					"results": [
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.38739554770291
+						},
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.42434316081926
+						},
+						{
+							"files": 48,
+							"mb": 1078.53512,
+							"seconds": 69.49908026261255
+						}
+					]
+				},
+				"write_figwig_file": {
+					"median": 2.0415670559741557,
+					"results": [
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.0385818970389664
+						},
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.2079678787849844
+						},
+						{
+							"bigwig_mb": 176.898846,
+							"mb": 97.17597,
+							"seconds": 2.0415670559741557
+						}
+					]
+				}
+			},
+			"read": [
+				{
+					"baseline": 4.679362363182008,
+					"baseline_name": "pybigtools, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.07271894114091992,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "48 count tracks over chr1, 8,192 windows of 2,048 bp",
+			"size": [
+				{
+					"baseline": 1078.53512,
+					"baseline_name": "pyBigWig",
+					"baseline_text": null,
+					"figwig": 97.17597,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 69.42434316081926,
+					"baseline_name": "pyBigWig, 1 thread",
+					"baseline_text": null,
+					"figwig": 2.0415670559741557,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"fiber": {
+			"baseline": "a pysam loop with `modified_bases` (write), the BAM (size) and a scipy CSR matrix in memory (read)",
+			"date": "2026-11-11T18:20:45",
+			"elapsed_seconds": 817.6,
+			"inputs": {
+				"alignments": 99685,
+				"bam": "fiber-seq/large/fiber-seq_large_K562_hg38_long.bam",
+				"figwig_threads": 8,
+				"pysam_threads": 1,
+				"repeats": 3,
+				"width": 2048,
+				"windows": 8192
+			},
+			"notes": [
+				"Fiber-seq: figwig and the pysam pass agree on the m6A total of each of the 99,685 alignments over its span, and on the sums over the windows (the file and the matrix both hold the 0 to 255 probabilities).",
+				"The pysam loop places 204,449,545 m6A and 15,488,000 5mC calls and keeps only the m6A calls, in a scipy matrix of 13.4 GB that the read time leaves out building; the figwig file also holds the 5mC, nucleosome, MSP and FIRE channels.",
+				"Reading times leave out opening the figwig file, which takes 1.39 s here, and loading the scipy matrix."
+			],
+			"raw": {
+				"figwig_read": [
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"open_seconds": 1.3860483570024371,
+						"seconds": 0.08642303803935647,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"open_seconds": 1.3575086328200996,
+						"seconds": 0.08683755714446306,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"open_seconds": 1.4066648199222982,
+						"seconds": 0.08593151019886136,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					}
+				],
+				"figwig_write": [
+					{
+						"command": "figwig fiberbam2fw -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/fiber/fibers -g hg38 -p 8 --force /home/jmschrei/datasets/testdata/fiber-seq/large/fiber-seq_large_K562_hg38_long.bam",
+						"mb": 605.408722,
+						"seconds": 10.363820048049092
+					},
+					{
+						"command": "figwig fiberbam2fw -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/fiber/fibers -g hg38 -p 8 --force /home/jmschrei/datasets/testdata/fiber-seq/large/fiber-seq_large_K562_hg38_long.bam",
+						"mb": 605.408722,
+						"seconds": 9.520503172185272
+					},
+					{
+						"command": "figwig fiberbam2fw -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/fiber/fibers -g hg38 -p 8 --force /home/jmschrei/datasets/testdata/fiber-seq/large/fiber-seq_large_K562_hg38_long.bam",
+						"mb": 605.408722,
+						"seconds": 9.18943013297394
+					}
+				],
+				"pysam_write": [
+					{
+						"alignments": 99685,
+						"cpg_calls_placed": 15488000,
+						"m6a_calls_placed": 204449545,
+						"matrix_mb": 13419.399117,
+						"seconds": 245.49566692812368
+					},
+					{
+						"alignments": 99685,
+						"cpg_calls_placed": 15488000,
+						"m6a_calls_placed": 204449545,
+						"matrix_mb": 13419.399117,
+						"seconds": 243.65124075720087
+					},
+					{
+						"alignments": 99685,
+						"cpg_calls_placed": 15488000,
+						"m6a_calls_placed": 204449545,
+						"matrix_mb": 13419.399117,
+						"seconds": 245.9252187521197
+					}
+				],
+				"same_values": {
+					"figwig_reads": 99685,
+					"figwig_total": 13545809683.0,
+					"first_differing": [],
+					"only_figwig": 0,
+					"only_pysam": 0,
+					"pysam_reads": 99685,
+					"pysam_total": 13545809683.0
+				},
+				"scipy_read_1_threads": [
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.26372188003733754,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.2630488220602274,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.2629287322051823,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					}
+				],
+				"scipy_read_8_threads": [
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.29401711700484157,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.5260204346850514,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					},
+					{
+						"digest": "0b9a8c1b3881c7d9",
+						"seconds": 0.33284651301801205,
+						"shape": [
+							8192,
+							1,
+							2048
+						],
+						"sum": 940524623.0
+					}
+				],
+				"scipy_seconds_by_threads": {
+					"1": 0.2630488220602274,
+					"8": 0.33284651301801205
+				}
+			},
+			"read": [
+				{
+					"baseline": 0.2630488220602274,
+					"baseline_name": "scipy CSR, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.08642303803935647,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "K562 Fiber-seq BAM, 99,685 alignments, 886 MB; reads: m6A summed over all reads in 8,192 windows of 2,048 bp",
+			"size": [
+				{
+					"baseline": 886.154697,
+					"baseline_name": "the BAM",
+					"baseline_text": null,
+					"figwig": 605.408722,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 245.49566692812368,
+					"baseline_name": "pysam, 1 thread, m6A and 5mC placed, nothing written",
+					"baseline_text": null,
+					"figwig": 9.520503172185272,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"hic": {
+			"baseline": "cooler (Python API)",
+			"date": "2026-11-11T18:31:02",
+			"elapsed_seconds": 616.7,
+			"inputs": {
+				"contacts": 907136828,
+				"figwig_layout": "bin coordinates, upper triangle, one track per bin, tile 256, groups of 1024",
+				"mcool": "hi-c/full/hi-c_full_K562_hg38_PE_4DNFI18UHVRO.mcool",
+				"pixels": 466326663,
+				"pixels_in_source": 466330336,
+				"read_threads": 1,
+				"repeated_pixels_summed": 3673,
+				"resolution": 5000,
+				"windows": 200,
+				"write_threads": {
+					"cooler": 1,
+					"figwig": 8
+				}
+			},
+			"notes": [
+				"With both triangles (1.79 GB at 5 kb) the figwig file also reads a bin's whole row in 36.2 ms against cooler's 8.97 s."
+			],
+			"raw": {
+				"row_cooler": [
+					{
+						"hashes": [
+							"892ef28cf497fd29",
+							"4c4c5c664a32c75c",
+							"e9083c6f06e9a16a",
+							"a25ec22645ed03df",
+							"b41006ea68379465"
+						],
+						"min_seconds": 0.5575186600908637,
+						"n_done": 17,
+						"rss_mb": 297.5546875,
+						"seconds": 8.971492961980402
+					}
+				],
+				"row_figwig": [
+					{
+						"hashes": [
+							"892ef28cf497fd29",
+							"4c4c5c664a32c75c",
+							"e9083c6f06e9a16a",
+							"a25ec22645ed03df",
+							"b41006ea68379465"
+						],
+						"min_seconds": 0.006014587823301554,
+						"n_done": 200,
+						"rss_mb": 467.6640625,
+						"seconds": 0.03648200002498925
+					},
+					{
+						"hashes": [
+							"892ef28cf497fd29",
+							"4c4c5c664a32c75c",
+							"e9083c6f06e9a16a",
+							"a25ec22645ed03df",
+							"b41006ea68379465"
+						],
+						"min_seconds": 0.005996488034725189,
+						"n_done": 200,
+						"rss_mb": 467.74609375,
+						"seconds": 0.03532648365944624
+					},
+					{
+						"hashes": [
+							"892ef28cf497fd29",
+							"4c4c5c664a32c75c",
+							"e9083c6f06e9a16a",
+							"a25ec22645ed03df",
+							"b41006ea68379465"
+						],
+						"min_seconds": 0.00598082784563303,
+						"n_done": 200,
+						"rss_mb": 467.6484375,
+						"seconds": 0.03624623059295118
+					}
+				],
+				"table": {
+					"diagonal_pixels": 563728,
+					"diagonal_sum": 96047728,
+					"nnz": 466326663,
+					"nnz_source": 466330336,
+					"repeated_pixels_summed": 3673,
+					"sum": 907136828
+				},
+				"totals": {
+					"both": {
+						"entries": 932653326,
+						"sum": 1814273656
+					},
+					"cooler": {
+						"pixels": 466326663,
+						"sum": 907136828
+					},
+					"upper": {
+						"entries": 466326663,
+						"sum": 907136828
+					}
+				},
+				"window_cooler": [
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.01129080867394805,
+						"n_done": 200,
+						"rss_mb": 128.26171875,
+						"seconds": 0.0187351752538234
+					},
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.011280787643045187,
+						"n_done": 200,
+						"rss_mb": 126.86328125,
+						"seconds": 0.018903109477832913
+					},
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.011336158029735088,
+						"n_done": 200,
+						"rss_mb": 127.91015625,
+						"seconds": 0.018891270272433758
+					}
+				],
+				"window_figwig": [
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.000232029240578413,
+						"n_done": 200,
+						"rss_mb": 477.76171875,
+						"seconds": 0.000874802004545927
+					},
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.00023478921502828598,
+						"n_done": 200,
+						"rss_mb": 474.89453125,
+						"seconds": 0.0008921371772885323
+					},
+					{
+						"hashes": [
+							"07c994aa53c42b91",
+							"971035c3c03f3a5e",
+							"37f6eba300e1df44",
+							"ca251ea54b461699",
+							"17550923e59dde32",
+							"485faa1c43d039b4",
+							"e07201fed6fb954b",
+							"f52d9a4b108dac91",
+							"36e60c63367f7a12",
+							"c887ff7fc77961fd",
+							"7f5b21a5b526236c",
+							"621cafb9812b6b9a",
+							"17d1b0831e1ede90",
+							"9ad2e5274080f357",
+							"2cfa1d20003761d8",
+							"64b17e8045f1ad6f",
+							"8a3be8b265e886c0",
+							"f212cbd798c8cdfb",
+							"a3e216f8fc67adda",
+							"c1eedd18993ab9b2"
+						],
+						"min_seconds": 0.00022812886163592339,
+						"n_done": 200,
+						"rss_mb": 476.88671875,
+						"seconds": 0.0008782970253378153
+					}
+				],
+				"windows_compared": 20,
+				"write_cooler": [
+					{
+						"mb": 748.089848,
+						"rss_mb": 854.50390625,
+						"seconds": 42.20133708138019
+					},
+					{
+						"mb": 748.089848,
+						"rss_mb": 849.5703125,
+						"seconds": 42.31727458909154
+					},
+					{
+						"mb": 748.089848,
+						"rss_mb": 852.40234375,
+						"seconds": 42.40847462974489
+					}
+				],
+				"write_figwig_both": {
+					"mb": 1792.518792,
+					"rss_mb": 4422.09375,
+					"seconds": 69.72043666010723
+				},
+				"write_figwig_upper": [
+					{
+						"mb": 979.124894,
+						"rss_mb": 2739.1015625,
+						"seconds": 47.42912675300613
+					},
+					{
+						"mb": 979.124894,
+						"rss_mb": 2707.4765625,
+						"seconds": 47.64841619087383
+					},
+					{
+						"mb": 979.124894,
+						"rss_mb": 2721.2890625,
+						"seconds": 48.019398517906666
+					}
+				]
+			},
+			"read": [
+				{
+					"baseline": 0.018891270272433758,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 0.0008782970253378153,
+					"label": "window",
+					"unit": "s"
+				}
+			],
+			"setting": "K562 Hi-C, 5 kb, 907M contacts; 2 Mb diagonal window as a dense 400 x 400 block",
+			"size": [
+				{
+					"baseline": 748.089848,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 979.124894,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 42.31727458909154,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 47.64841619087383,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"scatac": {
+			"baseline": "SnapATAC2 (write, size) and a scipy CSR matrix in memory (read)",
+			"date": "2026-11-11T18:07:07",
+			"elapsed_seconds": 849.6,
+			"inputs": {
+				"cells": "scatac-seq/aux/scatac-seq_aux_PBMC_hg38_PE_singlecell.csv",
+				"cells_called": 10246,
+				"figwig_threads": 8,
+				"fragment_ends": 491845610,
+				"fragments": "scatac-seq/full/scatac-seq_full_PBMC_hg38_PE_fragments.tsv.gz",
+				"genome": "reference/hg38/hg38.ucsc.chrom.sizes",
+				"labels": 10,
+				"peaks": "peaks/large/atac-seq_large_K562_hg38_PE_replicated_ENCFF827JWX.narrowPeak.gz",
+				"repeats": 3,
+				"snapatac2_threads": 8,
+				"width": 2048,
+				"windows": 8192
+			},
+			"notes": [
+				"scATAC-seq: figwig and SnapATAC2 hold the same 491,845,610 fragment ends of the 10,246 called cells (every cell's figwig total is twice its SnapATAC2 fragment count), and figwig and the scipy matrix gave identical sums over the windows.",
+				"The scipy matrix is 14.8 GB in memory (the read times leave out building it and opening the figwig file, which takes 5 ms), where the figwig file is 1.11 GB.",
+				"SnapATAC2 stores each cell's fragments, so counts over windows or peaks are still to be computed from its output."
+			],
+			"raw": {
+				"figwig_read": [
+					{
+						"digest": "f2640b944b750f48",
+						"open_seconds": 0.004977780859917402,
+						"seconds": 0.2890268941409886,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"open_seconds": 0.005045420955866575,
+						"seconds": 0.2894597430713475,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"open_seconds": 0.0050004618242383,
+						"seconds": 0.29142765514552593,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					}
+				],
+				"figwig_write": [
+					{
+						"command": "figwig bam2fw -s /home/jmschrei/datasets/testdata/reference/hg38/hg38.ucsc.chrom.sizes -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells -f -p 8 --barcode-column 4 --cells /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells.tsv --force /home/jmschrei/datasets/testdata/scatac-seq/full/scatac-seq_full_PBMC_hg38_PE_fragments.tsv.gz",
+						"mb": 1107.643797,
+						"seconds": 8.225387922022492
+					},
+					{
+						"command": "figwig bam2fw -s /home/jmschrei/datasets/testdata/reference/hg38/hg38.ucsc.chrom.sizes -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells -f -p 8 --barcode-column 4 --cells /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells.tsv --force /home/jmschrei/datasets/testdata/scatac-seq/full/scatac-seq_full_PBMC_hg38_PE_fragments.tsv.gz",
+						"mb": 1107.643797,
+						"seconds": 8.26539383456111
+					},
+					{
+						"command": "figwig bam2fw -s /home/jmschrei/datasets/testdata/reference/hg38/hg38.ucsc.chrom.sizes -n /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells -f -p 8 --barcode-column 4 --cells /dev/shm/figwig-readme-table-jmschrei/run-3867743/scatac/cells.tsv --force /home/jmschrei/datasets/testdata/scatac-seq/full/scatac-seq_full_PBMC_hg38_PE_fragments.tsv.gz",
+						"mb": 1107.643797,
+						"seconds": 8.295192575082183
+					}
+				],
+				"same_fragment_ends": {
+					"cells": 10246,
+					"cells_differing": 0,
+					"figwig_ends": 491845610,
+					"snapatac2_ends": 491845610
+				},
+				"scipy_read_1_threads": [
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.45372456684708595,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.44624497508630157,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.44973305193707347,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					}
+				],
+				"scipy_read_8_threads": [
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.44484463008120656,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.47538959700614214,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					},
+					{
+						"digest": "f2640b944b750f48",
+						"matrix_mb": 14792.910749,
+						"seconds": 0.4405998159199953,
+						"shape": [
+							8192,
+							10,
+							2048
+						],
+						"sum": 34518078.0
+					}
+				],
+				"scipy_seconds_by_threads": {
+					"1": 0.44973305193707347,
+					"8": 0.44484463008120656
+				},
+				"snapatac2_write": [
+					{
+						"mb": 1019.517456,
+						"seconds": 234.51654509315267,
+						"version": "2.10.0"
+					},
+					{
+						"mb": 1019.517456,
+						"seconds": 218.455882309936,
+						"version": "2.10.0"
+					},
+					{
+						"mb": 1019.517456,
+						"seconds": 213.51611574413255,
+						"version": "2.10.0"
+					}
+				]
+			},
+			"read": [
+				{
+					"baseline": 0.44484463008120656,
+					"baseline_name": "scipy CSR, 8 threads",
+					"baseline_text": null,
+					"figwig": 0.2894597430713475,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "10x PBMC scATAC-seq, 10,246 cells, 492 million cut sites; reads: 10 pseudobulks over 8,192 windows of 2,048 bp on K562 ATAC peaks",
+			"size": [
+				{
+					"baseline": 1019.517456,
+					"baseline_name": "SnapATAC2, which stores fragments rather than per-base counts",
+					"baseline_text": null,
+					"figwig": 1107.643797,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 218.455882309936,
+					"baseline_name": "SnapATAC2, 8 threads",
+					"baseline_text": null,
+					"figwig": 8.26539383456111,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"schic": {
+			"baseline": "scool (cooler)",
+			"date": "2026-11-11T19:01:51",
+			"elapsed_seconds": 1848.6,
+			"inputs": {
+				"cells": 3882,
+				"cells_read": 100,
+				"contacts": 625600709,
+				"figwig_layout": "one track per cell in position order, chromosome pairs as pseudo-chromosomes, upper triangle, tile 16384, one group",
+				"pixels": 526402120,
+				"pseudobulk_windows": 50,
+				"read_threads": 1,
+				"resolution": 10000,
+				"scool": "sc-hi-c/full/sc-hi-c_full_mESC_mm9_PE_nagano2017-10kb-raw.scool",
+				"write_threads": {
+					"figwig": 8,
+					"scool": 1
+				}
+			},
+			"notes": [
+				"With one track per cell in track order (level 6, 2.47 GB) the figwig file reads one whole cell in 12.2 ms."
+			],
+			"raw": {
+				"cell_figwig": [
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 7.433850617147982,
+						"n_done": 15,
+						"rss_mb": 367.37109375,
+						"seconds": 8.088609196711332
+					}
+				],
+				"cell_figwig_threads": {
+					"hashes": [
+						"7fb0f187a42e5c4f",
+						"f590746ad93f83d3",
+						"742e867369b1c1b1"
+					],
+					"min_seconds": 1.0930472309701145,
+					"n_done": 100,
+					"rss_mb": 447.3515625,
+					"seconds": 1.217849323991686
+				},
+				"cell_figwig_tracks": [
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0009545856155455112,
+						"n_done": 100,
+						"rss_mb": 190.8046875,
+						"seconds": 0.01257365825586021
+					},
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0008998969569802284,
+						"n_done": 100,
+						"rss_mb": 190.1015625,
+						"seconds": 0.012199404649436474
+					},
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0008882470428943634,
+						"n_done": 100,
+						"rss_mb": 190.8046875,
+						"seconds": 0.011688181897625327
+					}
+				],
+				"cell_scool": [
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0010020667687058449,
+						"n_done": 100,
+						"rss_mb": 219.90625,
+						"seconds": 0.014101663138717413
+					},
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0009670457802712917,
+						"n_done": 100,
+						"rss_mb": 223.9609375,
+						"seconds": 0.013981838943436742
+					},
+					{
+						"hashes": [
+							"7fb0f187a42e5c4f",
+							"f590746ad93f83d3",
+							"742e867369b1c1b1"
+						],
+						"min_seconds": 0.0009682956151664257,
+						"n_done": 100,
+						"rss_mb": 220.9296875,
+						"seconds": 0.013983109267428517
+					}
+				],
+				"pseudobulk_compared": 3,
+				"pseudobulk_figwig": [
+					{
+						"hashes": [
+							"78c26f681eb1c310",
+							"30150b747724a384",
+							"da1b7e9a7e897fe1"
+						],
+						"min_seconds": 0.0012102751061320305,
+						"n_done": 50,
+						"rss_mb": 244.6484375,
+						"seconds": 0.01475356100127101
+					},
+					{
+						"hashes": [
+							"78c26f681eb1c310",
+							"30150b747724a384",
+							"da1b7e9a7e897fe1"
+						],
+						"min_seconds": 0.0012200651690363884,
+						"n_done": 50,
+						"rss_mb": 243.859375,
+						"seconds": 0.014725420856848359
+					},
+					{
+						"hashes": [
+							"78c26f681eb1c310",
+							"30150b747724a384",
+							"da1b7e9a7e897fe1"
+						],
+						"min_seconds": 0.0012249648571014404,
+						"n_done": 50,
+						"rss_mb": 243.890625,
+						"seconds": 0.015063665108755231
+					}
+				],
+				"pseudobulk_scool": [
+					{
+						"hashes": [
+							"78c26f681eb1c310",
+							"30150b747724a384",
+							"da1b7e9a7e897fe1"
+						],
+						"min_seconds": 23.16547029512003,
+						"n_done": 6,
+						"rss_mb": 211.2890625,
+						"seconds": 23.559160561999306
+					}
+				],
+				"table": {
+					"cells": 3882,
+					"nnz": 526402120,
+					"nnz_per_cell_median": 111493.5,
+					"sum": 625600709
+				},
+				"totals": {
+					"figwig": {
+						"pixels": 526402120,
+						"sum": 625600709
+					},
+					"figwig_tracks": {
+						"pixels": 526402120,
+						"sum": 625600709
+					},
+					"scool": {
+						"pixels": 526402120,
+						"sum": 625600709
+					}
+				},
+				"write_figwig": [
+					{
+						"mb": 1454.202802,
+						"rss_mb": 3375.546875,
+						"seconds": 60.23136566905305
+					},
+					{
+						"mb": 1454.202802,
+						"rss_mb": 3296.33984375,
+						"seconds": 60.04228230193257
+					},
+					{
+						"mb": 1454.202802,
+						"rss_mb": 3305.8125,
+						"seconds": 59.49398905178532
+					}
+				],
+				"write_figwig_tracks": {
+					"mb": 2469.945485,
+					"rss_mb": 6582.4921875,
+					"seconds": 70.43180969683453
+				},
+				"write_scool": [
+					{
+						"mb": 1952.016544,
+						"rss_mb": 214.5625,
+						"seconds": 313.56357217300683
+					},
+					{
+						"mb": 1952.016544,
+						"rss_mb": 224.1171875,
+						"seconds": 312.8952848939225
+					},
+					{
+						"mb": 1952.016544,
+						"rss_mb": 224.50390625,
+						"seconds": 313.6670562182553
+					}
+				]
+			},
+			"read": [
+				{
+					"baseline": 23.559160561999306,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 0.01475356100127101,
+					"label": "pseudobulk window",
+					"unit": "s"
+				},
+				{
+					"baseline": 0.013983109267428517,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 8.088609196711332,
+					"label": "one cell",
+					"unit": "s"
+				}
+			],
+			"setting": "Single-cell Hi-C, mouse ES cells (Nagano 2017), 3,882 cells, 10 kb, 626M contacts; 2 Mb diagonal window summed over the cells of 4 labels, (4, 200, 200), and one whole cell",
+			"size": [
+				{
+					"baseline": 1952.016544,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 1454.202802,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 313.56357217300683,
+					"baseline_name": null,
+					"baseline_text": null,
+					"figwig": 60.04228230193257,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		}
+	}
+}

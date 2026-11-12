@@ -18,6 +18,12 @@ Converters and commands
 	- ``write_sparse`` skips its range check of declared integer dtypes when the values' dtype fits every one of them, and cuts a call's batches by a binary search for the end of each tile, where it divided every entry's position. The 99,685 reads of a Fiber-seq BAM, written by ``figwig fiberbam2fw`` as 498,425 uint8 tracks, take 8.5 s on 16 threads and 13 s on 4, where they took 15.6 s and 17 s. The file is the same to the byte.
 
 
+Benchmarks
+----------
+
+	- ``benchmarks/readme_table/run.py`` measures the rows of the README's table of read time, write time and file size by assay, against the tool most people use for each (pybigtools and pyBigWig for bigWigs, SnapATAC2 and a scipy matrix for scATAC-seq, a pysam loop and a scipy matrix for Fiber-seq, cooler and scool for Hi-C), and ``--update-readme`` rewrites the table from ``benchmarks/readme_table/results.json``, where the README's numbers were typed by hand from several pages. Each measurement is its own process, the median of three, and each row checks that figwig and its baseline return the same values.
+
+
 Reading
 -------
 
