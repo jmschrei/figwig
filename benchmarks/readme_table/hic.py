@@ -34,8 +34,14 @@ import pandas
 
 import common
 import render
-from hic_common import load_meta, chunks, bin_starts, tile_calls, digest, mirror
-from hic_common import time_queries, same_hashes
+from hic_common import load_meta
+from hic_common import chunks
+from hic_common import bin_starts
+from hic_common import tile_calls
+from hic_common import digest
+from hic_common import mirror
+from hic_common import time_queries
+from hic_common import same_hashes
 
 SOURCES = {
 	'full': 'hi-c/full/hi-c_full_K562_hg38_PE_4DNFI18UHVRO.mcool',

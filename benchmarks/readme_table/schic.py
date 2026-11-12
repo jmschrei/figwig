@@ -36,8 +36,13 @@ import pandas
 
 import common
 import render
-from hic_common import load_meta, bin_starts, tile_calls, digest, mirror
-from hic_common import time_queries, same_hashes
+from hic_common import load_meta
+from hic_common import bin_starts
+from hic_common import tile_calls
+from hic_common import digest
+from hic_common import mirror
+from hic_common import time_queries
+from hic_common import same_hashes
 
 SOURCES = {
 	'full': 'sc-hi-c/full/sc-hi-c_full_mESC_mm9_PE_nagano2017-10kb-raw.scool',
