@@ -24,6 +24,12 @@ Benchmarks
 	- ``benchmarks/readme_table/run.py`` measures the rows of the README's table of read time, write time and file size by assay, against the tool most people use for each (pybigtools and pyBigWig for bigWigs, SnapATAC2 and a scipy matrix for scATAC-seq, a pysam loop and a scipy matrix for Fiber-seq, cooler and scool for Hi-C), and ``--update-readme`` rewrites the table from ``benchmarks/readme_table/results.json``, where the README's numbers were typed by hand from several pages. Each measurement is its own process, the median of three, and each row checks that figwig and its baseline return the same values.
 
 
+Reading
+-------
+
+	- ``read_bigwig`` and ``BigWigReader.read`` open each bigWig when its first batch runs and close it after its last, where they held a file descriptor for every file from the start of the call to its end. A read, or a ``figwig bw2fw`` of a group of 1,024 bigWigs, now holds about ``n_jobs`` descriptors at a time, where it stopped with ``[Errno 24] Too many open files`` at the usual soft limit of 1,024. Reads of 1, 3, 48 and 1,024 files on 1 and 8 threads took the same time as before, within 1% by the median of 7 runs, and returned the same values. A process at its limit of open files now raises an ``OSError`` that names the limit and ``ulimit -n``.
+
+
 Version 0.3.0
 =============
 

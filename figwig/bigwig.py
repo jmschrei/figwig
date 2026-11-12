@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import errno
 import zlib
 import struct
 import warnings
@@ -652,22 +653,53 @@ class _Read:
 		self.fd = None
 
 	def open(self):
-		# Every batch shares one fd, read without moving its position where
-		# there is pread. Windows opens a file in text mode unless asked for
-		# binary, and has O_BINARY to ask; elsewhere it does not exist.
-		self.fd = os.open(self.bigwig.path, os.O_RDONLY | getattr(os,
-			'O_BINARY', 0))
+		# The file is opened when its first batch runs and closed when its last
+		# one ends, so that a read of thousands of files holds about `n_jobs`
+		# descriptors, as batches are handed out in file order. Every batch of
+		# a file shares its fd, read without moving its position where there
+		# is pread.
+		self.fd = None
+		self.pending = self.n_batches
+		self.lock = threading.Lock()
+
+	def _acquire(self):
+		with self.lock:
+			if self.fd is None:
+				# Windows opens a file in text mode unless asked for binary, and
+				# has O_BINARY to ask; elsewhere it does not exist.
+				try:
+					self.fd = os.open(self.bigwig.path, os.O_RDONLY | getattr(os,
+						'O_BINARY', 0))
+				except OSError as error:
+					if error.errno not in (errno.EMFILE, errno.ENFILE):
+						raise
+					raise OSError(error.errno, "too many open files to read {}: the "
+						"process or the system is at its limit of open files (raise "
+						"it with `ulimit -n`, or use fewer threads or files at a "
+						"time)".format(self.bigwig.path)) from error
+			return self.fd
+
+	def _done(self):
+		with self.lock:
+			self.pending -= 1
+			if self.pending == 0 and self.fd is not None:
+				os.close(self.fd)
+				self.fd = None
 
 	def close(self):
-		if self.fd is not None:
-			os.close(self.fd)
-			self.fd = None
+		with self.lock:
+			if self.fd is not None:
+				os.close(self.fd)
+				self.fd = None
 
 	def run(self, k):
 		w0, w1 = self.bounds[k], self.bounds[k + 1]
 		b0, b1 = int(self.rows[w0, 0]), int(self.rows[w0:w1, 1].max())
-		words, blocks = self.bigwig._read_blocks(self.fd, self.needed[b0:b1],
-			self.index, self.decoder)
+		try:
+			words, blocks = self.bigwig._read_blocks(self._acquire(),
+				self.needed[b0:b1], self.index, self.decoder)
+		finally:
+			self._done()
 		local = self.rows[w0:w1].copy()
 		local[:, :2] -= b0
 		_read_windows(words, blocks, local, self.out, self.signal,
