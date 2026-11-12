@@ -35,6 +35,7 @@ import getpass
 import argparse
 import datetime
 import importlib
+import resource
 import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,10 @@ def main():
 			with open(README, 'w') as handle:
 				handle.write(render.update(text, results))
 		return
+
+	# 1,024 inputs of bw2fw are 1,024 open files, and a service starts with a soft limit of 1,024
+	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+	resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
 
 	idle = common.idle_percent()
 	if idle < args.min_idle:
