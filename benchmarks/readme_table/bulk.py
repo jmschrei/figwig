@@ -261,9 +261,15 @@ def fw2bw(ctx, workdir, n, jobs, zooms):
 	import compare_formats
 	out = os.path.join(workdir, 'back_{}'.format(n))
 	common.fresh(out)
+	# fw2bw reads a group's tracks together, and a group of every track would be
+	# a dense output over the 8 GiB limit, so the bigWigs come from groups of 8
+	source = os.path.join(workdir, 'tracks_groups8_{}.fw'.format(n))
+	if not os.path.exists(source):
+		compare_formats.shell([sys.executable, '-m', 'figwig', 'bw2fw', '-o', source, '-f',
+			'-p', str(jobs), '--groups', '8', '-t', '16384', '-l', '6'] + [
+			compare_formats.track_path(workdir, i) for i in range(n)], dict(os.environ))
 	seconds = compare_formats.shell([sys.executable, '-m', 'figwig', 'fw2bw',
-		compare_formats.figwig_path(workdir, n), '-o', out, '-p', str(jobs), '-z',
-		str(zooms), '-l', '6'], dict(os.environ))
+		source, '-o', out, '-p', str(jobs), '-z', str(zooms), '-l', '6'], dict(os.environ))
 	mb = common.size_mb(out)
 	common.fresh(out)
 	return {'seconds': seconds, 'mb': mb, 'files': n}
@@ -470,7 +476,7 @@ def tracks_row(ctx, key, n, windows):
 		if key == 'bulk-1024':
 			bw_write = measure(ctx, 'bulk:fw2bw', {'figwig': dict(jobs=T)}, workdir=workdir, n=n,
 				zooms=ZOOMS)['figwig']
-			write_name = 'bigWigs written by figwig; pyBigWig not run'
+			write_name = 'bigWigs written by figwig from a file of groups of 8; pyBigWig not run'
 			size_name = 'the bigWigs written by figwig; pyBigWig not run'
 		else:
 			tracks = [os.path.join(workdir, 'tracks', 'track_{:03d}.bw'.format(i)) for i in range(n)]
