@@ -509,7 +509,7 @@ def tracks_row(ctx, key, n, windows):
 		notes.append('The 1,024-track baseline write and size are the 1,024 bigWigs figwig wrote '
 			'with {} zoom levels ({:.0f} s, {:.1f} GB); pyBigWig was not run at that size.'.format(
 			ZOOMS, bw_write[0], bw_write[1][-1]['mb'] / 1000))
-	return {'setting': '{} count tracks over chr1, {:,} windows of 2,048 bp'.format(n, found),
+	return {'setting': '{:,} count tracks over chr1, {:,} windows of 2,048 bp'.format(n, found),
 		'baseline': 'one bigWig per track; read by pybigtools, written by {}'.format(
 			'figwig' if key == 'bulk-1024' else 'pyBigWig'),
 		'read': [read], 'write': [write], 'size': [size],

@@ -37,7 +37,7 @@ outputs, and `-c` added.
 | The same BAM's per-base coverage, like deepTools | **1.6 s** at `-p 8` | 14.9 s on 8 processes, `bamCoverage --binSize 1`, the same value at every base |
 | Read 8,192 windows of 2,048 bp from 48 count tracks on chr1 | **0.071 s** on 8 threads, **0.040 s** on 32, from one figwig file | 0.19 s and 0.083 s from 48 bigWigs, figwig; 5.9 s pybigtools; 4.0 s zarr |
 | A DataLoader batch of 64 windows x 48 tracks as a CUDA tensor | **4 ms** from one figwig file | 30 ms from the bigWigs, figwig; 120 ms pybigtools |
-| 10 pseudobulks of 10,246 cells over 8,192 windows | **0.23 s** on 8 threads | 5.1 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
+| 10 pseudobulks of 10,246 cells over 8,192 windows | **0.23 s** on 8 threads | 4.9 s from an in-memory scipy CSR; 95 s from one bigWig per cell |
 | Convert 257.6 million 10x fragments to 10,246 per-cell tracks | **8 s** at `-p 8`, **3.9 s** at `-p 32`, 19 GB peak | 140 s, 24 GB, a pandas recipe; 217 s, 8 GB, SnapATAC2 (fragments, not counts) |
 
 Measured on a 2x AMD EPYC 9575F with Python 3.13 and numba 0.68. The
@@ -46,6 +46,34 @@ every setup, the other tables (figwig files against bigWigs, zarr and HDF5 at
 6, 48 and 512 tracks; writers; threads) and the plots.
 
 <!-- readme-table:start -->
+<details>
+<summary>Read time, write time and file size by assay, against what most people use today</summary>
+
+Each cell is figwig against the baseline, figwig first, in bold where it is smaller. figwig ran on 8 threads unless a note says otherwise; each baseline is given its fastest setting (the other tools mostly do not gain from threads). Reads are windows of 2,048 bp unless noted. The Hi-C reads run on one thread, figwig and cooler alike.
+
+| Setting | Baseline | Read | Write | Size |
+|---|---|---|---|---|
+| 1 ATAC-seq track, 167,750 windows of 1,000 bp on random signal bases and negatives | one bigWig; read by pybigtools, written by pyBigWig | **98.4 ms** vs 1.86 s (pybigtools, 1 thread, sorted windows) | **0.245 s** vs 8.13 s (pyBigWig, 1 thread) | **64.4 MB** vs 64.4 MB (pyBigWig) |
+| 48 count tracks over chr1, 8,192 windows of 2,048 bp | one bigWig per track; read by pybigtools, written by pyBigWig | **72.7 ms** vs 4.68 s (pybigtools, 1 thread) | **2.04 s** vs 69.4 s (pyBigWig, 1 thread) | **97.2 MB** vs 1.08 GB (pyBigWig) |
+| 1,024 count tracks over chr1, 1,024 windows of 2,048 bp | one bigWig per track; read by pybigtools, written by figwig | **0.172 s** vs 22.4 s (pybigtools, 1 thread) | **33.2 s** vs 497 s (bigWigs written by figwig from a file of groups of 8; pyBigWig not run) | **2.04 GB** vs 21.2 GB (the bigWigs written by figwig; pyBigWig not run) |
+| 10x PBMC scATAC-seq, 10,246 cells, 492 million cut sites; reads: 10 pseudobulks over 8,192 windows of 2,048 bp on K562 ATAC peaks | SnapATAC2 (write, size) and a scipy CSR matrix in memory (read) | **0.289 s** vs 0.445 s (scipy CSR, 8 threads) | **8.27 s** vs 218 s (SnapATAC2, 8 threads) | 1.11 GB vs 1.02 GB (SnapATAC2, which stores fragments rather than per-base counts) |
+| K562 Fiber-seq BAM, 99,685 alignments, 886 MB; reads: m6A summed over all reads in 8,192 windows of 2,048 bp | a pysam loop with `modified_bases` (write), the BAM (size) and a scipy CSR matrix in memory (read) | **86.4 ms** vs 0.263 s (scipy CSR, 1 thread) | **9.52 s** vs 245 s (pysam, 1 thread, m6A and 5mC placed, nothing written) | **605 MB** vs 886 MB (the BAM) |
+| K562 Hi-C, 5 kb, 907M contacts; 2 Mb diagonal window as a dense 400 x 400 block | cooler (Python API) | window: **0.878 ms** vs 18.9 ms | 47.6 s vs 42.3 s | 979 MB vs 748 MB |
+| Single-cell Hi-C, mouse ES cells (Nagano 2017), 3,882 cells, 10 kb, 626M contacts; 2 Mb diagonal window summed over the cells of 4 labels, (4, 200, 200), and one whole cell | scool (cooler) | pseudobulk window: **14.8 ms** vs 23.6 s; one cell: 8.09 s vs 14 ms | **60 s** vs 314 s | **1.45 GB** vs 1.95 GB |
+
+- The 1,024-track baseline write and size are the 1,024 bigWigs figwig wrote with 10 zoom levels (497 s, 21.2 GB); pyBigWig was not run at that size.
+- scATAC-seq: figwig and SnapATAC2 hold the same 491,845,610 fragment ends of the 10,246 called cells (every cell's figwig total is twice its SnapATAC2 fragment count), and figwig and the scipy matrix gave identical sums over the windows.
+- The scipy matrix is 14.8 GB in memory (the read times leave out building it and opening the figwig file, which takes 5 ms), where the figwig file is 1.11 GB.
+- SnapATAC2 stores each cell's fragments, so counts over windows or peaks are still to be computed from its output.
+- Fiber-seq: figwig and the pysam pass agree on the m6A total of each of the 99,685 alignments over its span, and on the sums over the windows (the file and the matrix both hold the 0 to 255 probabilities).
+- The pysam loop places 204,449,545 m6A and 15,488,000 5mC calls and keeps only the m6A calls, in a scipy matrix of 13.4 GB that the read time leaves out building; the figwig file also holds the 5mC, nucleosome, MSP and FIRE channels.
+- Reading times leave out opening the figwig file, which takes 1.39 s here, and loading the scipy matrix.
+- With both triangles (1.79 GB at 5 kb) the figwig file also reads a bin's whole row in 36.2 ms against cooler's 8.97 s.
+- With one track per cell in track order (level 6, 2.47 GB) the figwig file reads one whole cell in 12.2 ms.
+
+Measured by `benchmarks/readme_table/run.py` on 2026-11-11 on AMD EPYC 9575F 64-Core Processor (256 cores), figwig 0.3.0 at 2858597; the numbers are in `benchmarks/readme_table/results.json`.
+
+</details>
 <!-- readme-table:end -->
 
 ## Installation

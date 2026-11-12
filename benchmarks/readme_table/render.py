@@ -86,10 +86,10 @@ def block(results):
 		'',
 		'Each cell is figwig against the baseline, figwig first, in bold where it is smaller. figwig ran '
 		'on {threads} threads unless a note says otherwise; each baseline is given its fastest setting (the other tools mostly do not '
-		'gain from threads). Reads are windows of 2,048 bp unless noted.'.format(threads=meta['threads']),
+		'gain from threads). Reads are windows of 2,048 bp unless noted. The Hi-C reads run on one thread, figwig and cooler alike.'.format(threads=meta['threads']),
 		'', table(rows), '']
 	if notes:
-		lines += [' '.join(notes), '']
+		lines += ['- ' + n for n in notes] + ['']
 	lines += ['Measured by `benchmarks/readme_table/run.py` on {date} on {cpu} ({cores} cores), figwig {fw} '
 		'at {commit}; the numbers are in `benchmarks/readme_table/results.json`.'.format(date=date,
 		cpu=machine['cpu'], cores=machine['cores'], fw=meta['versions'].get('figwig', '?'),

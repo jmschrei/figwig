@@ -1,7 +1,7 @@
 {
 	"meta": {
-		"commit": "86b05c3",
-		"idle_percent_at_start": 93.8,
+		"commit": "2858597",
+		"idle_percent_at_start": 93.7,
 		"machine": {
 			"cores": 256,
 			"cpu": "AMD EPYC 9575F 64-Core Processor",
@@ -388,6 +388,187 @@
 					"baseline_name": "pyBigWig, 1 thread",
 					"baseline_text": null,
 					"figwig": 0.24516921117901802,
+					"label": null,
+					"unit": "s"
+				}
+			]
+		},
+		"bulk-1024": {
+			"baseline": "one bigWig per track; read by pybigtools, written by figwig",
+			"date": "2026-11-11T19:54:56",
+			"elapsed_seconds": 2229.1,
+			"inputs": {
+				"baseline_zoom_levels": 10,
+				"derived": "rolled copies of the real tracks (compare_formats.prepare_tracks)",
+				"figwig_file": "one group of all tracks, tile 16,384, libdeflate 6, bw2fw",
+				"peaks": "atac/large/atac_large_K562_hg38_PE_IDR-conservative_ENCFF855PCP.narrowPeak.gz",
+				"prepare_derived_seconds": 295.53421213198453,
+				"real_count": 6,
+				"real_tracks": [
+					"dnase/full/dnase_full_K562_hg38_SE36_ENCFF425WDA.bam",
+					"chip-seq/full/chip-seq_full_K562-CTCF_hg38_SE36_ENCFF172KOJ.bam",
+					"cage/full/cage_full_K562_hg38_SE_ENCFF754FAU.bam",
+					"pro-cap/full/pro-cap_full_K562_hg38_PE_ENCFF877SQU.bam",
+					"chip-seq/full/chip-seq_full_K562-H3K4me3_hg38_SE76crop36.bam",
+					"chip-seq/full/chip-seq_full_K562-MAX_hg38_SE101crop100.bam"
+				],
+				"tracks": 1024,
+				"width": 2048,
+				"windows": 1024
+			},
+			"notes": [
+				"The 1,024-track baseline write and size are the 1,024 bigWigs figwig wrote with 10 zoom levels (497 s, 21.2 GB); pyBigWig was not run at that size."
+			],
+			"raw": {
+				"read": {
+					"figwig file": {
+						"median": 0.1715391860343516,
+						"results": [
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.1715391860343516,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.17304171109572053,
+								"threads": 8
+							},
+							{
+								"batches": false,
+								"digest": "1cdf46e9c991",
+								"kind": "read",
+								"mode": "figwig_float32",
+								"n": 1024,
+								"seconds": 0.16998738190159202,
+								"threads": 8
+							}
+						]
+					},
+					"pybigtools, 1 thread": {
+						"median": 22.37248484697193,
+						"results": [
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.212020909879357,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.37248484697193,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 22.500809740275145,
+								"windows": 1024
+							}
+						]
+					},
+					"pybigtools, 8 threads": {
+						"median": 37.9855444082059,
+						"results": [
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 37.9855444082059,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 38.06585601484403,
+								"windows": 1024
+							},
+							{
+								"digest": "1cdf46e9c991",
+								"n": 1024,
+								"seconds": 37.98445579176769,
+								"windows": 1024
+							}
+						]
+					}
+				},
+				"read_digest": "1cdf46e9c991",
+				"write_baseline": {
+					"median": 496.9286579317413,
+					"results": [
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 500.95527844969183
+						},
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 496.4895760123618
+						},
+						{
+							"files": 1024,
+							"mb": 21176.941594,
+							"seconds": 496.9286579317413
+						}
+					]
+				},
+				"write_figwig_file": {
+					"median": 33.23032078705728,
+					"results": [
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.23032078705728
+						},
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.433803133666515
+						},
+						{
+							"bigwig_mb": 3761.672493,
+							"mb": 2042.361894,
+							"seconds": 33.1632394939661
+						}
+					]
+				}
+			},
+			"read": [
+				{
+					"baseline": 22.37248484697193,
+					"baseline_name": "pybigtools, 1 thread",
+					"baseline_text": null,
+					"figwig": 0.1715391860343516,
+					"label": null,
+					"unit": "s"
+				}
+			],
+			"setting": "1,024 count tracks over chr1, 1,024 windows of 2,048 bp",
+			"size": [
+				{
+					"baseline": 21176.941594,
+					"baseline_name": "the bigWigs written by figwig; pyBigWig not run",
+					"baseline_text": null,
+					"figwig": 2042.361894,
+					"label": null,
+					"unit": "MB"
+				}
+			],
+			"write": [
+				{
+					"baseline": 496.9286579317413,
+					"baseline_name": "bigWigs written by figwig from a file of groups of 8; pyBigWig not run",
+					"baseline_text": null,
+					"figwig": 33.23032078705728,
 					"label": null,
 					"unit": "s"
 				}
