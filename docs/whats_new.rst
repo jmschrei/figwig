@@ -18,6 +18,12 @@ Converters and commands
 	- ``write_sparse`` skips its range check of declared integer dtypes when the values' dtype fits every one of them, and cuts a call's batches by a binary search for the end of each tile, where it divided every entry's position. The 99,685 reads of a Fiber-seq BAM, written by ``figwig fiberbam2fw`` as 498,425 uint8 tracks, take 8.5 s on 16 threads and 13 s on 4, where they took 15.6 s and 17 s. The file is the same to the byte.
 
 
+Reading
+-------
+
+	- ``read_bigwig`` and ``BigWigReader.read`` open each bigWig when its first batch runs and close it after its last, where they held a file descriptor for every file from the start of the call to its end. A read, or a ``figwig bw2fw`` of a group of 1,024 bigWigs, now holds about ``n_jobs`` descriptors at a time, where it stopped with ``[Errno 24] Too many open files`` at the usual soft limit of 1,024. Reads of 1, 3, 48 and 1,024 files on 1 and 8 threads took the same time as before, within 1% by the median of 7 runs, and returned the same values. A process at its limit of open files now raises an ``OSError`` that names the limit and ``ulimit -n``.
+
+
 Version 0.3.0
 =============
 

@@ -1252,3 +1252,42 @@ def test_chromosome_tree_past_end_of_file_raises(tmp_path, field, value):
 
 def test_version():
 	assert re.fullmatch(r'\d+\.\d+\.\d+', figwig.__version__)
+
+
+def test_many_files_are_open_a_few_at_a_time(dense_bw, tmp_path):
+	"""A read of more files than the process may have open succeeds, as a file
+	is open only from its first batch to its last."""
+
+	resource = pytest.importorskip('resource')
+	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+	paths = []
+	for i in range(300):
+		path = tmp_path / 'copy_{}.bw'.format(i)
+		os.symlink(dense_bw[0], path)
+		paths.append(str(path))
+	starts = numpy.arange(0, 240_000, 1000)
+	expected = read_bigwig(dense_bw[0], 'chr1', starts, 100, n_jobs=1)
+	readers = [BigWigReader(path) for path in paths]
+	open_now = len(os.listdir('/proc/self/fd')) if os.path.isdir('/proc/self/fd') else 64
+	resource.setrlimit(resource.RLIMIT_NOFILE, (min(open_now + 100, hard), hard))
+	try:
+		out = read_bigwig(readers, 'chr1', starts, 100, n_jobs=4)
+	finally:
+		resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+	for i in range(300):
+		assert_identical(out[:, i], expected)
+
+
+def test_too_many_open_files_says_so(dense_bw, monkeypatch):
+	"""The error of a process at its limit of open files names the limit and
+	what to do about it."""
+
+	import errno
+
+	def full(*args, **kwargs):
+		raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+
+	bw = BigWigReader(dense_bw[0])
+	monkeypatch.setattr(figwig.bigwig.os, 'open', full)
+	with pytest.raises(OSError, match='ulimit -n'):
+		bw.read('chr1', [0], 100, n_jobs=1)
