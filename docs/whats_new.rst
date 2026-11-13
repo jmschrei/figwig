@@ -6,29 +6,27 @@ Release History
 ===============
 
 
-Unreleased
-==========
+Version 0.3.1
+=============
+
+figwig 0.3.1 adds ``figwig fiberbam2fw``, which converts a Fiber-seq BAM into a figwig file, and fixes reads and ``bw2fw`` conversions of more than about a thousand bigWigs at once. It is back-compatible: no public API changes, and the files the other commands write are the same to the byte.
 
 Converters and commands
 -----------------------
 
-	- ``figwig fiberbam2fw`` writes a coordinate-sorted Fiber-seq BAM as one figwig file with five tracks per read: the m6A and 5mC probabilities of its MM and ML tags, and its nucleosomes, MSPs and FIRE qualities (the ``ns``, ``nl``, ``as``, ``al`` and ``aq`` tags, or ``MA`` and ``AQ``), on reference coordinates, in groups of 1,024 consecutive reads of a channel, with each alignment's span, strand, mapping quality, flag, length, ``HP``, ``RG``, ``rq``, ``ec``, sample and per-channel call counts as attributes. ``read(..., channels="channel", items="read")`` then gives (windows, reads, channels, width). The values match ``ft extract --all`` for every call and footprint of the 8,647 alignments of a K562 BAM, and htslib's reading of MM and ML at every probability. The 99,685 alignments of its large BAM convert in 13 s on 4 threads and 35 s on one, into 605 MB (886 MB as BAM), and the file does not depend on the thread count. See :doc:`converters` and :doc:`benchmarks`.
+	- ``figwig fiberbam2fw`` writes a coordinate-sorted Fiber-seq BAM as one figwig file with five tracks per read, on reference coordinates: the m6A and 5mC probabilities of its MM and ML tags, and its nucleosomes, MSPs and FIRE qualities (the ``ns``, ``nl``, ``as``, ``al`` and ``aq`` tags, or ``MA`` and ``AQ``). Each alignment's span, strand, mapping quality, flag, length and tags are attributes of its tracks, and ``read(..., channels="channel", items="read")`` gives (windows, reads, channels, width). The values match ``ft extract --all`` and htslib's reading of MM and ML. The 99,685 alignments of a K562 BAM convert in 13 s on 4 threads (AMD EPYC 9575F) into 605 MB, where the BAM is 886 MB. See :doc:`converters`.
 
-
-	- ``write_sparse`` skips its range check of declared integer dtypes when the values' dtype fits every one of them, and cuts a call's batches by a binary search for the end of each tile, where it divided every entry's position. The 99,685 reads of a Fiber-seq BAM, written by ``figwig fiberbam2fw`` as 498,425 uint8 tracks, take 8.5 s on 16 threads and 13 s on 4, where they took 15.6 s and 17 s. The file is the same to the byte.
-
-
-Benchmarks
-----------
-
-	- ``benchmarks/readme_table/run.py`` measures the rows of the README's table of read time, write time and file size by assay, against the tool most people use for each (pybigtools and pyBigWig for bigWigs, SnapATAC2 and a scipy matrix for scATAC-seq, a pysam loop and a scipy matrix for Fiber-seq, cooler and scool for Hi-C), and ``--update-readme`` rewrites the table from ``benchmarks/readme_table/results.json``, where the README's numbers were typed by hand from several pages. Each measurement is its own process, the median of three, and each row checks that figwig and its baseline return the same values.
-
+	- ``write_sparse`` checks the range of declared integer dtypes and cuts its batches faster, which takes the 498,425 tracks of that conversion from 15.6 s to 8.5 s on 16 threads. The file is the same to the byte.
 
 Reading
 -------
 
-	- ``read_bigwig`` and ``BigWigReader.read`` open each bigWig when its first batch runs and close it after its last, where they held a file descriptor for every file from the start of the call to its end. A read, or a ``figwig bw2fw`` of a group of 1,024 bigWigs, now holds about ``n_jobs`` descriptors at a time, where it stopped with ``[Errno 24] Too many open files`` at the usual soft limit of 1,024. Reads of 1, 3, 48 and 1,024 files on 1 and 8 threads took the same time as before, within 1% by the median of 7 runs, and returned the same values. A process at its limit of open files now raises an ``OSError`` that names the limit and ``ulimit -n``.
+	- ``read_bigwig`` and ``BigWigReader.read`` hold a file open only from its first batch to its last, where they held every file open for the whole call, so a read or a ``figwig bw2fw`` of 1,024 bigWigs stopped with ``[Errno 24] Too many open files`` at the usual limit. A process at its limit now gets an ``OSError`` that names ``ulimit -n``. Read times are unchanged.
 
+Benchmarks
+----------
+
+	- ``benchmarks/readme_table/run.py`` measures the rows of the README's table of read time, write time and size by assay against the tool most people use for each, and ``--update-readme`` rewrites the table from ``benchmarks/readme_table/results.json``.
 
 Version 0.3.0
 =============
