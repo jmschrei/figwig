@@ -375,3 +375,111 @@ def test_summary_index_cannot_be_asked_of_an_append(tmp_path, bigwigs):
 	with pytest.raises(SystemExit, match="--summary-index is not supported with "
 			"--append"):
 		main(['bw2fw', '-o', out, '--append', '--summary-index', bigwigs[1]])
+
+
+MANY_SIZES = {'chr1': 50_003, 'chr2': 20_011, 'chrM': 16_569}
+
+
+@pytest.fixture(scope='module')
+def many_bigwigs(tmp_path_factory):
+	"""19 different bigWigs, more than two groups of the default 8 tracks:
+	per-base counts, float intervals, intervals with NaN values, and large
+	integer intervals in turn, one without any data and one without data on
+	chr2. Returns (paths, values), values[i][chrom] being file i's dense
+	float32 values with 0 where no interval is."""
+
+	from figwig import BigWigWriter
+
+	directory = tmp_path_factory.mktemp('many')
+	paths, values = [], []
+	for i in range(19):
+		rng = numpy.random.default_rng(500 + i)
+		path = str(directory / 'track{:02d}.bw'.format(i))
+		dense = {chrom: numpy.zeros(length, dtype=numpy.float32) for chrom,
+			length in MANY_SIZES.items()}
+		if i == 5:
+			with BigWigWriter(path, MANY_SIZES, zooms=0):
+				pass
+			paths.append(path)
+			values.append(dense)
+			continue
+
+		chroms, starts, ends, items = [], [], [], []
+		for chrom, length in MANY_SIZES.items():
+			if i == 11 and chrom == 'chr2':
+				continue
+			if i % 4 == 0:
+				positions = numpy.sort(rng.choice(length, length // 50, replace=False))
+				counts = rng.integers(1, 200, len(positions)).astype(numpy.float32)
+				dense[chrom][positions] = counts
+				chroms += [chrom] * len(positions)
+				starts.append(positions)
+				ends.append(positions + 1)
+				items.append(counts)
+				continue
+			bounds = numpy.sort(rng.choice(length, 2 * (length // 300),
+				replace=False)).reshape(-1, 2)
+			if i % 4 == 1:
+				interval_values = rng.normal(0, 3, len(bounds))
+			elif i % 4 == 2:
+				interval_values = rng.normal(5, 1, len(bounds))
+				interval_values[rng.random(len(bounds)) < 0.2] = numpy.nan
+			else:
+				interval_values = rng.integers(1, 100_000, len(bounds))
+			interval_values = interval_values.astype(numpy.float32)
+			for (start, end), value in zip(bounds, interval_values):
+				dense[chrom][start:end] = value
+			chroms += [chrom] * len(bounds)
+			starts.append(bounds[:, 0])
+			ends.append(bounds[:, 1])
+			items.append(interval_values)
+		if i % 4 == 2:
+			# figwig's writer leaves NaN values out, so pybigtools writes these.
+			from . import writers
+			writers.write_bigwig(path, MANY_SIZES, [(chrom, int(start), int(end), float(
+				value)) for chrom, start, end, value in zip(chroms, numpy.concatenate(
+				starts), numpy.concatenate(ends), numpy.concatenate(items))])
+		else:
+			write_bigwig(path, MANY_SIZES, chroms, numpy.concatenate(starts),
+				numpy.concatenate(items), ends=numpy.concatenate(ends), zooms=0)
+		paths.append(path)
+		values.append(dense)
+	return paths, values
+
+
+def test_bigwigs_of_several_groups_cut_into_pieces(tmp_path, many_bigwigs,
+		monkeypatch):
+	"""19 bigWigs make groups of 8, 8 and 3 tracks, each track the values of
+	its bigWig. Read in pieces of 3,000 bases as windows of 1,000, so that
+	every chromosome is several pieces cut inside tiles of 1,024 bases, and
+	each piece is read while the last is written, on four threads, the file
+	is byte for byte the one read in a piece per chromosome on one thread."""
+
+	paths, values = many_bigwigs
+	whole = str(tmp_path / 'whole.fw')
+	main(['bw2fw', '-o', whole, '-t', '1024', '-p', '1'] + paths)
+
+	reader = FigWigReader(whole)
+	assert [track['name'] for track in reader.tracks] == ['track{:02d}'.format(i)
+		for i in range(19)]
+	assert [track['group'] for track in reader.tracks] == [0] * 8 + [1] * 8 + \
+		[2] * 3
+	assert reader.chrom_sizes == MANY_SIZES
+	for chrom, length in MANY_SIZES.items():
+		assert_identical(reader.read(chrom, [0], length, dtype='float32')[0],
+			numpy.stack([value[chrom] for value in values]))
+
+	# A loader's random windows of every track read as they do from the bigWigs.
+	rng = numpy.random.default_rng(12)
+	chroms = rng.choice(list(MANY_SIZES), size=200)
+	starts = rng.integers(0, [MANY_SIZES[chrom] for chrom in chroms])
+	assert_identical(read_figwig(whole, chroms, starts, 1000, dtype='float32',
+		n_jobs=4), read_bigwig(paths, chroms, starts, 1000, keep_nan=True))
+
+	monkeypatch.setattr(figwig.bw2fw, '_PIECE', 3000)
+	monkeypatch.setattr(figwig.bw2fw, '_PIECE_BYTES', 1)
+	monkeypatch.setattr(figwig.bw2fw, '_WINDOW', 1000)
+	pieces = str(tmp_path / 'pieces.fw')
+	main(['bw2fw', '-o', pieces, '-t', '1024', '-p', '4'] + paths)
+	with open(whole, 'rb') as a, open(pieces, 'rb') as b:
+		assert a.read() == b.read()

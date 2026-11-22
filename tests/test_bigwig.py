@@ -580,6 +580,56 @@ def test_shared_pool_runs_no_more_than_n_jobs(dense_bw, monkeypatch):
 	assert 1 <= most[0] <= 2
 
 
+@pytest.mark.skipif(not hasattr(os, 'fork'), reason="no fork on this platform")
+def test_reads_in_a_forked_child_after_a_threaded_read(dense_bw, sparse_bw,
+	monkeypatch):
+	"""A child forked after the parent's reads made the shared pool, as a
+	DataLoader's workers are, makes a pool of its own, whose threads exist,
+	and reads what the parent read, instead of waiting forever on the
+	parent's threads. The parent waits a minute at most, so that the test
+	fails rather than hangs."""
+
+	import time
+	import signal
+
+	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
+	paths = [dense_bw[0], sparse_bw[0], dense_bw[0]]
+	starts = numpy.arange(0, 110_000, 1000)
+	want = read_bigwig(paths, 'chr1', starts, 300, n_jobs=4)
+	assert figwig.bigwig._POOL is not None
+	assert figwig.bigwig._POOL[0] == os.getpid()
+
+	read_end, write_end = os.pipe()
+	with warnings.catch_warnings():
+		warnings.simplefilter('ignore')
+		pid = os.fork()
+	if pid == 0:
+		code = 1
+		try:
+			got = read_bigwig(paths, 'chr1', starts, 300, n_jobs=4)
+			os.write(write_end, b'1' if (got.tobytes() == want.tobytes() and
+				figwig.bigwig._POOL[0] == os.getpid()) else b'0')
+			code = 0
+		finally:
+			os._exit(code)
+
+	os.close(write_end)
+	deadline = time.monotonic() + 60
+	while True:
+		done, status = os.waitpid(pid, os.WNOHANG)
+		if done:
+			break
+		if time.monotonic() > deadline:
+			os.kill(pid, signal.SIGKILL)
+			os.waitpid(pid, 0)
+			os.close(read_end)
+			pytest.fail("the forked child's read did not finish in a minute")
+		time.sleep(0.05)
+	answer = os.read(read_end, 1)
+	os.close(read_end)
+	assert status == 0 and answer == b'1'
+
+
 def test_kernels_compile_on_the_calling_thread(tmp_path, monkeypatch):
 	"""Each kernel is called first on the calling thread when it has not been
 	compiled, the default decoder's inflater for the first compressed file
@@ -1276,6 +1326,69 @@ def test_many_files_are_open_a_few_at_a_time(dense_bw, tmp_path):
 		resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
 	for i in range(300):
 		assert_identical(out[:, i], expected)
+
+
+@pytest.fixture(scope='module')
+def distinct_bigwigs(tmp_path_factory):
+	"""300 bigWigs of intervals, each with values no other file has (file i's
+	are 1000 i + 1 to 1000 i + 999), and the dense float32 values of each;
+	file 7 has no data on chr2. Returns (paths, chrom_sizes, values)."""
+
+	chrom_sizes = {'chr1': 20_000, 'chr2': 5_000}
+	directory = tmp_path_factory.mktemp('distinct')
+	paths, values = [], []
+	for i in range(300):
+		rng = numpy.random.default_rng(1000 + i)
+		dense = {chrom: numpy.zeros(length, dtype=numpy.float32) for chrom, length
+			in chrom_sizes.items()}
+		chroms, starts, ends, items = [], [], [], []
+		for chrom, length in chrom_sizes.items():
+			if i == 7 and chrom == 'chr2':
+				continue
+			bounds = numpy.sort(rng.choice(length, 2 * (length // 100),
+				replace=False))
+			for start, end in bounds.reshape(-1, 2):
+				value = 1000 * i + int(rng.integers(1, 1000))
+				dense[chrom][start:end] = value
+				chroms.append(chrom)
+				starts.append(start)
+				ends.append(end)
+				items.append(value)
+		path = str(directory / 'track_{}.bw'.format(i))
+		figwig.write_bigwig(path, chrom_sizes, chroms, numpy.array(starts),
+			numpy.array(items, dtype=numpy.float32), ends=numpy.array(ends), zooms=0)
+		paths.append(path)
+		values.append(dense)
+	return paths, chrom_sizes, values
+
+
+def test_many_distinct_files_keep_their_channels(distinct_bigwigs, monkeypatch):
+	"""Channel i of a read of 300 different bigWigs, each read in batches of
+	a block on four threads with fewer descriptors than files, is file i.
+	`test_many_files_are_open_a_few_at_a_time` reads copies of one file, so
+	only this test sees a file's values land in another's channel."""
+
+	resource = pytest.importorskip('resource')
+	paths, chrom_sizes, values = distinct_bigwigs
+	monkeypatch.setattr(figwig.bigwig, '_BATCH_BLOCKS', 1)
+	rng = numpy.random.default_rng(15)
+	names = numpy.array(['chr1'] * 60 + ['chr2'] * 20)
+	starts = numpy.concatenate([rng.integers(0, 19_500, 60), rng.integers(0,
+		4_500, 20)])
+
+	soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+	open_now = len(os.listdir('/proc/self/fd')) if os.path.isdir('/proc/self/fd') else 64
+	resource.setrlimit(resource.RLIMIT_NOFILE, (min(open_now + 100, hard), hard))
+	try:
+		X = read_bigwig(paths, names, starts, 500, n_jobs=4)
+	finally:
+		resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+	assert X.shape == (80, 300, 500)
+	for i in range(300):
+		expected = numpy.stack([values[i][chrom][start:start + 500] for chrom, start
+			in zip(names, starts)])
+		assert_identical(X[:, i], expected)
 
 
 def test_too_many_open_files_says_so(dense_bw, monkeypatch):

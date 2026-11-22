@@ -290,3 +290,160 @@ def test_cli_runs_in_a_subprocess(tmp_path):
 		env=ENV, capture_output=True, text=True, timeout=600)
 	assert result.returncode == 0, result.stderr
 	assert 'unused bytes\t0' in result.stdout
+
+
+###
+# Read plans of a file of many tracks and groups
+
+PLAN_SIZES = {'chr1': 40_000, 'chr2': 9_001, 'chrM': 70}
+PLAN_WIDTH = 700
+
+
+@pytest.fixture(scope='module')
+def plan_file(tmp_path_factory):
+	"""24 tracks in 4 groups of 6, tile 64: sparse counts, dense counts,
+	float32 values in eighths, and one track of runs, written whole. Every
+	value is an integer or an eighth, so every sum below is exact in float64
+	in any order. Returns (path, {chrom: (24, length) float64})."""
+
+	rng = numpy.random.default_rng(41)
+	tracks = [{'name': 't{}'.format(i)} if i % 3 != 2 else {'name': 't{}'.format(
+		i), 'dtype': 'float32'} for i in range(24)]
+	expected = {}
+	for chrom, length in PLAN_SIZES.items():
+		values = numpy.zeros((24, length))
+		for i in range(24):
+			if i == 4:
+				cuts = numpy.sort(rng.choice(length, max(1, length // 150),
+					replace=False))
+				values[i] = numpy.repeat(rng.integers(0, 9, len(cuts) + 1),
+					numpy.diff(numpy.concatenate([[0], cuts, [length]])))
+			elif i % 3 == 0:
+				values[i] = rng.integers(1, 50, length) * (rng.random(length) < 0.02)
+			elif i % 3 == 1:
+				values[i] = rng.integers(0, 3000, length) * (rng.random(length) < 0.6)
+			else:
+				values[i] = rng.integers(-800, 800, length) / 8 * (rng.random(length)
+					< 0.3)
+		expected[chrom] = values
+
+	path = str(tmp_path_factory.mktemp('plans') / 'plans.fw')
+	with FigWigWriter(path, PLAN_SIZES, tracks, tile=64, groups=6,
+			n_jobs=2) as writer:
+		for chrom, values in expected.items():
+			writer.write(chrom, [0], values[None])
+	assert max(track['group'] for track in FigWigReader(path).tracks) == 3
+	return path, expected
+
+
+def _plan_windows(rng, n, clustered=False):
+	"""Random windows of PLAN_WIDTH, some running past their chromosome's
+	end, or with `clustered` all within 3,700 bases of chr1, so that a read
+	takes few chunks but many (tile, window) pairs and its tasks are split;
+	and those of them that end inside their chromosome."""
+
+	names = numpy.array(list(PLAN_SIZES))
+	lengths = numpy.array(list(PLAN_SIZES.values()))
+	picked = rng.choice(3, size=n, p=[1, 0, 0] if clustered else [0.75, 0.24,
+		0.01])
+	chroms = names[picked]
+	starts = (rng.integers(1000, 4000, n) if clustered else rng.integers(0,
+		lengths[picked])).astype(numpy.int64)
+	inside = starts + PLAN_WIDTH <= lengths[picked]
+	return chroms, starts, inside
+
+
+def _plan_expected(expected, chroms, starts, tracks=None):
+	"""(n, tracks, PLAN_WIDTH) float64, NaN past a chromosome's end."""
+
+	tracks = list(range(24)) if tracks is None else tracks
+	out = numpy.full((len(starts), len(tracks), PLAN_WIDTH), numpy.nan)
+	for i, (chrom, start) in enumerate(zip(chroms, starts)):
+		values = expected[chrom][tracks, start:start + PLAN_WIDTH]
+		out[i, :, :values.shape[1]] = values
+	return out
+
+
+def _check_plan_reads(path, expected, rng, n_jobs, clustered):
+	reader = FigWigReader(path)
+	chroms, starts, inside = _plan_windows(rng, 120, clustered)
+	dense = _plan_expected(expected, chroms, starts)
+
+	assert_identical(reader.read(chroms, starts, PLAN_WIDTH, dtype='float64',
+		n_jobs=n_jobs), dense)
+
+	# One track of 24, below one in _FEW_TRACKS, and a few out of order.
+	for tracks in ([5], [23, 0, 12, 12]):
+		assert_identical(reader.read(chroms, starts, PLAN_WIDTH, tracks=tracks,
+			dtype='float64', n_jobs=n_jobs), _plan_expected(expected, chroms,
+			starts, tracks))
+
+	found = reader.read(chroms, starts, PLAN_WIDTH, sparse=True, dtype='float64',
+		n_jobs=n_jobs)
+	assert found.shape == dense.shape
+	got = numpy.zeros(dense.shape)
+	got[found.rows, found.channels, found.offsets] = found.values
+	numpy.testing.assert_array_equal(got, numpy.nan_to_num(dense, nan=0))
+	order = numpy.lexsort((found.offsets, found.channels, found.rows))
+	numpy.testing.assert_array_equal(order, numpy.arange(len(order)))
+
+	within = dense[inside]
+	assert_identical(reader.read(chroms[inside], starts[inside], PLAN_WIDTH,
+		bins=50, dtype='float64', n_jobs=n_jobs), within.reshape(len(within), 24,
+		PLAN_WIDTH // 50, 50).sum(-1))
+	labels = [i % 3 for i in range(24)]
+	y = reader.read(chroms[inside], starts[inside], PLAN_WIDTH, labels=labels,
+		dtype='float64', n_jobs=n_jobs)
+	for label in range(3):
+		numpy.testing.assert_array_equal(y[:, label], within[:, label::3].sum(1))
+
+	lengths = numpy.array([PLAN_SIZES[chrom] for chrom in chroms])
+	ends = numpy.minimum(starts + rng.integers(1, 5000, len(starts)), lengths)
+	sums = reader.sums(chroms, starts, ends, dtype='float64', n_jobs=n_jobs)
+	numpy.testing.assert_array_equal(sums, numpy.array([expected[chrom][:,
+		start:end].sum(-1) for chrom, start, end in zip(chroms, starts, ends)]))
+
+
+@pytest.mark.parametrize('name, value', [
+	('_THREAD_OUT_BYTES', 1), ('_THREAD_OUT_BYTES', 1 << 40),
+	('_GROUP_BATCH_BYTES', 1), ('_GROUP_BATCH_BYTES', 1 << 40),
+	('_MIN_BATCH_CHUNKS', 1), ('_MIN_BATCH_CHUNKS', 1 << 20),
+	('_READ_BATCHES_PER_THREAD', 1), ('_READ_BATCHES_PER_THREAD', 64),
+	('_SPLIT_PAIRS', 1), ('_SPLIT_PAIRS', 1 << 40),
+	('_POOL_BYTES', 1), ('_POOL_BYTES', 1 << 40)])
+def test_read_plan_thresholds_never_change_values(plan_file, monkeypatch, name,
+		value):
+	"""Dense, few-track, sparse, binned, labelled and interval reads of a
+	file of four groups give the file's values on eight threads with each
+	threshold of the read planner at either extreme, in batches of the
+	default size and of at most 8 chunks, over windows spread over the
+	genome and windows packed into a few tiles, whose reads are fewer
+	batches than threads and so are split into tasks. No other test
+	sets these thresholds, and the small files elsewhere never reach most
+	of them."""
+
+	path, expected = plan_file
+	monkeypatch.setattr(figwig.figwig, name, value)
+	for batch_chunks in (figwig.figwig._BATCH_CHUNKS, 8):
+		monkeypatch.setattr(figwig.figwig, '_BATCH_CHUNKS', batch_chunks)
+		for clustered in (False, True):
+			_check_plan_reads(path, expected, numpy.random.default_rng(42), 8,
+				clustered)
+
+
+def test_loader_batches_read_as_the_file_holds(plan_file):
+	"""200 reads of 32 windows from one reader, as a data loader makes them,
+	switching threads and tracks between reads, each give the file's values:
+	nothing a read leaves on the reader (its pool, the group indexes it
+	loaded) changes a later one."""
+
+	path, expected = plan_file
+	reader = FigWigReader(path)
+	rng = numpy.random.default_rng(43)
+	subsets = [None, [5], [23, 0, 12], list(range(0, 24, 2)), [1, 7, 13, 19]]
+	for k in range(200):
+		chroms, starts, _ = _plan_windows(rng, 32)
+		tracks = subsets[k % len(subsets)]
+		y = reader.read(chroms, starts, PLAN_WIDTH, tracks=tracks, dtype='float64',
+			n_jobs=(1, 4, 2)[k % 3])
+		assert_identical(y, _plan_expected(expected, chroms, starts, tracks))

@@ -6,6 +6,22 @@ Release History
 ===============
 
 
+Unreleased
+==========
+
+Tests
+-----
+
+	- ``tests/test_pipeline.py`` follows a fragments file of four cells to the arrays a data loader reads, by every route: ``bam2bw`` read by ``read_bigwig`` and by pyBigWig, those bigWigs through ``bw2fw``, ``bam2fw`` per file and per barcode, and back through ``fw2bw``, in cut-site and coverage modes, against counts made with numpy from the fragments. Each command was tested only against the one before it, on its own inputs, so no test read a bigWig ``bam2bw`` wrote through ``bw2fw``.
+
+	- A read of 300 bigWigs now checks that channel i holds file i. The test it joins read 300 copies of one file, so a file's values landing in another's channel passed it.
+
+	- ``bw2fw`` is tested with 19 bigWigs, groups of 8, 8 and 3 tracks, and with each chromosome cut into several pieces inside tiles, against a file written in one piece per chromosome on one thread, byte for byte. The tests used three bigWigs and chromosomes shorter than a piece, and a piece written with the next piece's values passed every one of them.
+
+	- A bigWig read in a process forked after a threaded read, as a DataLoader's workers are, is tested, and fails after a minute rather than hanging. Without the check that remakes the shared pool after a fork, the child waits on the parent's threads forever.
+
+	- Reads of a figwig file of 24 tracks in four groups (dense, few tracks, sparse, binned, labelled and interval sums) are checked against numpy with each of six read-planner thresholds that no test set at either extreme, and 200 loader-sized reads from one reader switch threads and tracks between reads.
+
 Version 0.3.1
 =============
 
