@@ -6,28 +6,24 @@ Release History
 ===============
 
 
-Unreleased
-==========
+Version 0.3.2
+=============
+
+figwig 0.3.2 adds readers of some of a figwig file's tracks and a way to read windows on chromosomes a file does not have. It is back-compatible: a reader opened as before, and a read without the new argument, behave and time as in 0.3.1.
 
 Reading
 -------
 
-	- ``FigWigReader(path, tracks=...)`` opens a reader that holds some of a file's tracks, by name, by index, or as a dict of attributes that ``select`` matches. The reader acts as if the file held only those tracks: ``tracks``, ``stats`` and ``select`` list them, the ``tracks`` argument of ``read``, ``sums``, ``tile_sums`` and ``read_entries`` indexes them, and a read without ``tracks`` reads them all, in the order given. Code that reads every track of the reader it is handed, such as a data loader or a package that takes a list of signal files, could only be given the whole file, or a reader and a list of tracks to carry beside it. Reads of a reader of the whole file are unchanged, and take the same time.
+	- ``FigWigReader(path, tracks=...)`` opens a reader that holds some of a file's tracks, by name, index or a dict of attributes for ``select``. ``tracks``, ``stats`` and ``select`` list only those, every method's ``tracks=`` indexes them, and a read without ``tracks`` reads them all, so code that reads every track of the reader it is given no longer has to take the whole file.
 
-	- ``FigWigReader.read`` and ``read_figwig`` take ``absent="zero"``, which reads a window on a chromosome the file does not have as 0 throughout, or as no entries with ``sparse=True``, where such a window raised a ``ValueError``, as it still does by default. Loci from a peak file with contigs of another build had to be filtered against ``chrom_sizes`` first, and a caller that wanted a bigWig's behaviour, zeros for those windows, had to read the rest and put the rows back in place itself.
+	- ``FigWigReader.read`` and ``read_figwig`` take ``absent="zero"``, which reads a window on a chromosome the file does not have as 0, or as no entries with ``sparse=True``, where it raised a ``ValueError``, as it still does by default.
 
 Tests
 -----
 
-	- ``tests/test_pipeline.py`` follows a fragments file of four cells to the arrays a data loader reads, by every route: ``bam2bw`` read by ``read_bigwig`` and by pyBigWig, those bigWigs through ``bw2fw``, ``bam2fw`` per file and per barcode, and back through ``fw2bw``, in cut-site and coverage modes, against counts made with numpy from the fragments. Each command was tested only against the one before it, on its own inputs, so no test read a bigWig ``bam2bw`` wrote through ``bw2fw``.
+	- ``tests/test_pipeline.py`` follows a fragments file through ``bam2bw``, ``bw2fw``, ``bam2fw`` and ``fw2bw`` to the arrays a loader reads, against counts made with numpy, where each command had been tested only against the one before it.
 
-	- A read of 300 bigWigs now checks that channel i holds file i. The test it joins read 300 copies of one file, so a file's values landing in another's channel passed it.
-
-	- ``bw2fw`` is tested with 19 bigWigs, groups of 8, 8 and 3 tracks, and with each chromosome cut into several pieces inside tiles, against a file written in one piece per chromosome on one thread, byte for byte. The tests used three bigWigs and chromosomes shorter than a piece, and a piece written with the next piece's values passed every one of them.
-
-	- A bigWig read in a process forked after a threaded read, as a DataLoader's workers are, is tested, and fails after a minute rather than hanging. Without the check that remakes the shared pool after a fork, the child waits on the parent's threads forever.
-
-	- Reads of a figwig file of 24 tracks in four groups (dense, few tracks, sparse, binned, labelled and interval sums) are checked against numpy with each of six read-planner thresholds that no test set at either extreme, and 200 loader-sized reads from one reader switch threads and tracks between reads.
+	- Tests that a read of 300 bigWigs puts file i in channel i, that ``bw2fw`` of 19 bigWigs in groups and in pieces matches a one-piece write byte for byte, that a bigWig read after a fork does not hang, and that figwig reads match numpy at each extreme of six read-planner thresholds.
 
 Version 0.3.1
 =============
