@@ -4,29 +4,24 @@
 
 [[docs](https://figwig.readthedocs.io/en/latest/index.html)][[release notes](https://figwig.readthedocs.io/en/latest/whats_new.html)]
 
-A fast, multithreaded reader and writer of bigWig and figwig files, into and out of
-numpy. Also contains a formal specification of the figwig file format, which holds
-any number of per-base tracks over one genome with a JSON record of attributes for
-each, and reads windows from any subset of them in one call, into
-`(windows, tracks, width)`. `figwig bw2fw`, `fw2bw` and `bam2fw` convert bigWigs
-and reads to and from a figwig file.
+The figwig is a universal data format for genomics data, allowing you to store any
+number of signal tracks, single-cell experiments, Hi-C data (and scHi-C!), 
+fiber-seq and other single-molecule experiments at basepair resolution in a consistent
+and optimized file format. The figwig has been optimized for both reading and writing,
+supports 1D, 2D, and non-contiguous reads, and is built with machine learning and AI
+usage in mind. The files are usually significantly smaller than corresponding bigwigs,
+due to a combination of compression tricks and using the smallest dtype to store
+data, down to uint8, instead of always using float32.
+
+This repository implements fast, multi-threaded readers and writers of bigWig and
+figwig files, into and out of numpy. It also contains a formal specification for the
+figwig file format which can be used to create your own readers and writers in
+any language that are provably correct. It also contains command-line tools for
+converting various forms of data, including fragment files, BAM files, and bigWig
+files into figwig files. Finally, there is an initial effort to support direct
+decoding of figwigs onto GPUs (with any framework) for deep learning models.
 
 Built on work from Nezar Abdennur and Jack Huey.
-
-Loading training data for a genomics model means reading the signal under tens
-or hundreds of thousands of windows: 1,000 bp around every peak and background
-region of an experiment, say. figwig reads all of them in one call, straight
-into a float32 array, from one bigWig or from several at once, and writes
-bigWigs from the same windows, such as a model's predictions, or from
-intervals. The common readers make one call per window, and each call holds
-Python's GIL, so adding threads does not help them. figwig decompresses and
-compresses with zlib or libdeflate and decodes with numba, all without the
-GIL, so its threads run in parallel. It depends only on numpy and numba.
-
-Its command, `figwig bam2bw`, turns SAM/BAM files of reads, or BED/tsv files
-of fragments, into bigWigs of per-base counts. It is
-[bam2bw](https://github.com/jmschrei/bam2bw) with faster readers, the same
-outputs, and `-c` added.
 
 | | figwig | fastest other tool |
 |---|---|---|
