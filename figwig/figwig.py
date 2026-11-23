@@ -4000,6 +4000,13 @@ class FigWigReader:
 	Dataset read by DataLoader workers; a pickled reader carries no index,
 	and reads it again in the process that unpickles it.
 
+	With `tracks`, the reader holds a few of the file's tracks, such as the
+	assays of one cell type out of an atlas, and acts as if the file held
+	only those, in the order given: `tracks`, `stats` and `select` list
+	them alone, a method's `tracks` argument indexes them, and a read with
+	no `tracks` reads them all. This is what code that takes a reader and
+	reads every track of it, such as a data loader, should be handed.
+
 	Parameters
 	----------
 	path: str or os.PathLike
@@ -4013,6 +4020,12 @@ class FigWigReader:
 		tiles an interval covers whole from the file's tile sums and does not
 		read their chunks. Default is False.
 
+	tracks: str, int, list of str or int, numpy.ndarray, dict, or None, optional
+		The tracks the reader holds, by name or index into the file's
+		tracks, in the order to read them, or a dict of attributes that
+		selects every track with those values, as `select` does. Each track
+		is named once. None holds every track. Default is None.
+
 	Attributes
 	----------
 	path: str
@@ -4023,7 +4036,8 @@ class FigWigReader:
 
 	tracks: list of dict
 		Each track's record: its 'name', 'dtype' and 'group', and the
-		attributes it was written with.
+		attributes it was written with; with `tracks`, those of the tracks
+		held, in their order.
 
 	genome: str or None
 		The reference genome the file names, or None.
@@ -4045,9 +4059,11 @@ class FigWigReader:
 		whose uncovered bases are NaN keeps those of its covered ones.
 	"""
 
-	def __init__(self, path: str | os.PathLike, verify: bool = False):
+	def __init__(self, path: str | os.PathLike, verify: bool = False,
+		tracks: str | int | list | numpy.ndarray | dict | None = None):
 		self.path = os.path.abspath(os.fspath(path))
 		self.verify = bool(verify)
+		held = tracks
 		error = "{} cannot be read as a figwig file".format(self.path)
 
 		fd = _open_read(self.path)
@@ -4187,13 +4203,13 @@ class FigWigReader:
 				dtype=numpy.int64)
 			track_ids = {track['name']: i for i, track in enumerate(tracks)}
 
-		self.tracks = tracks
+		self._file_tracks = tracks
 		self.genome = metadata.get('genome')
 		self.attributes = metadata.get('attributes') or {}
 		self.written_by = metadata.get('figwig')
 		self._metadata = metadata
 		self.order = order
-		self.stats = stats
+		self._file_stats = stats
 		self.tile = tile
 		self.chrom_sizes = dict(chroms)
 		self._codec = codec
@@ -4204,7 +4220,7 @@ class FigWigReader:
 		self._identity = (stat.st_ino, stat.st_dev, header_bytes)
 		self._directory = numpy.frombuffer(directory, dtype='<u8').astype(
 			numpy.int64)
-		self._track_ids = track_ids
+		self._file_track_ids = track_ids
 		self._group_of = group_of
 		by_group = numpy.argsort(self._group_of, kind='stable')
 		counts = numpy.bincount(self._group_of, minlength=n_groups)
@@ -4237,6 +4253,66 @@ class FigWigReader:
 		self._runs = [None] * n_groups
 		self._index_lock = threading.Lock()
 		self._pool = None
+		self._hold(held)
+
+	def _hold(self, tracks):
+		"""Set the tracks the reader holds: `_view`, their ids in the file
+		in the order held, or None for every track, `_position`, each file
+		track's index among them or -1, and the public `tracks`, `stats` and
+		`_track_ids` over those alone."""
+
+		self._view = self._position = None
+		self.tracks = self._file_tracks
+		self.stats = self._file_stats
+		self._track_ids = self._file_track_ids
+		if tracks is None:
+			return
+
+		if isinstance(tracks, dict):
+			ids = self.select(**tracks)
+			if len(ids) == 0:
+				raise ValueError("no track has the attributes {}.".format(tracks))
+		else:
+			ids, _ = _track_indices(tracks, self._file_track_ids, len(
+				self._file_tracks), "the file's")
+			if len(ids) == 0:
+				raise ValueError("tracks must name at least one track, or be None "
+					"for every track.")
+		values, counts = numpy.unique(ids, return_counts=True)
+		if (counts > 1).any():
+			repeated = values[counts > 1][0]
+			raise ValueError("track {!r} is named twice in tracks; a reader holds "
+				"each track once.".format(self._file_tracks[int(repeated)]['name']))
+
+		self._view = ids.astype(numpy.int64)
+		self._position = numpy.full(len(self._file_tracks), -1, dtype=numpy.int64)
+		self._position[self._view] = numpy.arange(len(self._view))
+		self.tracks = [self._file_tracks[i] for i in self._view.tolist()]
+		self.stats = self._file_stats[self._view]
+		self._track_ids = {track['name']: i for i, track in enumerate(
+			self.tracks)}
+
+	def _in_file(self, tracks):
+		"""The tracks a method's `tracks` argument names, among the tracks
+		the reader holds, as the file's: None for every track of a reader of
+		the whole file, and otherwise one id, when one name or index was
+		given, or an array of them."""
+
+		if self._view is None:
+			return tracks
+		if tracks is None:
+			return self._view
+		ids, single = _track_indices(tracks, self._track_ids, len(self.tracks),
+			"the reader's")
+		ids = self._view[ids]
+		return int(ids[0]) if single else ids
+
+	def _held(self, ids):
+		"""The file's tracks `ids`, all of which the reader holds, as
+		indices among the tracks it holds, for a call back into a public
+		method, which takes those."""
+
+		return ids if self._view is None else self._position[ids]
 
 	def _read_chroms(self, fd, offset, n, end, error):
 		raw = _pread(fd, end - offset, offset)
@@ -4266,8 +4342,10 @@ class FigWigReader:
 		return chroms
 
 	def __repr__(self):
-		return "FigWigReader('{}', {} tracks, {} chromosomes, {} order)".format(
-			self.path, len(self.tracks), len(self.chrom_sizes), self.order[:-1])
+		held = "{} tracks".format(len(self._file_tracks)) if self._view is None \
+			else "{} of {} tracks".format(len(self.tracks), len(self._file_tracks))
+		return "FigWigReader('{}', {}, {} chromosomes, {} order)".format(
+			self.path, held, len(self.chrom_sizes), self.order[:-1])
 
 	def __getstate__(self):
 		state = self.__dict__.copy()
@@ -4345,7 +4423,8 @@ class FigWigReader:
 		Returns
 		-------
 		tracks: numpy.ndarray, dtype=int64
-			The indices of the matching tracks, in the file's order, to pass
+			The indices of the matching tracks, in the file's order, or among
+			the tracks a reader opened with `tracks` holds, in theirs, to pass
 			to `read` as `tracks`.
 		"""
 
@@ -4785,7 +4864,7 @@ class FigWigReader:
 				"written with more tracks in the group than the summaries "
 				"hold{}.".format(
 				self.path, "summary" if level == 0 else "zoom level {}".format(
-				level), self.tracks[int(self._groups[g][0])]['name'], "" if level
+				level), self._file_tracks[int(self._groups[g][0])]['name'], "" if level
 				== 0 else ", or with fewer zoom levels"))
 		yield summary
 
@@ -4867,8 +4946,9 @@ class FigWigReader:
 		Parameters
 		----------
 		tracks: str, int, list of str or int, or None, optional
-			The tracks, by name or index. None is every track. Default is
-			None.
+			The tracks, by name or index. None is every track. For a reader
+			opened with `tracks`, these index the tracks it holds, and None is
+			all of them. Default is None.
 
 		chroms: str, list of str, or None, optional
 			The chromosomes, by name, whose tiles to give, one after another
@@ -4896,7 +4976,7 @@ class FigWigReader:
 		if level < 0:
 			raise ValueError("level must be 0 or a zoom level, not {}.".format(
 				level))
-		ids, single = self._select(tracks)
+		ids, single = self._select(self._in_file(tracks))
 		if chroms is None:
 			names = list(self.chrom_sizes)
 		else:
@@ -4973,8 +5053,8 @@ class FigWigReader:
 		out: numpy.ndarray | None = None, dtype=None, n_jobs: int = 8,
 		sparse: bool = False, labels: list | numpy.ndarray | None = None,
 		bins: int | None = None, nan: str = 'propagate', device: str | int |
-		None = None, channels: str | None = None, items: str | None = None) -> \
-		numpy.ndarray | SparseWindows:
+		None = None, channels: str | None = None, items: str | None = None,
+		absent: str = 'raise') -> numpy.ndarray | SparseWindows:
 		"""Read the per-base values of many windows of one width.
 
 		Window j is [starts[j], starts[j] + width) on chroms[j], and its
@@ -4994,15 +5074,18 @@ class FigWigReader:
 		coverage and, with `bins=width`, each window's total per track.
 
 		A base that was not written is 0. A base past the end of its
-		chromosome is NaN in a float output and 0 in an integer one. A dense
-		output of more than 8 GiB raises unless `out` is given, since a read
-		of thousands of tracks wants `sparse=True` or `labels`.
+		chromosome is NaN in a float output and 0 in an integer one. A window
+		on a chromosome the file does not have raises, or is 0 throughout
+		with `absent='zero'`. A dense output of more than 8 GiB raises unless
+		`out` is given, since a read of thousands of tracks wants
+		`sparse=True` or `labels`.
 
 		Parameters
 		----------
 		chroms: str, list of str, or numpy.ndarray of str
 			The chromosome of each window, or one name for every window.
-			Each must be one of the file's chromosomes.
+			Each must be one of the file's chromosomes, unless `absent` is
+			'zero'.
 
 		starts: list of int or numpy.ndarray of int, shape=(n,)
 			The start of each window, inclusive and base-0.
@@ -5012,8 +5095,9 @@ class FigWigReader:
 
 		tracks: str, int, list of str or int, or None, optional
 			The tracks to read, by name or index, such as what `select`
-			returns. None is every track, in the file's order. Default is
-			None.
+			returns. None is every track, in the file's order. For a reader
+			opened with `tracks`, these index the tracks it holds, and None is
+			all of them, in their order. Default is None.
 
 		out: numpy.ndarray or None, optional
 			A writeable, C-contiguous array to write the values into, of the
@@ -5075,6 +5159,15 @@ class FigWigReader:
 			With `channels`, the name of the track attribute that names the
 			item each track belongs to, such as "read". Default is None.
 
+		absent: str, optional
+			What a window on a chromosome the file does not have gives:
+			'raise' raises a ValueError naming it, and 'zero' makes it 0
+			throughout, with no entries when `sparse`, as a chromosome the
+			file holds no values on would read. A file holds the
+			chromosomes it was written with, so loci from another build, or
+			on contigs it was not written with, can name one it does not
+			have. Default is 'raise'.
+
 		Returns
 		-------
 		out: numpy.ndarray, cupy.ndarray or SparseWindows
@@ -5084,13 +5177,64 @@ class FigWigReader:
 			(n, items, channels, width).
 		"""
 
+		tracks = self._in_file(tracks)
+		if absent not in ('raise', 'zero'):
+			raise ValueError("absent must be 'raise' or 'zero', not {!r}.".format(
+				absent))
+		if absent == 'zero':
+			names, codes = _chrom_codes(chroms, len(numpy.atleast_1d(starts)))
+			held = numpy.array([name in self._tids for name in names], dtype=bool)
+			if not held.all():
+				return self._read_held(numpy.array(names, dtype=str)[codes], numpy.
+					asarray(starts), held[codes], width, tracks, out, dtype, n_jobs,
+					sparse, labels, bins, nan, device, channels, items)
+		return self._read_any(chroms, starts, width, tracks, out, dtype, n_jobs,
+			sparse, labels, bins, nan, device, channels, items)
+
+	def _read_held(self, chroms, starts, kept, width, tracks, out, dtype, n_jobs,
+		sparse, labels, bins, nan, device, channels, items):
+		"""`read` with `absent='zero'` where some windows are on chromosomes
+		the file does not have: the other windows are read alone and put in
+		their rows, and those windows' rows are 0, or hold no entries."""
+
+		if starts.shape != chroms.shape:
+			raise ValueError("starts must be one-dimensional: give one per window, "
+				"as a list or array.")
+		rows = numpy.flatnonzero(kept)
+		y = self._read_any(chroms[rows], starts[rows], width, tracks, None, dtype,
+			n_jobs, sparse, labels, bins, nan, device, channels, items)
+		n = len(kept)
+		if device is not None:
+			from ._cuda import _cupy
+			xp = _cupy()
+		else:
+			xp = numpy
+		if sparse:
+			return SparseWindows(xp.asarray(rows)[y.rows], y.channels, y.offsets,
+				y.values, (n,) + tuple(y.shape[1:]))
+
+		shape = (n,) + y.shape[1:]
+		if out is None:
+			out = xp.zeros(shape, dtype=y.dtype)
+		else:
+			if tuple(out.shape) != shape or out.dtype != y.dtype:
+				raise ValueError("out must be {} of shape {}, not {} of shape {}."
+					.format(y.dtype, shape, out.dtype, tuple(out.shape)))
+			out[xp.asarray(numpy.flatnonzero(~kept))] = 0
+		out[xp.asarray(rows)] = y
+		return out
+
+	def _read_any(self, chroms, starts, width, tracks, out, dtype, n_jobs,
+		sparse, labels, bins, nan, device, channels, items):
+		"""`read` of the file's tracks `tracks`, on the host or `device`."""
+
 		if channels is not None or items is not None:
 			ids, shape = self._arrange(tracks, channels, items)
 			if sparse or labels is not None or out is not None:
 				raise ValueError("channels cannot be given with sparse, labels or "
 					"out.")
-			y = self.read(chroms, starts, width, tracks=ids, dtype=dtype,
-				n_jobs=n_jobs, bins=bins, nan=nan, device=device)
+			y = self.read(chroms, starts, width, tracks=self._held(ids),
+				dtype=dtype, n_jobs=n_jobs, bins=bins, nan=nan, device=device)
 			return y.reshape(y.shape[:1] + shape + y.shape[2:])
 		if device is not None:
 			from ._cuda import _read_on_device
@@ -5114,7 +5258,7 @@ class FigWigReader:
 		ids, _ = self._select(tracks)
 		item_of, channel_of = [], []
 		for i in ids.tolist():
-			record = self.tracks[i]
+			record = self._file_tracks[i]
 			for key, into in ((items, item_of), (channels, channel_of)):
 				if key not in record:
 					raise ValueError("track {!r} has no attribute {!r}.".format(record[
@@ -5126,7 +5270,7 @@ class FigWigReader:
 		for i, item, channel in zip(ids.tolist(), item_of, channel_of):
 			if (item, channel) in grid:
 				raise ValueError("tracks {!r} and {!r} are both {}={!r} of {}={!r}."
-					.format(self.tracks[grid[(item, channel)]]['name'], self.tracks[i][
+					.format(self._file_tracks[grid[(item, channel)]]['name'], self._file_tracks[i][
 					'name'], channels, channel, items, item))
 			grid[(item, channel)] = i
 		arranged = []
@@ -5205,6 +5349,13 @@ class FigWigReader:
 			in its own track with `paired`.
 		"""
 
+		return self._sums(chroms, starts, ends, self._in_file(tracks), dtype,
+			n_jobs, nan, paired, device, channels, items)
+
+	def _sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan, paired,
+		device, channels, items):
+		"""`sums` of the file's tracks `tracks`."""
+
 		starts = _positions(starts, 'starts')
 		ends = _positions(ends, 'ends')
 		if ends.shape != starts.shape:
@@ -5216,7 +5367,7 @@ class FigWigReader:
 			ids, shape = self._arrange(tracks, channels, items)
 			if paired:
 				raise ValueError("channels cannot be given with paired=True.")
-			y = self.sums(chroms, starts, ends, tracks=ids, dtype=dtype,
+			y = self.sums(chroms, starts, ends, tracks=self._held(ids), dtype=dtype,
 				n_jobs=n_jobs, nan=nan, device=device)
 			return y.reshape(y.shape[:1] + shape)
 		if paired:
@@ -5270,8 +5421,8 @@ class FigWigReader:
 			return None
 		lengths = numpy.array([self.chrom_sizes[name] for name in names],
 			dtype=numpy.int64)[codes]
-		peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]), numpy.abs(
-			self.stats['max'][ids])).max())
+		peak = float(numpy.maximum(numpy.abs(self._file_stats['min'][ids]), numpy.abs(
+			self._file_stats['max'][ids])).max())
 		if peak * float((ends - starts).max()) >= 2.0 ** 53:
 			return None
 
@@ -5358,8 +5509,8 @@ class FigWigReader:
 			return True
 		unique = numpy.unique(ids)
 		info = numpy.iinfo(kind)
-		low = min(0.0, float(self.stats['min'][unique].min())) * width
-		high = max(0.0, float(self.stats['max'][unique].max())) * width
+		low = min(0.0, float(self._file_stats['min'][unique].min())) * width
+		high = max(0.0, float(self._file_stats['max'][unique].max())) * width
 		return info.min <= low and high <= info.max
 
 	def _paired_sums(self, chroms, starts, ends, tracks, dtype, n_jobs, nan):
@@ -5373,7 +5524,7 @@ class FigWigReader:
 
 		if tracks is None:
 			raise ValueError("paired=True needs one track per interval in tracks.")
-		ids, _ = _track_indices(tracks, self._track_ids, len(self.tracks),
+		ids, _ = _track_indices(tracks, self._file_track_ids, len(self._file_tracks),
 			"the file's")
 		if ids.shape != starts.shape:
 			raise ValueError("paired=True needs one track per interval, {}, not "
@@ -5391,8 +5542,8 @@ class FigWigReader:
 				name in self._tids for name in names) and starts.min() >= 0 and int(
 				starts.max()) <= 2 ** 32 - 1 - max(width, 1) and self._read_at_once(
 				ids, starts, ends, width, dtype):
-			peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]),
-				numpy.abs(self.stats['max'][ids])).max())
+			peak = float(numpy.maximum(numpy.abs(self._file_stats['min'][ids]),
+				numpy.abs(self._file_stats['max'][ids])).max())
 			if peak * width < 2.0 ** 53:
 				unique = numpy.unique(ids)
 				out = self._read(chroms, starts, max(width, 1), unique.tolist(), None,
@@ -5427,7 +5578,7 @@ class FigWigReader:
 		def one(batch):
 			mine = numpy.unique(ids[batch])
 			found = self.sums(chroms[batch], starts[batch], ends[batch],
-				tracks=mine.tolist(), dtype=dtype, n_jobs=inner, nan=nan)
+				tracks=self._held(mine).tolist(), dtype=dtype, n_jobs=inner, nan=nan)
 			return found[numpy.arange(len(batch)), numpy.searchsorted(mine,
 				ids[batch])]
 
@@ -5467,8 +5618,8 @@ class FigWigReader:
 		if len(ids) == 0 or (self._dtype_codes[ids] >= _DTYPES.index('float32')
 				).any():
 			return False
-		peak = float(numpy.maximum(numpy.abs(self.stats['min'][ids]), numpy.abs(
-			self.stats['max'][ids])).max())
+		peak = float(numpy.maximum(numpy.abs(self._file_stats['min'][ids]), numpy.abs(
+			self._file_stats['max'][ids])).max())
 		return peak * terms < limit
 
 	def _read(self, chroms, starts, width, tracks, out, dtype, n_jobs, sparse,
@@ -5930,8 +6081,9 @@ class FigWigReader:
 		Parameters
 		----------
 		tracks: str, int, list of str or int, or None, optional
-			The tracks, by name or index. None is every track. Default is
-			None.
+			The tracks, by name or index. None is every track. For a reader
+			opened with `tracks`, these index the tracks it holds, and None is
+			all of them. Default is None.
 
 		chroms: str, list of str, or None, optional
 			The chromosomes, by name. None is every chromosome, in the file's
@@ -5944,10 +6096,12 @@ class FigWigReader:
 		-------
 		entries: SparseEntries
 			The chromosome index, position, track index and value of every
-			nonzero base.
+			nonzero base; the track index is into `tracks`, which for a reader
+			opened with `tracks` lists the tracks it holds.
 		"""
 
-		ids, _ = self._select(tracks)
+		ids, _ = self._select(self._in_file(tracks))
+		held = self._held(ids)
 		if chroms is None:
 			names = list(self.chrom_sizes)
 		else:
@@ -5984,10 +6138,10 @@ class FigWigReader:
 		parts = []
 		for batch in batches:
 			found = self.read(batch, numpy.zeros(len(batch), dtype=numpy.int64),
-				widest, tracks=ids.tolist(), n_jobs=n_jobs, sparse=True)
+				widest, tracks=held.tolist(), n_jobs=n_jobs, sparse=True)
 			tids = numpy.array([self._tids[name] for name in batch],
 				dtype=numpy.int64)
-			parts.append((tids[found.rows], found.offsets, ids[found.channels],
+			parts.append((tids[found.rows], found.offsets, held[found.channels],
 				found.values))
 		if len(parts) == 1:
 			return SparseEntries(*parts[0])
@@ -5999,8 +6153,8 @@ class FigWigReader:
 		single track was named); None is every track."""
 
 		if tracks is None:
-			return numpy.arange(len(self.tracks)), False
-		ids, single = _track_indices(tracks, self._track_ids, len(self.tracks),
+			return numpy.arange(len(self._file_tracks)), False
+		ids, single = _track_indices(tracks, self._file_track_ids, len(self._file_tracks),
 			"the file's")
 		if len(ids) == 0:
 			raise ValueError("tracks must name at least one track.")
@@ -6046,15 +6200,15 @@ class FigWigReader:
 				'float32'))
 			if len(floats) > 0:
 				raise ValueError("track {!r} is {} and cannot be read as {}."
-					.format(self.tracks[int(ids[floats[0]])]['name'], self.tracks[
+					.format(self._file_tracks[int(ids[floats[0]])]['name'], self._file_tracks[
 					int(ids[floats[0]])]['dtype'], dtype))
-			outside = numpy.flatnonzero((self.stats['min'][ids] < info.min) | (
-				self.stats['max'][ids] > info.max))
+			outside = numpy.flatnonzero((self._file_stats['min'][ids] < info.min) | (
+				self._file_stats['max'][ids] > info.max))
 			if len(outside) > 0 and not summing:
 				i = int(ids[outside[0]])
 				raise ValueError("track {!r} has values from {} to {}, which {} "
-					"does not hold.".format(self.tracks[i]['name'], self.stats[i][
-					'min'], self.stats[i]['max'], dtype))
+					"does not hold.".format(self._file_tracks[i]['name'], self._file_stats[i][
+					'min'], self._file_stats[i]['max'], dtype))
 
 		return dtype
 
@@ -7046,7 +7200,7 @@ class _Task:
 				k = int(numpy.argmax(failed))
 				raise ValueError("a chunk of {} cannot be read: tile {} of the "
 					"group of {!r} is corrupt, or the file is truncated.".format(
-					reader.path, int(self.gtiles[k]), reader.tracks[reader._groups[
+					reader.path, int(self.gtiles[k]), reader._file_tracks[reader._groups[
 					self.g][0]]['name']))
 		else:
 			data = numpy.zeros(8, dtype=numpy.uint8)
@@ -7133,7 +7287,7 @@ class _BandTask:
 			k = int(numpy.argmax(failed))
 			raise ValueError("a chunk of {} cannot be read: tile {} of the "
 				"group of {!r} is corrupt, or the file is truncated.".format(
-				reader.path, int(self.gtiles[k]), reader.tracks[reader._groups[
+				reader.path, int(self.gtiles[k]), reader._file_tracks[reader._groups[
 				self.groups[j]][0]]['name']))
 
 
@@ -7243,7 +7397,8 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	dtype=None, n_jobs: int = 8, sparse: bool = False, labels: list |
 	numpy.ndarray | None = None, bins: int | None = None, nan: str =
 	'propagate', device: str | int | None = None, channels: str | None = None,
-	items: str | None = None) -> numpy.ndarray | SparseWindows:
+	items: str | None = None, absent: str = 'raise') -> numpy.ndarray | \
+	SparseWindows:
 	"""Read the per-base values of many windows of one width from a figwig
 	file.
 
@@ -7307,6 +7462,10 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 		(n, items, channels, width); see `FigWigReader.read`. Default is
 		None.
 
+	absent: str, optional
+		'raise' or 'zero', what a window on a chromosome the file does not
+		have gives; see `FigWigReader.read`. Default is 'raise'.
+
 	Returns
 	-------
 	out: numpy.ndarray, cupy.ndarray or SparseWindows
@@ -7321,7 +7480,7 @@ def read_figwig(figwig: str | os.PathLike | FigWigReader, chroms: str |
 	reader = figwig if isinstance(figwig, FigWigReader) else FigWigReader(figwig)
 	return reader.read(chroms, starts, width, tracks=tracks, out=out,
 		dtype=dtype, n_jobs=n_jobs, sparse=sparse, labels=labels, bins=bins,
-		nan=nan, device=device, channels=channels, items=items)
+		nan=nan, device=device, channels=channels, items=items, absent=absent)
 
 
 def write_figwig(path: str | os.PathLike, chrom_sizes: dict | list,

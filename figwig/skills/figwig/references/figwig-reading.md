@@ -71,7 +71,15 @@ are the same, and a file without the index is read whole as before.
   bases as 0 as `sums` does, so a chromosome's last, partial bin is its
   sum; `labels=` alone gives float64 per base, NaN there. An unknown
   chromosome raises; the file holds every chromosome it was written with,
-  so there is no warning.
+  so there is no warning. `read(..., absent="zero")` reads a window on
+  one as 0 instead (no entries with `sparse=True`), for loci with contigs
+  of another build.
+- `FigWigReader(path, tracks=["atac.+", "atac.-"])`, or `tracks={"assay":
+  "ATAC-seq"}`, holds those tracks alone: `tracks`, `stats` and `select`
+  list them, every method's `tracks=` indexes them (`tracks=0` is
+  `"atac.+"`, not the file's track 0), and a read without `tracks` reads
+  all of them. Hand such a reader to code that reads every track of the
+  reader it is given; it pickles with its tracks.
 - `select(**attributes)` matches equality on `name`, `dtype`, `group` and
   the attributes the file was written with; look at `fw.tracks` for them.
   Attributes from a metadata table are strings: `select(units=1)` matches

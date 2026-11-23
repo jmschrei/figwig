@@ -173,3 +173,29 @@ def test_a_written_file_reads_on_the_device(tmp_path):
 	reader = FigWigReader(path)
 	assert_same(reader.read('chr1', [0, 500], 500, device='cuda'), reader.read(
 		'chr1', [0, 500], 500))
+
+
+def test_held_tracks_and_absent_chromosomes_on_the_device(fw, route):
+	full = FigWigReader(fw)
+	reader = FigWigReader(fw, tracks=['signal', 'atac_minus'])
+	chroms = numpy.array(['chr1', 'chrX', 'chr2', 'chr1'])
+	starts = numpy.array([10, 0, 400, 3000])
+	held = chroms != 'chrX'
+	for kwargs in ({}, {'tracks': 1}, {'bins': 10}, {'sparse': True}):
+		got = reader.read(chroms, starts, 60, device=0, absent='zero', **kwargs)
+		want = reader.read(chroms, starts, 60, absent='zero', **kwargs)
+		if kwargs.get('sparse'):
+			for a, b in zip(got[:4], want[:4]):
+				numpy.testing.assert_array_equal(cupy.asnumpy(a), b)
+			assert got.shape == want.shape
+			continue
+		assert_same(got, want)
+		assert (want[~held] == 0).all()
+	assert_same(reader.read(chroms[held], starts[held], 60, device=0),
+		full.read(chroms[held], starts[held], 60, tracks=[2, 1]))
+	ends = starts[held] + 500
+	assert_same(reader.sums(chroms[held], starts[held], ends, device=0),
+		full.sums(chroms[held], starts[held], ends, tracks=[2, 1]))
+	out = cupy.full((4, 2, 60), 5, dtype=cupy.float32)
+	assert reader.read(chroms, starts, 60, out=out, absent='zero', device=0) is out
+	assert_same(out, reader.read(chroms, starts, 60, absent='zero'))

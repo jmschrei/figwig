@@ -5181,3 +5181,292 @@ def test_dense_chromosome_is_batched_for_every_thread(tmp_path, monkeypatch):
 	assert len(tasks) >= n_threads
 	tiles = numpy.concatenate([task.gtiles for task in tasks])
 	assert len(tiles) == len(numpy.unique(tiles)) == 600
+
+
+# A reader opened with `tracks` holds those tracks alone; a method's
+# `tracks` argument indexes them, and None reads all of them in their order.
+# Its reads must be the reads of a reader of the whole file over the same
+# tracks, in either order of file.
+
+
+HELD = [
+	(['signal', 'atac_plus'], [2, 0]),
+	([3, 1, 4], [3, 1, 4]),
+	(numpy.array([4, 0]), [4, 0]),
+	('negative', [3]),
+	(2, [2]),
+	({'assay': 'ATAC-seq'}, [0, 1]),
+	({'assay': 'test', 'name': 'empty'}, [4]),
+]
+
+
+@pytest.fixture(params=['positions', 'tracks'])
+def either_fw(request):
+	return request.getfixturevalue('fw' if request.param == 'positions' else
+		'track_fw')
+
+
+@pytest.mark.parametrize('held, ids', HELD)
+def test_reader_tracks_records_and_stats(fw, held, ids):
+	full = FigWigReader(fw)
+	reader = FigWigReader(fw, tracks=held)
+	assert reader.tracks == [full.tracks[i] for i in ids]
+	numpy.testing.assert_array_equal(reader.stats, full.stats[ids])
+	assert reader.chrom_sizes == full.chrom_sizes
+	assert repr(reader).endswith("{} of 5 tracks, 3 chromosomes, position "
+		"order)".format(len(ids)))
+	assert '5 tracks' in repr(full) and ' of ' not in repr(full)
+	# The file's own records are not changed by holding a few of them.
+	assert [track['name'] for track in full.tracks] == [track['name'] for track
+		in TRACKS]
+
+
+@pytest.mark.parametrize('held, ids', HELD)
+def test_reader_tracks_read(either_fw, ref, held, ids):
+	full = FigWigReader(either_fw)
+	reader = FigWigReader(either_fw, tracks=held)
+	rng = numpy.random.default_rng(3)
+	chroms, starts = random_windows(rng, 40, 150)
+	y = reader.read(chroms, starts, 150, n_jobs=2)
+	assert y.shape == (40, len(ids), 150)
+	assert_identical(y, full.read(chroms, starts, 150, tracks=ids, n_jobs=2))
+	assert_identical(y, expected(ref, chroms, starts, 150, ids, y.dtype))
+	# The read of a single held track, by index and by name, is (n, width).
+	last = len(ids) - 1
+	one = full.read(chroms, starts, 150, tracks=ids[last])
+	assert one.ndim == 2
+	assert_identical(reader.read(chroms, starts, 150, tracks=last), one)
+	assert_identical(reader.read(chroms, starts, 150, tracks=full.tracks[ids[
+		last]]['name']), one)
+	assert_identical(read_figwig(reader, chroms, starts, 150), y)
+
+
+def test_reader_tracks_index_the_held_tracks(either_fw):
+	full = FigWigReader(either_fw)
+	reader = FigWigReader(either_fw, tracks=['empty', 'signal', 'atac_minus'])
+	chroms, starts = random_windows(numpy.random.default_rng(4), 25, 96)
+
+	def both(method, *args, mine, theirs, **kwargs):
+		got = getattr(reader, method)(*args, tracks=mine, **kwargs)
+		want = getattr(full, method)(*args, tracks=theirs, **kwargs)
+		return got, want
+
+	for mine, theirs in [([2, 0], [1, 4]), (['signal', 1], [2, 2]), (numpy.array(
+			[1, 2]), [2, 1]), (0, 4)]:
+		got, want = both('read', chroms, starts, 96, mine=mine, theirs=theirs)
+		assert_identical(got, want)
+
+	got, want = both('read', chroms, starts, 96, mine=[2, 1], theirs=[1, 2],
+		bins=8)
+	assert_identical(got, want)
+	got, want = both('read', chroms, starts, 96, mine=[2, 0, 1], theirs=[1, 4,
+		2], labels=[0, 0, 1], dtype=numpy.float64)
+	assert_identical(got, want)
+	got, want = both('read', chroms, starts, 96, mine=[2, 1], theirs=[1, 2],
+		sparse=True)
+	for a, b in zip(got[:4], want[:4]):
+		numpy.testing.assert_array_equal(a, b)
+	assert got.shape == want.shape
+
+	ends = starts + numpy.random.default_rng(5).integers(0, 400, len(starts))
+	got, want = both('sums', chroms, starts, ends, mine=[2, 1], theirs=[1, 2])
+	assert_identical(got, want)
+	got, want = both('sums', chroms, starts, ends, mine=[2, 1] * 12 + [0],
+		theirs=[1, 2] * 12 + [4], paired=True)
+	assert_identical(got, want)
+	got, want = both('tile_sums', mine=[2, 1], theirs=[1, 2], chroms='chr2')
+	assert_identical(got, want)
+
+
+def test_reader_tracks_none_reads_every_held_track(fw):
+	full = FigWigReader(fw)
+	reader = FigWigReader(fw, tracks=['signal', 'atac_plus'])
+	chroms, starts = random_windows(numpy.random.default_rng(6), 10, 64)
+	ends = starts + 300
+	assert_identical(reader.sums(chroms, starts, ends), full.sums(chroms, starts,
+		ends, tracks=[2, 0]))
+	assert_identical(reader.tile_sums(), full.tile_sums(tracks=[2, 0]))
+	assert_identical(reader.read(chroms, starts, 64, bins=64), full.read(chroms,
+		starts, 64, tracks=[2, 0], bins=64))
+
+
+def test_reader_tracks_read_entries(either_fw):
+	full = FigWigReader(either_fw)
+	reader = FigWigReader(either_fw, tracks=['negative', 'atac_plus'])
+	got = reader.read_entries(chroms=['chr2', 'chr1'])
+	want = full.read_entries(tracks=[3, 0], chroms=['chr2', 'chr1'])
+	# The track index of each entry is into the reader's own tracks.
+	numpy.testing.assert_array_equal(got.tracks, numpy.where(want.tracks == 3,
+		0, 1))
+	for a, b in [(got.chroms, want.chroms), (got.positions, want.positions), (
+			got.values, want.values)]:
+		numpy.testing.assert_array_equal(a, b)
+	one = reader.read_entries(tracks='atac_plus', chroms='chrM')
+	assert set(one.tracks.tolist()) == {1}
+
+
+def test_reader_tracks_channels_and_items(fw):
+	full = FigWigReader(fw)
+	reader = FigWigReader(fw, tracks={'assay': 'ATAC-seq'})
+	chroms, starts = random_windows(numpy.random.default_rng(8), 12, 50)
+	got = reader.read(chroms, starts, 50, channels='strand', items='assay')
+	assert got.shape == (12, 1, 2, 50)
+	assert_identical(got, full.read(chroms, starts, 50, tracks=[0, 1],
+		channels='strand', items='assay'))
+	ends = starts + 70
+	assert_identical(reader.sums(chroms, starts, ends, channels='strand',
+		items='assay'), full.sums(chroms, starts, ends, tracks=[0, 1],
+		channels='strand', items='assay'))
+
+
+def test_reader_tracks_select(fw):
+	reader = FigWigReader(fw, tracks=['negative', 'atac_minus', 'atac_plus'])
+	numpy.testing.assert_array_equal(reader.select(assay='ATAC-seq'), [1, 2])
+	numpy.testing.assert_array_equal(reader.select(strand='+'), [2])
+	assert reader.select(dtype='float32').shape == (0,)
+	with pytest.raises(ValueError, match="no track has an attribute 'cell'"):
+		reader.select(cell='K562')
+
+
+def test_reader_tracks_pickle(fw):
+	reader = FigWigReader(fw, tracks=['signal', 'atac_minus'])
+	copy = pickle.loads(pickle.dumps(reader))
+	assert copy.tracks == reader.tracks and repr(copy) == repr(reader)
+	assert_identical(copy.read('chr1', [10, 4000], 300), reader.read('chr1',
+		[10, 4000], 300))
+	assert_identical(copy.read('chr1', [10], 300, tracks='atac_minus'),
+		reader.read('chr1', [10], 300, tracks=1))
+
+
+def test_reader_tracks_raise(fw):
+	with pytest.raises(ValueError, match="'nothing' is not one of the file's"):
+		FigWigReader(fw, tracks=['signal', 'nothing'])
+	with pytest.raises(ValueError, match="track 5 is out of range"):
+		FigWigReader(fw, tracks=[5])
+	with pytest.raises(ValueError, match="at least one track"):
+		FigWigReader(fw, tracks=[])
+	with pytest.raises(ValueError, match="'signal' is named twice"):
+		FigWigReader(fw, tracks=['signal', 'atac_plus', 2])
+	with pytest.raises(ValueError, match="no track has the attributes"):
+		FigWigReader(fw, tracks={'assay': 'Hi-C'})
+	with pytest.raises(ValueError, match="no track has an attribute 'cell'"):
+		FigWigReader(fw, tracks={'cell': 'K562'})
+	with pytest.raises(TypeError, match="names or indices"):
+		FigWigReader(fw, tracks=[1.5])
+	with pytest.raises(TypeError, match="a list of them"):
+		FigWigReader(fw, tracks=1.5)
+
+	reader = FigWigReader(fw, tracks=['signal', 'atac_plus'])
+	with pytest.raises(ValueError, match="'atac_minus' is not one of the "
+			"reader's tracks"):
+		reader.read('chr1', [0], 10, tracks='atac_minus')
+	with pytest.raises(ValueError, match="track 2 is out of range; there are 2"):
+		reader.read('chr1', [0], 10, tracks=[2])
+	with pytest.raises(ValueError, match="track 2 is out of range"):
+		reader.sums('chr1', [0], [10], tracks=[0, 2])
+	with pytest.raises(ValueError, match="track 2 is out of range"):
+		reader.tile_sums(tracks=2)
+	with pytest.raises(ValueError, match="'empty' is not one of the reader's"):
+		reader.read_entries(tracks='empty')
+	with pytest.raises(ValueError, match="labels must hold one integer per "
+			"track read"):
+		reader.read('chr1', [0], 10, labels=[0, 0, 0])
+
+
+# `absent` decides what a window on a chromosome the file does not have
+# gives: a ValueError, as before, or zeros.
+
+
+ABSENT_CHROMS = numpy.array(['chr1', 'chrX', 'chr2', 'chrUn_1', 'chrX', 'chrM'])
+ABSENT_STARTS = numpy.array([10, 0, 900, 50, 400, 3])
+
+
+def test_read_absent_raises_by_default(fw):
+	reader = FigWigReader(fw)
+	for kwargs in [{}, {'absent': 'raise'}]:
+		with pytest.raises(ValueError, match="'chrUn_1' is not one of the file's "
+				"chromosomes"):
+			reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, **kwargs)
+	with pytest.raises(ValueError, match="absent must be 'raise' or 'zero', not "
+			"'nan'"):
+		reader.read('chr1', [0], 10, absent='nan')
+	with pytest.raises(ValueError, match="absent must be"):
+		reader.read('chr1', [0], 10, absent=None)
+
+
+@pytest.mark.parametrize('kwargs', [{}, {'tracks': 'signal'}, {'tracks': [3,
+	0], 'dtype': numpy.int32}, {'bins': 20}, {'labels': [0, 1, 0, 1, -1]},
+	{'channels': 'strand', 'items': 'assay', 'tracks': [0, 1]}])
+def test_read_absent_zero(either_fw, ref, kwargs):
+	reader = FigWigReader(either_fw)
+	held = numpy.isin(ABSENT_CHROMS, list(CHROM_SIZES))
+	got = reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, absent='zero', **kwargs)
+	alone = reader.read(ABSENT_CHROMS[held], ABSENT_STARTS[held], 60, **kwargs)
+	assert got.shape == (len(ABSENT_CHROMS),) + alone.shape[1:]
+	assert got.dtype == alone.dtype
+	assert_identical(got[held], alone)
+	assert (got[~held] == 0).all()
+	# Windows on chromosomes the file has are unchanged by the option.
+	assert_identical(reader.read(ABSENT_CHROMS[held], ABSENT_STARTS[held], 60,
+		absent='zero', **kwargs), alone)
+	if not kwargs:
+		assert_identical(got[held], expected(ref, ABSENT_CHROMS[held],
+			ABSENT_STARTS[held], 60, list(range(5)), got.dtype))
+
+
+def test_read_absent_zero_every_window(fw):
+	reader = FigWigReader(fw)
+	got = reader.read(['chrX', 'chrY'], [0, 100], 40, absent='zero')
+	assert got.shape == (2, 5, 40) and got.dtype == numpy.float32
+	assert (got == 0).all()
+	got = reader.read('chrX', [0, 7, 9], 40, tracks='atac_plus', absent='zero')
+	assert got.shape == (3, 40) and got.dtype == numpy.uint16 and (got == 0).all()
+	got = reader.read('chrX', [0], 40, sparse=True, absent='zero')
+	assert len(got.rows) == 0 and got.shape == (1, 5, 40)
+
+
+def test_read_absent_zero_sparse(either_fw):
+	reader = FigWigReader(either_fw)
+	held = numpy.isin(ABSENT_CHROMS, list(CHROM_SIZES))
+	got = reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, sparse=True,
+		absent='zero')
+	alone = reader.read(ABSENT_CHROMS[held], ABSENT_STARTS[held], 60,
+		sparse=True)
+	assert got.shape == (len(ABSENT_CHROMS), 5, 60)
+	numpy.testing.assert_array_equal(got.rows, numpy.flatnonzero(held)[
+		alone.rows])
+	for a, b in zip(got[1:4], alone[1:4]):
+		numpy.testing.assert_array_equal(a, b)
+	assert set(got.rows.tolist()) <= set(numpy.flatnonzero(held).tolist())
+	assert len(got.rows) > 0
+
+
+def test_read_absent_zero_out(fw):
+	reader = FigWigReader(fw)
+	held = numpy.isin(ABSENT_CHROMS, list(CHROM_SIZES))
+	out = numpy.full((len(ABSENT_CHROMS), 5, 60), 7.0, dtype=numpy.float32)
+	got = reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, out=out, absent='zero')
+	assert got is out
+	assert (out[~held] == 0).all()
+	assert_identical(out[held], reader.read(ABSENT_CHROMS[held], ABSENT_STARTS[
+		held], 60))
+	with pytest.raises(ValueError, match="out must be float32 of shape "):
+		reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, out=numpy.zeros((6, 5, 59),
+			dtype=numpy.float32), absent='zero')
+	with pytest.raises(ValueError, match="out must be float32 of shape "):
+		reader.read(ABSENT_CHROMS, ABSENT_STARTS, 60, out=numpy.zeros((6, 5, 60)),
+			absent='zero')
+
+
+def test_read_absent_zero_held_tracks_and_read_figwig(fw):
+	reader = FigWigReader(fw, tracks=['signal', 'atac_plus'])
+	held = numpy.isin(ABSENT_CHROMS, list(CHROM_SIZES))
+	got = read_figwig(reader, ABSENT_CHROMS, ABSENT_STARTS, 60, absent='zero')
+	assert got.shape == (6, 2, 60)
+	assert_identical(got[held], FigWigReader(fw).read(ABSENT_CHROMS[held],
+		ABSENT_STARTS[held], 60, tracks=[2, 0]))
+	assert (got[~held] == 0).all()
+	assert_identical(read_figwig(fw, ABSENT_CHROMS, ABSENT_STARTS, 60,
+		tracks=[2, 0], absent='zero'), got)
+	with pytest.raises(ValueError, match="'chrX' is not one of the file's"):
+		read_figwig(fw, ['chrX'], [0], 10)
