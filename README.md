@@ -4,7 +4,7 @@
 
 [[docs](https://figwig.readthedocs.io/en/latest/index.html)][[release notes](https://figwig.readthedocs.io/en/latest/whats_new.html)]
 
-The figwig is a universal data format for genomics data, allowing you to store any
+The figwig is a universal format for genomics data, allowing you to store any
 number of signal tracks, single-cell experiments, Hi-C data (and scHi-C!), 
 fiber-seq and other single-molecule experiments at basepair resolution in a consistent
 and optimized file format. The figwig has been optimized for both reading and writing,
