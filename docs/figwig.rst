@@ -75,8 +75,12 @@ come in any order and overlap, as with :class:`~figwig.BigWigReader`.
 channels take, or one name or index for an output of shape ``(n, width)``.
 Every chromosome must be one of the file's: a figwig file holds every
 chromosome it was written with, so an unknown name is an error rather than a
-warning. A base that was never written is 0, and a base past the end of its
-chromosome is NaN in a float output and 0 in an integer one.
+warning. Loci from another build of the genome, such as a peak file with
+contigs the file was not written with, can be read with ``absent="zero"``,
+which makes each window on such a chromosome 0 throughout, or gives it no
+entries with ``sparse=True``. A base that was never written is 0, and a base
+past the end of its chromosome is NaN in a float output and 0 in an integer
+one.
 
 The output's dtype is the tracks' own when they share one, and otherwise
 the narrowest type that holds every one of them exactly: float32 for a
@@ -191,6 +195,33 @@ and ``max``, which a count model normalizes by:
 
     print(fw.stats["sum"][fw.select(biosample="K562", assay="ATAC-seq")])
     # [22410840. 22410840.]
+
+A reader of a few tracks
+------------------------
+
+.. code-block:: python
+
+    atac = FigWigReader("k562.fw", tracks={"assay": "ATAC-seq"})
+    print([track["name"] for track in atac.tracks])
+    # ['atac.+', 'atac.-', 'atac_cuts']
+    y = atac.read("chr1", [1_000_000], width=2114)
+    print(y.shape)
+    # (1, 3, 2114)
+    y = atac.read("chr1", [1_000_000], width=2114, tracks=[1, 0])
+    print([atac.tracks[i]["name"] for i in [1, 0]], y.shape)
+    # ['atac.-', 'atac.+'] (1, 2, 2114)
+
+    stranded = FigWigReader("k562.fw", tracks=["procap.+", "procap.-"])
+
+``FigWigReader(path, tracks=...)`` opens a reader that holds some of the
+file's tracks, named by name or index in the order to read them, or chosen
+by a dict of attributes, as ``select`` takes them, in the file's order. The
+reader then acts as if the file held only those: ``tracks``, ``stats`` and
+``select`` list them alone, the ``tracks`` argument of ``read``, ``sums``,
+``tile_sums`` and ``read_entries`` indexes them, and a read without
+``tracks`` reads every one of them. That is the reader to hand to code that
+reads every track of whatever reader it is given, such as a data loader. A
+reader holds each track once, and pickles with its tracks.
 
 Sparse reads, sums per label and sums per bin
 ---------------------------------------------

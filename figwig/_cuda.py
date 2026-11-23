@@ -85,7 +85,7 @@ def _density(reader, ids):
 	the file's statistics."""
 
 	bases = float(reader._n_tiles) * reader.tile * max(len(ids), 1)
-	return float(reader.stats['nonzero'][ids].sum()) / bases
+	return float(reader._file_stats['nonzero'][ids].sum()) / bases
 
 
 def _copy_in(cupy, host, out, stream):

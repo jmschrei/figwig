@@ -9,6 +9,13 @@ Release History
 Unreleased
 ==========
 
+Reading
+-------
+
+	- ``FigWigReader(path, tracks=...)`` opens a reader that holds some of a file's tracks, by name, by index, or as a dict of attributes that ``select`` matches. The reader acts as if the file held only those tracks: ``tracks``, ``stats`` and ``select`` list them, the ``tracks`` argument of ``read``, ``sums``, ``tile_sums`` and ``read_entries`` indexes them, and a read without ``tracks`` reads them all, in the order given. Code that reads every track of the reader it is handed, such as a data loader or a package that takes a list of signal files, could only be given the whole file, or a reader and a list of tracks to carry beside it. Reads of a reader of the whole file are unchanged, and take the same time.
+
+	- ``FigWigReader.read`` and ``read_figwig`` take ``absent="zero"``, which reads a window on a chromosome the file does not have as 0 throughout, or as no entries with ``sparse=True``, where such a window raised a ``ValueError``, as it still does by default. Loci from a peak file with contigs of another build had to be filtered against ``chrom_sizes`` first, and a caller that wanted a bigWig's behaviour, zeros for those windows, had to read the rest and put the rows back in place itself.
+
 Tests
 -----
 

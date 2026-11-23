@@ -82,7 +82,8 @@ writes nothing; writers stay usable.
 | `x.bam aligns to a chr1 of 249,250,621 bases, but the sizes give it 248,956,422: the reads and the sizes must be on one assembly`, `none of the chromosomes of x.bam is in the sizes` (`bam2fw` refuses; `figwig bam2bw: warning: ...` goes on, leaving the reads outside the sizes out) | `-s` is another assembly's sizes (hg19 reads, hg38 sizes) or another naming's → the assembly the BAM was aligned to |
 | `the dense output would take ... GiB` | → `sparse=True`, `labels=`, fewer windows or `out=` |
 | `a sum lies outside what ... holds`, `has values from ... to ..., which uint8 does not hold`, `pass dtype= to read as another type` | `dtype=` or `out=` too narrow or of another type |
-| `is not one of the file's chromosomes, 'chr1', ...` | the file holds only the chromosomes it was written with |
+| `is not one of the file's chromosomes, 'chr1', ...` | the file holds only the chromosomes it was written with → `read(..., absent="zero")` reads such windows as 0 |
+| `is not one of the reader's tracks`, `track 2 is out of range; there are 2 tracks` | a reader opened with `tracks=` indexes only the tracks it holds; `FigWigReader(path)` for the others |
 | `no track has an attribute` | `select` with a key no track has; the message names the keys |
 | `nan must be 'propagate', 'skip' or 'count'`, `nan= applies to sums: give bins too` | |
 | `ends must hold one end per start`, `an interval's end is before its start`, `paired=True needs one track per interval` | `sums` arguments |
